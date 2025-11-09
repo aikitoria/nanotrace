@@ -571,7 +571,7 @@ export class ZoneVisualizer {
                 } else {
                     this.camera.xZoomMultiplier /= zoomFactor;
                 }
-                this.camera.xZoomMultiplier = Math.max(0.001, Math.min(1000000, this.camera.xZoomMultiplier));
+                this.camera.xZoomMultiplier = Math.max(0.001, Math.min(20000, this.camera.xZoomMultiplier));
 
                 const newZoomX = this.camera.zoomX;
                 this.camera.x += ndcX * aspect * (1/newZoomX - 1/oldZoomX);
@@ -795,16 +795,17 @@ export class ZoneVisualizer {
             this.interactionManager.updateSelection();
         }
 
-        // Prepare uniform data for shaders (96 bytes total)
+        // Prepare uniform data for shaders (112 bytes total)
         const aspect = this.canvas.width / this.canvas.height;
         const viewProjMatrix = this.camera.getViewProjectionMatrix(aspect);
 
-        const uniformData = new ArrayBuffer(96);
+        const uniformData = new ArrayBuffer(112);
         const floatView = new Float32Array(uniformData);
         const intView = new Int32Array(uniformData);
 
         // Uniform layout: mat4x4 viewProj, int hoveredId, float zoomX, float zoomY,
-        // float selectionStart, float selectionEnd, int hasSelection, int hoveredBlockId
+        // float selectionStart, float selectionEnd, int hasSelection, int hoveredBlockId,
+        // float camera_x_high, float camera_x_low, float camera_y, float scale_x, float scale_y
         floatView.set(viewProjMatrix, 0);  // Offset 0-15: 4x4 matrix
         intView[16] = this.interactionManager!.getHoveredZoneId();
         floatView[17] = this.camera.zoomX;
@@ -816,6 +817,18 @@ export class ZoneVisualizer {
         floatView[20] = selectionActive ? selectionBounds.end : 0.0;
         intView[21] = selectionActive ? 1 : 0;
         intView[22] = this.interactionManager!.getHoveredBlockId();
+
+        // Double-single camera position for high-precision zone rendering
+        const [camera_x_high, camera_x_low] = this.camera.getCameraXDoubleSingle();
+        floatView[23] = camera_x_high;
+        floatView[24] = camera_x_low;
+        floatView[25] = this.camera.y;
+
+        // Scale factors for manual transformation in shader
+        const scale_x = this.camera.zoomX / aspect;
+        const scale_y = this.camera.zoomY;
+        floatView[26] = scale_x;
+        floatView[27] = scale_y;
 
         this.device.queue.writeBuffer(this.gpuResources.uniformBuffer, 0, uniformData);
 

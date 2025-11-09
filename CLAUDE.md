@@ -87,6 +87,10 @@ The binary `.nanotrace` format is documented in `docs/nanotrace.md`. Key feature
 
 #### Core Rendering
 - WebGPU instanced rendering using storage buffers
+- **High-precision rendering**: Emulated double-precision (float64) for X-axis coordinates to prevent precision loss at extreme zoom levels (down to 1ns)
+  - Uses "double-single" representation: each coordinate split into two float32 values (high + low bits)
+  - Critical transformations performed in emulated f64, then continues with f32 arithmetic
+  - Applies to zones and blocks to maintain pixel-perfect alignment at all zoom levels
 - Adaptive outlines (1px width using `fwidth()`, disabled below 0.5x zoom)
 - Block borders with hover highlighting
 - Zone rendering with format descriptor-based colors
@@ -149,6 +153,8 @@ The binary `.nanotrace` format is documented in `docs/nanotrace.md`. Key feature
 - Base zoom with X/Y multiplier system
 - Screen-to-world coordinate conversion
 - Auto-zoom calculation
+- `splitDouble()`: Static utility to split f64 values into f32 high/low pairs for GPU precision
+- `getCameraXDoubleSingle()`: Returns camera X position as double-single pair for shader use
 
 **`src/utils/file-loader.ts`** (trace parsing)
 - `parseTraceFile()`: Binary parser for .nanotrace format
@@ -159,7 +165,13 @@ The binary `.nanotrace` format is documented in `docs/nanotrace.md`. Key feature
 
 **`src/renderers/gpu-renderer.ts`** (WebGPU rendering)
 - 6 WGSL shaders (zones, lanes, blocks, borders, background, selection)
-- `createGPUBuffers()`: GPU storage buffer creation with memory tracking
+- **Shared WGSL constants**: `WGSL_FULL_UNIFORMS` and `WGSL_DOUBLE_PRECISION_FUNCTIONS` for code reuse across shaders
+- **Double-precision implementation**:
+  - Emulated f64 arithmetic functions (`ds_add`, `ds_sub`) using double-single representation
+  - Zone storage: 12 floats per zone (3 vec4s) - X stored as high/low pair
+  - Block storage: 8 floats per block (2 vec4s) - X stored as high/low pair
+  - Uniform buffer includes camera position as double-single pair and separate scale factors
+- `createGPUBuffers()`: GPU storage buffer creation with memory tracking and double-precision encoding
 - `createPipelines()`: Creates render pipelines grouped by pass type
   - Returns structured `GPUResources` with `passes` (RenderPass objects) and `buffers`
   - Each RenderPass contains pipeline + bindGroup pair
@@ -227,6 +239,31 @@ The codebase follows a modular architecture with clear separation of concerns:
 - Uses hierarchical binary search for O(log n) hit detection
 - Manages hover and selection state separately from rendering
 - Provides API: `findZoneAtPosition()`, `updateHover()`, `updateSelection()`
+
+#### High-Precision Rendering Implementation
+
+**Problem**: Float32 (f32) in GPU shaders has ~7 decimal digits of precision. At extreme zoom levels (nanosecond-level detail), rendering large time coordinates (e.g., 500ms = 0.5) causes precision loss:
+- Large coordinate: `0.500000012` (zone at 500ms + 12ns)
+- Camera offset: `-0.5` (to center view)
+- After subtraction in f32: precision lost, zones "jump" between quantized values
+
+**Solution**: Emulated double-precision using "double-single" representation:
+1. **CPU side** (`camera.ts`):
+   - `splitDouble(value)`: Splits f64 → (high: f32, low: f32) where `value ≈ high + low`
+   - Applied to zone/block X coordinates and camera position
+
+2. **GPU side** (`gpu-renderer.ts` shaders):
+   - `ds_add(ah, al, bh, bl)`: High-precision addition of (ah+al) + (bh+bl)
+   - `ds_sub(ah, al, bh, bl)`: High-precision subtraction of (ah+al) - (bh+bl)
+   - Coordinate transformation: `viewX = ds_add(worldX_high, worldX_low, camera_x_high, camera_x_low)`
+   - Then scale: `ndcX = viewX * scale_x` (now in f32-safe range)
+
+3. **Storage buffers**:
+   - Zones: 12 floats (3×vec4) with X as (high, low) pair
+   - Blocks: 8 floats (2×vec4) with X as (high, low) pair
+   - Uniform buffer: 112 bytes including camera double-single and scale factors
+
+**Result**: Zones and blocks remain pixel-perfect stable at all zoom levels, even when zoomed to individual nanoseconds in traces spanning seconds.
 
 #### Key Constants (in `src/utils/types.ts`)
 ```typescript

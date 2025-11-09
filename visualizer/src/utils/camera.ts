@@ -98,4 +98,34 @@ export class Camera {
             this.x * scaleX, this.y * scaleY, 0, 1     // Column 3: Translation
         ]);
     }
+
+    /**
+     * Splits a double-precision (f64) value into two single-precision (f32) components.
+     *
+     * Uses the "double-single" representation for emulated double precision in shaders:
+     * - high: The f32 representation of the value (captures most significant bits)
+     * - low: The residual difference (value - high), capturing remaining precision
+     *
+     * Reconstruction: value ≈ high + low (with f64 precision)
+     *
+     * @param value - The f64 number to split
+     * @returns [high, low] - Two f32 values that together represent the original f64
+     */
+    static splitDouble(value: number): [number, number] {
+        const high = Math.fround(value);       // Convert to f32 (loses precision)
+        const low = Math.fround(value - high); // Capture lost precision as f32
+        return [high, low];
+    }
+
+    /**
+     * Returns camera X position as double-single pair for high-precision GPU calculations.
+     *
+     * The camera position needs double precision in shaders to avoid floating-point
+     * precision loss when transforming world coordinates at extreme zoom levels.
+     *
+     * @returns [x_high, x_low] - Camera X position split into two f32 components
+     */
+    getCameraXDoubleSingle(): [number, number] {
+        return Camera.splitDouble(this.x);
+    }
 }

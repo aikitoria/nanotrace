@@ -19,6 +19,7 @@
  */
 
 import { Zone, Block, BlockLane, Lane } from '../utils/types.js';
+import { Camera } from '../utils/camera.js';
 
 /** Single render pass with pipeline and bind group. */
 export interface RenderPass {
@@ -48,11 +49,10 @@ export interface GPUResources {
 }
 
 /**
- * WGSL shader for zone rendering with hover and selection highlighting.
- * Uses instanced rendering with per-zone data from storage buffer.
- * Adaptive 1px outlines using fwidth() (disabled below 0.5x Y-zoom).
+ * Shared WGSL code: Full uniform structure with double-precision camera support.
+ * Used by shaders that need high-precision transformations (zones, blocks).
  */
-const ZONE_SHADER = `
+const WGSL_FULL_UNIFORMS = `
 struct Uniforms {
     viewProj: mat4x4<f32>,
     hoveredId: i32,
@@ -61,13 +61,46 @@ struct Uniforms {
     selectionStart: f32,
     selectionEnd: f32,
     hasSelection: i32,
+    hoveredBlockId: i32,
+    camera_x_high: f32,
+    camera_x_low: f32,
+    camera_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+}
+`;
+
+/**
+ * Shared WGSL code: Emulated double-precision arithmetic functions.
+ * Implements "double-single" representation for high-precision calculations.
+ */
+const WGSL_DOUBLE_PRECISION_FUNCTIONS = `
+// Emulated double-precision subtraction using double-single representation
+// Computes (ah + al) - (bh + bl) with improved precision
+fn ds_sub(ah: f32, al: f32, bh: f32, bl: f32) -> f32 {
+    let sh = ah - bh;          // High-order difference
+    let th = ah - sh;          // Recover precision loss
+    let tl = th - bh + al - bl; // Low-order correction
+    return sh + tl;            // Reconstruct with better precision
 }
 
-struct ZoneInstance {
-    position: vec2<f32>,
-    size: f32,
-    id: f32,
+// Emulated double-precision addition using double-single representation
+// Computes (ah + al) + (bh + bl) with improved precision
+fn ds_add(ah: f32, al: f32, bh: f32, bl: f32) -> f32 {
+    let sh = ah + bh;          // High-order sum
+    let th = sh - ah;          // Recover precision loss
+    let tl = bh - th + al + bl; // Low-order correction
+    return sh + tl;            // Reconstruct with better precision
 }
+`;
+
+/**
+ * WGSL shader for zone rendering with hover and selection highlighting.
+ * Uses instanced rendering with per-zone data from storage buffer.
+ * Adaptive 1px outlines using fwidth() (disabled below 0.5x Y-zoom).
+ */
+const ZONE_SHADER = `
+${WGSL_FULL_UNIFORMS}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> zones: array<vec4<f32>>;
@@ -81,19 +114,25 @@ struct VertexOutput {
     @location(4) @interpolate(flat) isSelected: f32,
 }
 
+${WGSL_DOUBLE_PRECISION_FUNCTIONS}
+
 @vertex
 fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    let zone0 = zones[instanceIndex * 2u];
-    let zone1 = zones[instanceIndex * 2u + 1u];
+    // Read zone data from 3 vec4s (12 floats, aligned)
+    let zone0 = zones[instanceIndex * 3u];      // [x_high, x_low, y, width]
+    let zone1 = zones[instanceIndex * 3u + 1u]; // [height, r, g, b]
+    let zone2 = zones[instanceIndex * 3u + 2u]; // [id, pad, pad, pad]
 
-    let pos = zone0.xy;
-    let width = zone0.z;
-    let height = zone0.w;
-    let color = zone1.rgb;
-    let id = i32(zone1.w);
+    let x_high = zone0.x;
+    let x_low = zone0.y;
+    let y = zone0.z;
+    let width = zone0.w;
+    let height = zone1.x;
+    let color = zone1.yzw;
+    let id = i32(zone2.x);
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
@@ -105,18 +144,35 @@ fn vertexMain(
     );
 
     let vertex = vertices[vertexIndex];
-    let size = vec2<f32>(width, height);
-    let worldPos = pos + vertex * size * 0.5;
+
+    // Step 1: Calculate world corner position from center in double-precision
+    // Add small vertex offset to low component (vertex offset is typically < 0.001)
+    let cornerOffsetX = vertex.x * width * 0.5;
+    let worldCornerX_high = x_high;
+    let worldCornerX_low = x_low + cornerOffsetX;
+
+    // Step 2: Apply camera transformation using double-precision
+    // This is where precision loss would occur in regular f32
+    let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+
+    // Y doesn't need double precision (small range)
+    let worldCornerY = y + vertex.y * height * 0.5;
+    let viewY = worldCornerY + uniforms.camera_y;
+
+    // Step 3: Apply scale to get NDC
+    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = uniforms.viewProj * vec4<f32>(worldPos, 0.0, 1.0);
+    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     output.zoneCoord = vertex;
     output.isHovered = select(0.0, 1.0, id == uniforms.hoveredId);
     output.color = color;
     output.zoneSize = vec2<f32>(width, height);
 
-    let zoneStart = pos.x - width * 0.5;
-    let zoneEnd = pos.x + width * 0.5;
+    // Selection calculation using high-precision position
+    let zoneCenterX = ds_add(x_high, x_low, 0.0, 0.0); // Reconstruct absolute position
+    let zoneStart = zoneCenterX - width * 0.5;
+    let zoneEnd = zoneCenterX + width * 0.5;
     let isFullyInside = uniforms.hasSelection != 0 &&
                        zoneStart >= uniforms.selectionStart &&
                        zoneEnd <= uniforms.selectionEnd;
@@ -129,9 +185,14 @@ fn vertexMain(
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
     let baseFillColor = input.color * 0.55;
     let hoverFillColor = vec3<f32>(0.22, 0.74, 0.97) * 0.95;
-    var fillColor = mix(baseFillColor, hoverFillColor, input.isHovered);
 
-    fillColor = mix(fillColor, fillColor * 1.55, input.isSelected);
+    // If both hovered and selected, use hover color (don't stack brightness)
+    var fillColor: vec3<f32>;
+    if (input.isHovered > 0.5) {
+        fillColor = hoverFillColor;
+    } else {
+        fillColor = mix(baseFillColor, baseFillColor * 1.55, input.isSelected);
+    }
 
     if (uniforms.zoomY < 0.5) {
         return vec4<f32>(fillColor, 1.0);
@@ -153,9 +214,13 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
     let baseOutlineColor = input.color * 0.98;
     let hoverOutlineColor = vec3<f32>(0.38, 0.82, 1.0) * 1.15;
 
-    var outlineColor = mix(baseOutlineColor, hoverOutlineColor, input.isHovered);
-
-    outlineColor = mix(outlineColor, outlineColor * 1.55, input.isSelected);
+    // Same logic for outlines - don't stack hover and selection
+    var outlineColor: vec3<f32>;
+    if (input.isHovered > 0.5) {
+        outlineColor = hoverOutlineColor;
+    } else {
+        outlineColor = mix(baseOutlineColor, baseOutlineColor * 1.55, input.isSelected);
+    }
 
     let color = select(fillColor, outlineColor, isEdge);
 
@@ -254,9 +319,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 `;
 
 const BLOCK_BG_SHADER = `
-struct Uniforms {
-    viewProj: mat4x4<f32>,
-}
+${WGSL_FULL_UNIFORMS}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> blocks: array<vec4<f32>>;
@@ -265,16 +328,22 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
 }
 
+${WGSL_DOUBLE_PRECISION_FUNCTIONS}
+
 @vertex
 fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    let block = blocks[instanceIndex];
-    let x = block.x;
-    let y = block.y;
-    let width = block.z;
-    let height = block.w;
+    // Read block data from 2 vec4s (8 floats, aligned)
+    let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, width]
+    let block1 = blocks[instanceIndex * 2u + 1u]; // [height, pad, pad, pad]
+
+    let startX_high = block0.x;
+    let startX_low = block0.y;
+    let y = block0.z;
+    let width = block0.w;
+    let height = block1.x;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -286,10 +355,24 @@ fn vertexMain(
     );
 
     let vertex = vertices[vertexIndex];
-    let worldPos = vec2<f32>(x + vertex.x * width, y + vertex.y * height);
+
+    // Calculate corner position with double-precision for X
+    let cornerOffsetX = vertex.x * width;
+    let worldCornerX_high = startX_high;
+    let worldCornerX_low = startX_low + cornerOffsetX;
+
+    // Apply camera transformation using double-precision
+    let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+
+    // Y doesn't need double precision
+    let worldCornerY = y + vertex.y * height;
+    let viewY = worldCornerY + uniforms.camera_y;
+
+    // Apply scale to get NDC
+    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = uniforms.viewProj * vec4<f32>(worldPos, 0.0, 1.0);
+    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     return output;
 }
 
@@ -300,16 +383,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 `;
 
 const BLOCK_BORDER_SHADER = `
-struct Uniforms {
-    viewProj: mat4x4<f32>,
-    hoveredId: i32,
-    zoomX: f32,
-    zoomY: f32,
-    selectionStart: f32,
-    selectionEnd: f32,
-    hasSelection: i32,
-    hoveredBlockId: i32,
-}
+${WGSL_FULL_UNIFORMS}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> blocks: array<vec4<f32>>;
@@ -321,16 +395,22 @@ struct VertexOutput {
     @location(2) @interpolate(flat) isSelected: f32,
 }
 
+${WGSL_DOUBLE_PRECISION_FUNCTIONS}
+
 @vertex
 fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    let block = blocks[instanceIndex];
-    let x = block.x;
-    let y = block.y;
-    let width = block.z;
-    let height = block.w;
+    // Read block data from 2 vec4s (8 floats, aligned)
+    let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, width]
+    let block1 = blocks[instanceIndex * 2u + 1u]; // [height, pad, pad, pad]
+
+    let startX_high = block0.x;
+    let startX_low = block0.y;
+    let y = block0.z;
+    let width = block0.w;
+    let height = block1.x;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
@@ -342,18 +422,37 @@ fn vertexMain(
     );
 
     let vertex = vertices[vertexIndex];
-    let centerX = x + width * 0.5;
-    let centerY = y + height * 0.5;
-    let worldPos = vec2<f32>(centerX, centerY) + vertex * vec2<f32>(width, height) * 0.5;
 
-    let blockStart = x;
-    let blockEnd = x + width;
+    // Calculate center position with double-precision for X
+    let centerOffsetX = width * 0.5;
+    let centerX_high = startX_high;
+    let centerX_low = startX_low + centerOffsetX;
+
+    // Calculate corner offset from center
+    let cornerOffsetX = vertex.x * width * 0.5;
+    let worldCornerX_high = centerX_high;
+    let worldCornerX_low = centerX_low + cornerOffsetX;
+
+    // Apply camera transformation using double-precision
+    let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+
+    // Y doesn't need double precision
+    let centerY = y + height * 0.5;
+    let worldCornerY = centerY + vertex.y * height * 0.5;
+    let viewY = worldCornerY + uniforms.camera_y;
+
+    // Apply scale to get NDC
+    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
+
+    // Selection calculation using high-precision
+    let blockStart = ds_add(startX_high, startX_low, 0.0, 0.0);
+    let blockEnd = blockStart + width;
     let isFullyInside = uniforms.hasSelection != 0 &&
                        blockStart >= uniforms.selectionStart &&
                        blockEnd <= uniforms.selectionEnd;
 
     var output: VertexOutput;
-    output.position = uniforms.viewProj * vec4<f32>(worldPos, 0.0, 1.0);
+    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     output.blockCoord = vertex;
     output.isHovered = select(0.0, 1.0, i32(instanceIndex) == uniforms.hoveredBlockId);
     output.isSelected = select(0.0, 1.0, isFullyInside);
@@ -590,10 +689,17 @@ function createBackgroundPipeline(
  * Uploads trace data to GPU storage buffers for instanced rendering.
  *
  * Creates 4 storage buffers:
- * - positionBuffer: Zone data (8 floats per zone: x, y, width, height, r, g, b, id)
+ * - positionBuffer: Zone data (12 floats per zone, aligned to 3 vec4s):
+ *   vec4 #0: [x_high, x_low, y, width]
+ *   vec4 #1: [height, r, g, b]
+ *   vec4 #2: [id, pad, pad, pad]
+ *   Zone X uses double-single precision to avoid Float32 precision loss at extreme zoom
  * - laneBuffer: Lane geometry (4 floats per lane: y, height, width, padding)
  * - blockLaneBuffer: Block lane geometry (4 floats per block lane)
- * - blockBuffer: Block geometry (4 floats per block: x, y, width, height)
+ * - blockBuffer: Block geometry (8 floats per block, aligned to 2 vec4s):
+ *   vec4 #0: [startX_high, startX_low, y, width]
+ *   vec4 #1: [height, pad, pad, pad]
+ *   Block X uses double-single precision to avoid Float32 precision loss at extreme zoom
  *
  * Uses mappedAtCreation for efficient one-time upload (no COPY_DST needed).
  * Buffers are read-only after creation, enabling optimal GPU caching.
@@ -606,17 +712,25 @@ export function createGPUBuffers(
     blockLanes: BlockLane[],
     lanes: Lane[]
 ): { positionBuffer: GPUBuffer; laneBuffer: GPUBuffer; blockLaneBuffer: GPUBuffer; blockBuffer: GPUBuffer; gpuMemoryUsage: number } {
-    const positions = new Float32Array(zones.length * 8);
+    const positions = new Float32Array(zones.length * 12);
     for (let i = 0; i < zones.length; i++) {
         const zone = zones[i];
-        positions[i * 8 + 0] = zone.x;
-        positions[i * 8 + 1] = zone.y;
-        positions[i * 8 + 2] = zone.width;
-        positions[i * 8 + 3] = zone.height;
-        positions[i * 8 + 4] = zone.r;
-        positions[i * 8 + 5] = zone.g;
-        positions[i * 8 + 6] = zone.b;
-        positions[i * 8 + 7] = zone.id;
+        const [x_high, x_low] = Camera.splitDouble(zone.x);
+        // vec4 #0: [x_high, x_low, y, width]
+        positions[i * 12 + 0] = x_high;
+        positions[i * 12 + 1] = x_low;
+        positions[i * 12 + 2] = zone.y;
+        positions[i * 12 + 3] = zone.width;
+        // vec4 #1: [height, r, g, b]
+        positions[i * 12 + 4] = zone.height;
+        positions[i * 12 + 5] = zone.r;
+        positions[i * 12 + 6] = zone.g;
+        positions[i * 12 + 7] = zone.b;
+        // vec4 #2: [id, pad, pad, pad]
+        positions[i * 12 + 8] = zone.id;
+        positions[i * 12 + 9] = 0;
+        positions[i * 12 + 10] = 0;
+        positions[i * 12 + 11] = 0;
     }
 
     const positionBuffer = device.createBuffer({
@@ -659,12 +773,19 @@ export function createGPUBuffers(
     new Float32Array(blockLaneBuffer.getMappedRange()).set(blockLaneData);
     blockLaneBuffer.unmap();
 
-    const blockData = new Float32Array(blocks.length * 4);
+    const blockData = new Float32Array(blocks.length * 8);
     for (let i = 0; i < blocks.length; i++) {
-        blockData[i * 4 + 0] = blocks[i].startX;
-        blockData[i * 4 + 1] = blocks[i].y;
-        blockData[i * 4 + 2] = blocks[i].width;
-        blockData[i * 4 + 3] = blocks[i].height;
+        const [startX_high, startX_low] = Camera.splitDouble(blocks[i].startX);
+        // vec4 #0: [startX_high, startX_low, y, width]
+        blockData[i * 8 + 0] = startX_high;
+        blockData[i * 8 + 1] = startX_low;
+        blockData[i * 8 + 2] = blocks[i].y;
+        blockData[i * 8 + 3] = blocks[i].width;
+        // vec4 #1: [height, pad, pad, pad]
+        blockData[i * 8 + 4] = blocks[i].height;
+        blockData[i * 8 + 5] = 0;
+        blockData[i * 8 + 6] = 0;
+        blockData[i * 8 + 7] = 0;
     }
 
     const blockBuffer = device.createBuffer({
@@ -704,7 +825,7 @@ export function createPipelines(
     blockLaneBuffer: GPUBuffer,
     blockBuffer: GPUBuffer
 ): GPUResources {
-    const uniformBuffer = createUniformBuffer(device, 64 + 32);
+    const uniformBuffer = createUniformBuffer(device, 112);  // 64 (mat4x4) + 32 (7 ints/floats) + 20 (5 floats for double-single camera + scales)
     const backgroundUniformBuffer = createUniformBuffer(device, 64 + 16);
 
     return {
