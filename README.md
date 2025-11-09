@@ -2,6 +2,24 @@
 
 Nanosecond-precision tracing for CUDA kernels with GPU-accelerated visualization.
 
+## Introduction
+
+Have you ever looked at nsys and wished you could zoom in much, much further?
+
+![NSight Systems view](docs/img0.png)
+
+Now you can! <sub>*|*Assuming you wrote that kernel*</sub>
+
+![Zoomed in trace view](docs/img1.png)
+
+Nanotrace reveals what your warp specialized and pipelined kernels are actually doing over time.
+
+![Warp specialized kernel view](docs/img2.png)
+
+Enormous kernel traces with 10 million+ zones can be viewed without any issues.
+
+![Large kernel view](docs/img3.png)
+
 ## Overview
 
 Nanotrace consists of a CUDA library for instrumenting kernels and a WebGPU visualizer for inspecting execution traces. Traces capture timing data with 32ns resolution using the GPU's global timer.
@@ -11,22 +29,18 @@ Nanotrace consists of a CUDA library for instrumenting kernels and a WebGPU visu
 ## Components
 
 **CUDA Library (`nanotrace-cuda/`):**
-- Header-only device API with inline PTX assembly
-- Static and dynamic trace tensors
-- Conditional tracing (per-thread enable/disable)
-- Vectorized writes with cache streaming
-- Optional deflate compression
+- Low overhead instrumentation
+- Conditional tracing (enable/disable per-thread)
+- Optional compression
 
 **Visualizer (`visualizer/`):**
-- WebGPU instanced rendering
-- Four-level hierarchy: SM lanes → block lanes → blocks → tracks
-- Independent X/Y zoom, time range selection
+- WebGPU-based interactive timeline
+- Independent X/Y zoom and time range selection
 - Handles 10M+ events at 60 FPS
 
 **File Format:**
 - Compact binary with optional compression
-- Dual string templates (labels and tooltips)
-- Nanosecond timing, parameter substitution
+- Nanosecond precision timing
 - Full spec in `docs/nanotrace.md`
 
 ## Quick Start

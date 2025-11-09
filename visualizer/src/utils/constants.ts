@@ -190,9 +190,9 @@ export const MIN_ZOOM_Y = 0.01;
 
 /**
  * Maximum Y-axis zoom level (vertical zoom).
- * Prevents zooming in beyond this threshold (2.0x).
+ * Prevents zooming in beyond this threshold (8.0x).
  */
-export const MAX_ZOOM_Y = 2.0;
+export const MAX_ZOOM_Y = 8.0;
 
 /**
  * Pan speed factor for horizontal scrolling via scroll wheel left/right.

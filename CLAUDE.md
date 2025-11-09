@@ -13,8 +13,11 @@ WebGPU-based trace visualizer for GPU kernel execution. Displays execution trace
 │   ├── src/
 │   │   └── nanotrace_host.cpp       # Host-side implementation
 │   ├── examples/
-│   │   ├── simple_trace.cu          # Basic example
-│   │   └── mixed_trace.cu           # Advanced example
+│   │   ├── simple_trace.cu                    # Basic example
+│   │   ├── mixed_trace.cu                     # Advanced example (mixed static/dynamic)
+│   │   ├── grayscale_trace.cu                 # Large-scale example (419K blocks)
+│   │   ├── tma_bandwidth_bench_static.cu      # TMA bandwidth (static scheduling)
+│   │   └── tma_bandwidth_bench_atomic.cu      # TMA bandwidth (atomic scheduling)
 │   ├── CMakeLists.txt
 │   └── README.md
 ├── visualizer/
@@ -79,6 +82,7 @@ Header-only implementation with zero overhead:
 - `NANOTRACE_DEFINE_BLOCK_TYPE(name, label_str, tooltip_str)` - Compile-time block type registration (0 params)
 - `NANOTRACE_DEFINE_TRACK_TYPE(name, label_str, tooltip_str, param_count)` - Compile-time track type registration (supports {lane} placeholder)
 - `start()` - Capture timestamp using `%%globaltimer_lo` (32-bit lower portion, 32ns resolution)
+- `start_zero()` - Returns a zero-initialized `start_token` (useful for array initialization)
 - `begin_lane(handle, block_id, lane_index, enabled=true)` - Initialize lane context (2 uint32s + 1 bool), returns `lane_context_static<MaxEventWidth>`
 - `end(start, handle, lane, [p0-p6])` - Record event (7 overloads for 0-6 params), no-op if `!lane.enabled()`
 - `finish_lane(handle, lane)` - Write header with SM ID (`%%smid`) and event count, no-op if `!lane.enabled()`
@@ -280,28 +284,15 @@ Real traces from nanotrace-cuda examples running on NVIDIA B200 (Blackwell, CC 1
 Generated with the latest conditional tracing API improvements (clean `begin_lane(..., enabled)` pattern).
 
 **Files** (in `visualizer/public/samples/`, committed to repo):
-- `simple_trace_b200.nanotrace` - From simple_trace.cu example
-  - 16 blocks, 128 tracks (8 warps/block), ~12.8K events
-  - Grid (16,1,1), block (256,1,1)
-  - Static lanes with 0-param trace type
-  - Only lane 0 of each warp traces using conditional API
-- `mixed_trace_b200.nanotrace` - From mixed_trace.cu example
-  - 32 blocks, 384 tracks (12 warps/block), ~2.5K events
-  - Grid (8,4,1), block (384,1,1)
-  - Mixed static (8 lanes) + dynamic (4 lanes) tensors stacked within each block
-  - Demonstrates multiple tensor stacking with same grid dimensions
-  - Only lane 0 of each warp traces using conditional API
-- `grayscale_trace_b200.nanotrace` - From grayscale_trace.cu example
-  - 419,431 blocks, 419,431 tracks (1 per block), 419K events (1 event per block)
-  - Grid (419431,1,1), block (160,1,1)
-  - RGB to grayscale conversion kernel (16384×16384 image = 268M pixels)
-  - Only thread 0 per block traces using conditional API
-  - L2 cache flushed before warmup and before traced run
-  - All 148 SMs utilized
+- `simple_trace_b200.nanotrace` - 16 blocks, 128 tracks, ~12.8K events
+- `mixed_trace_b200.nanotrace` - 32 blocks, 384 tracks, ~2.5K events (mixed static/dynamic tensors)
+- `grayscale_trace_b200.nanotrace` - 419K blocks, 419K events (1 per block), all 148 SMs
+- `tma_bandwidth_static_144.nanotrace` - 144 blocks, 432 tracks (3 buffers/block), 6839 GB/s (85.5%)
+- `tma_bandwidth_static_288.nanotrace` - 288 blocks, 864 tracks (3 buffers/block), 6972 GB/s (87.2%)
+- `tma_bandwidth_atomic_144.nanotrace` - 144 blocks, 432 tracks (3 buffers/block), 6987 GB/s (87.3%)
+- `tma_bandwidth_atomic_288.nanotrace` - 288 blocks, 864 tracks (3 buffers/block), 7424 GB/s (92.8%)
 
-**Access**: Available via "Load Sample File" menu in visualizer (bundled in build at `/nanotrace/samples/`)
-
-**Tooltips**: Visualizer now properly displays full tooltip strings on hover (uses `tooltipString` field instead of `labelString`)
+**Access**: Available via "Load Sample File" menu in visualizer
 
 ## Controls
 
