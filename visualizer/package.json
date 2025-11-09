@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run generate:all && tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "generate:minimal": "tsx scripts/generate.ts minimal",
     "generate:small": "tsx scripts/generate.ts small",

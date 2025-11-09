@@ -573,7 +573,7 @@ export class ZoneVisualizer {
                 } else {
                     this.camera.zoom /= zoomFactor;
                 }
-                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.max(MAX_ZOOM_Y, this.camera.zoom));
+                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.min(MAX_ZOOM_Y, this.camera.zoom));
 
                 const newZoomX = this.camera.zoomX;
                 const newZoomY = this.camera.zoomY;
@@ -588,7 +588,7 @@ export class ZoneVisualizer {
                 } else {
                     this.camera.zoom /= zoomFactor;
                 }
-                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.max(MAX_ZOOM_Y, this.camera.zoom));
+                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.min(MAX_ZOOM_Y, this.camera.zoom));
 
                 this.camera.xZoomMultiplier *= (oldZoom / this.camera.zoom);
 
