@@ -14,6 +14,7 @@
     <div id="stats" class="glass mono"></div>
     <div id="lane-labels"></div>
     <div id="timeline" class="glass"></div>
+    <button id="help-btn" class="glass">?</button>
     <button id="close-btn" class="glass">×</button>
     <div id="cursor-line"></div>
     <div id="cursor-timestamp" class="glass-dark mono"></div>
@@ -86,6 +87,47 @@
                 </button>
             </div>
             <button class="sample-menu-cancel btn-secondary">Cancel</button>
+        </div>
+    </div>
+
+    <div id="help-overlay" class="overlay-full hidden">
+        <div class="help-content">
+            <h3>Controls</h3>
+            <div class="help-section">
+                <div class="help-item">
+                    <div class="help-key">Right-click + drag</div>
+                    <div class="help-desc">Pan</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Scroll</div>
+                    <div class="help-desc">Zoom X-axis</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Shift + Scroll</div>
+                    <div class="help-desc">Zoom Y-axis</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Ctrl + Scroll</div>
+                    <div class="help-desc">Uniform zoom</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Left-click + drag</div>
+                    <div class="help-desc">Select time range</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Double-click</div>
+                    <div class="help-desc">Snap to zone/block boundaries</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">R</div>
+                    <div class="help-desc">Reset view</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Hover</div>
+                    <div class="help-desc">Show tooltip with timing details</div>
+                </div>
+            </div>
+            <button class="help-close btn-secondary">Close</button>
         </div>
     </div>
 

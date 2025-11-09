@@ -83,6 +83,7 @@ export class ZoneVisualizer {
     private loadingText: HTMLElement;
     private fileInput: HTMLInputElement;
     private closeBtn: HTMLElement;
+    private helpBtn: HTMLElement;
 
     // WebGPU resources (initialized in initWebGPU)
     private adapter: GPUAdapter | null = null;
@@ -160,12 +161,30 @@ export class ZoneVisualizer {
         this.loadingText = this.loadingOverlay.querySelector('.loading-text') as HTMLElement;
         this.fileInput = document.getElementById('file-input') as HTMLInputElement;
         this.closeBtn = this.getElement('close-btn');
+        this.helpBtn = this.getElement('help-btn');
 
         // Wire up file input handler for local .nanotrace files
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
 
         // Wire up close button to return to file selector
         this.closeBtn.addEventListener('click', () => this.closeVisualization());
+
+        // Wire up help button to show controls overlay
+        const helpOverlay = this.getElement('help-overlay');
+        this.helpBtn.addEventListener('click', () => {
+            helpOverlay.classList.remove('hidden');
+            // Hide cursor line, timestamp, and tooltip when help is open
+            this.cursorLine.style.display = 'none';
+            this.cursorTimestamp.style.display = 'none';
+            this.tooltip.classList.remove('visible');
+        });
+
+        const helpCloseBtn = helpOverlay.querySelector('.help-close');
+        if (helpCloseBtn) {
+            helpCloseBtn.addEventListener('click', () => {
+                helpOverlay.classList.add('hidden');
+            });
+        }
 
         // Setup sample trace loading menu with cancel button
         const loadSampleBtn = document.getElementById('load-sample-btn');
@@ -328,8 +347,9 @@ export class ZoneVisualizer {
         // Show UI elements
         this.stats.style.display = 'block';
 
-        // Show close button now that visualization is loaded
+        // Show close and help buttons now that visualization is loaded
         this.closeBtn.style.display = 'block';
+        this.helpBtn.style.display = 'block';
 
         // Start the render loop
         this.isRendering = true;
@@ -360,7 +380,7 @@ export class ZoneVisualizer {
         this.laneLabels = [];
 
         // Hide UI elements
-        this.tooltip.style.display = 'none';
+        this.tooltip.classList.remove('visible');
         this.stats.style.display = 'none';
         this.cursorLine.style.display = 'none';
         this.cursorTimestamp.style.display = 'none';
@@ -380,8 +400,9 @@ export class ZoneVisualizer {
         this.labelRenderer = null;
         this.camera = null;
 
-        // Hide close button and show file selector
+        // Hide close and help buttons and show file selector
         this.closeBtn.style.display = 'none';
+        this.helpBtn.style.display = 'none';
         this.fileSelector.classList.remove('hidden');
     }
 
@@ -410,6 +431,7 @@ export class ZoneVisualizer {
             alert(`Error loading trace: ${(err as Error).message}`);
             this.loadingOverlay.classList.add('hidden');
             this.closeBtn.style.display = 'none';
+            this.helpBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
         } finally {
             // Clear input to allow reloading the same file
@@ -448,6 +470,7 @@ export class ZoneVisualizer {
             alert(`Error loading trace: ${(err as Error).message}`);
             this.loadingOverlay.classList.add('hidden');
             this.closeBtn.style.display = 'none';
+            this.helpBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
         }
     }
@@ -481,6 +504,7 @@ export class ZoneVisualizer {
         if (!fileName) {
             alert('This sample is not available.');
             this.closeBtn.style.display = 'none';
+            this.helpBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
             return;
         }
@@ -507,6 +531,7 @@ export class ZoneVisualizer {
             alert(`Error loading sample: ${(err as Error).message}`);
             this.loadingOverlay.classList.add('hidden');
             this.closeBtn.style.display = 'none';
+            this.helpBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
         }
     }
@@ -814,6 +839,10 @@ export class ZoneVisualizer {
         window.addEventListener('mousemove', (e) => {
             if (!this.camera || !this.interactionManager) return;
 
+            // Check if help overlay is open
+            const helpOverlay = document.getElementById('help-overlay');
+            const isHelpOpen = helpOverlay && !helpOverlay.classList.contains('hidden');
+
             if (this.camera.isDragging) {
                 const dx = e.clientX - this.camera.lastX;
                 const dy = e.clientY - this.camera.lastY;
@@ -831,7 +860,8 @@ export class ZoneVisualizer {
                 this.interactionManager.updateSelection();
             }
 
-            if (e.clientX >= 0 && e.clientX <= window.innerWidth &&
+            // Don't show cursor line/timestamp if help overlay is open
+            if (!isHelpOpen && e.clientX >= 0 && e.clientX <= window.innerWidth &&
                 e.clientY >= 0 && e.clientY <= window.innerHeight) {
                 this.cursorLine.style.left = `${e.clientX}px`;
                 this.cursorLine.style.display = 'block';
@@ -850,7 +880,10 @@ export class ZoneVisualizer {
                 this.cursorTimestamp.style.display = 'none';
             }
 
-            this.interactionManager.updateHover(e.clientX, e.clientY, this.lanes, this.blocks, this.formatDescriptors, this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this), this.formatBlockTooltipString.bind(this));
+            // Don't update hover if help overlay is open
+            if (!isHelpOpen) {
+                this.interactionManager.updateHover(e.clientX, e.clientY, this.lanes, this.blocks, this.formatDescriptors, this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this), this.formatBlockTooltipString.bind(this));
+            }
         });
 
         document.body.addEventListener('mouseleave', () => {

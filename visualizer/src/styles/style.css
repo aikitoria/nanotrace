@@ -237,6 +237,36 @@ canvas {
     background: var(--bg-glass);
     backdrop-filter: var(--blur-lg);
 }
+#help-btn {
+    position: fixed;
+    top: 0;
+    right: 32px;
+    width: 32px;
+    height: 30px;
+    border-radius: 0;
+    border: none;
+    border-left: 1px solid var(--border-secondary);
+    border-bottom: 1px solid var(--border-secondary);
+    background: var(--bg-glass);
+    backdrop-filter: var(--blur-lg);
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 30px;
+    cursor: pointer;
+    z-index: 1001;
+    pointer-events: auto;
+    display: none;
+    padding: 0;
+    transition: all 0.15s ease;
+}
+#help-btn:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+    border-color: var(--border-primary);
+}
+#help-btn:active {
+    transform: scale(0.95);
+}
 #close-btn {
     position: fixed;
     top: 0;
@@ -555,4 +585,69 @@ canvas {
     margin-top: 28px;
     font-weight: 500;
     letter-spacing: 0.3px;
+}
+#help-overlay {
+    background: rgba(10, 10, 12, 0.85);
+    backdrop-filter: var(--blur-lg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2003;
+}
+#help-overlay.hidden {
+    display: none;
+}
+.help-content {
+    background: var(--bg-dialog);
+    border: 1px solid var(--border-secondary);
+    border-radius: 16px;
+    padding: 28px 36px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    max-width: 500px;
+    box-shadow: var(--shadow-xl);
+}
+.help-content h3 {
+    color: var(--text-primary);
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+    text-align: center;
+    letter-spacing: -0.3px;
+}
+.help-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.help-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 24px;
+}
+.help-key {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    background: var(--accent-cyan-15);
+    border: 1px solid var(--accent-cyan-30);
+    padding: 6px 12px;
+    border-radius: 6px;
+    min-width: 160px;
+    text-align: center;
+}
+.help-desc {
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 400;
+    flex: 1;
+}
+.help-close {
+    align-self: center;
+    padding: 12px 32px;
+    font-size: 13px;
+    margin-top: 8px;
 }
