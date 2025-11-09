@@ -128,7 +128,7 @@ fn vertexMain(
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
     let baseFillColor = input.color * 0.55;
-    let hoverFillColor = vec3<f32>(0.4, 0.85, 0.95) * 0.9;
+    let hoverFillColor = vec3<f32>(0.22, 0.74, 0.97) * 0.95;
     var fillColor = mix(baseFillColor, hoverFillColor, input.isHovered);
 
     fillColor = mix(fillColor, fillColor * 1.55, input.isSelected);
@@ -150,8 +150,8 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let isEdge = distFromEdgeX < edgeThicknessX || distFromEdgeY < edgeThicknessY;
 
-    let baseOutlineColor = input.color * 0.95;
-    let hoverOutlineColor = vec3<f32>(0.5, 0.90, 1.0) * 1.2;
+    let baseOutlineColor = input.color * 0.98;
+    let hoverOutlineColor = vec3<f32>(0.38, 0.82, 1.0) * 1.15;
 
     var outlineColor = mix(baseOutlineColor, hoverOutlineColor, input.isHovered);
 
@@ -204,7 +204,7 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.12, 0.12, 0.13, 1.0);
+    return vec4<f32>(0.071, 0.071, 0.078, 1.0);
 }
 `;
 
@@ -249,7 +249,7 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.14, 0.14, 0.15, 1.0);
+    return vec4<f32>(0.086, 0.086, 0.094, 1.0);
 }
 `;
 
@@ -295,7 +295,7 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.10, 0.10, 0.11, 1.0);
+    return vec4<f32>(0.055, 0.055, 0.063, 1.0);
 }
 `;
 
@@ -379,14 +379,14 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let baseColor = vec3<f32>(0.5, 0.5, 0.5);
-    let hoverColor = vec3<f32>(0.9, 0.9, 0.9);
+    let baseColor = vec3<f32>(0.45, 0.50, 0.62);
+    let hoverColor = vec3<f32>(0.22, 0.74, 0.97) * 1.3;
     var color = mix(baseColor, hoverColor, input.isHovered);
 
     // Brighten if within selection (match zone brightness boost)
     color = color + vec3<f32>(0.55, 0.55, 0.55) * input.isSelected;
 
-    return vec4<f32>(color, 0.6);
+    return vec4<f32>(color, 0.7);
 }
 `;
 
@@ -424,7 +424,7 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.07, 0.07, 0.08, 1.0);
+    return vec4<f32>(0.039, 0.039, 0.047, 1.0);
 }
 `;
 

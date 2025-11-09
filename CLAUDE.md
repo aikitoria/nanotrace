@@ -281,8 +281,11 @@ Run `npm run build` after changes, open `dist/index.html` in Chrome.
 
 GitHub Actions workflow deploys to GitHub Pages at `aikitoria.github.io/nanotrace`:
 - Triggers on push to main
+- Generates sample traces during build (deterministic, seed=42)
 - Builds visualizer with npm
 - Deploys to GitHub Pages
+
+**Setup required**: Enable GitHub Pages in repository settings, select "GitHub Actions" as the source.
 
 Configuration in `.github/workflows/deploy.yml`.
 
@@ -313,10 +316,10 @@ TypeScript generator in `visualizer/scripts/generate.ts` produces `.nanotrace` f
 All samples use:
 - Sequential block placement (realistic GPU behavior)
 - Weighted event distribution: 40% Load, 30% Store, 20% Compute, 10% Tile ops
-- Seeded random generation (reproducible)
+- Seeded random generation (seed=42, deterministic output)
 - Output to `visualizer/public/` directory
 
-Samples are generated automatically during `npm run build`.
+Samples are generated automatically during `npm run build` and are not committed to git.
 
 ## Usage
 
@@ -331,8 +334,8 @@ Samples are generated automatically during `npm run build`.
    - Shift + Scroll to zoom Y-axis
    - Ctrl + Scroll to zoom uniformly
    - Press R to reset view
-6. **Select**: Left-click + drag for time range, double-click to snap to zone/block
-7. **Inspect**: Hover for details, zoom in for labels
+7. **Select**: Left-click + drag for time range, double-click to snap to zone/block
+8. **Inspect**: Hover for details, zoom in for labels
 
 ## Not Yet Implemented
 
