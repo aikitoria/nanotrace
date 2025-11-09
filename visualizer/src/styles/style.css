@@ -455,19 +455,6 @@ canvas {
     border-top: 5px solid var(--accent-cyan-bright);
     border-radius: 50%;
     animation: spin 0.8s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-    position: relative;
-}
-.loading-spinner::after {
-    content: '';
-    position: absolute;
-    width: 72px;
-    height: 72px;
-    border: 5px solid transparent;
-    border-bottom: 5px solid var(--accent-purple);
-    border-radius: 50%;
-    top: -5px;
-    left: -5px;
-    animation: spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite reverse;
 }
 @keyframes spin {
     0% { transform: rotate(0deg); }
