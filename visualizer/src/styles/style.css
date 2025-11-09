@@ -345,7 +345,7 @@ canvas {
     width: 270px;
     height: 270px;
     border-radius: 50%;
-    right: -85px;
+    right: -105px;
     top: 50%;
     transform: translateY(-50%);
     box-shadow: var(--shadow-xl);
@@ -359,7 +359,7 @@ canvas {
     height: 270px;
     border-radius: 50%;
     position: absolute;
-    right: -85px;
+    right: -105px;
     top: 50%;
     transform: translateY(-50%);
 }
