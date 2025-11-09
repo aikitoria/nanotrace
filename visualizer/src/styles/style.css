@@ -8,6 +8,7 @@
     --text-primary: #e8e8ee;
     --text-secondary: #f0f0f0;
     --text-tertiary: #8888a0;
+    --text-muted: #b8b8c8;
     --border-primary: rgba(100, 100, 140, 0.2);
     --border-secondary: rgba(100, 100, 140, 0.3);
     --border-glow: rgba(14, 165, 233, 0.4);
@@ -211,7 +212,7 @@ canvas {
 }
 .lane-label {
     position: absolute;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     white-space: nowrap;
     pointer-events: none;
     padding: 3px 10px 0px 10px;
@@ -238,14 +239,14 @@ canvas {
 }
 .timeline-tick {
     position: absolute;
-    background: rgba(180, 180, 200, 0.4);
+    background: var(--text-muted);
     pointer-events: none;
     transform: translateZ(0);
     image-rendering: crisp-edges;
 }
 .timeline-label {
     position: absolute;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 10px;
     font-weight: 500;
     white-space: nowrap;
