@@ -207,10 +207,12 @@ export async function parseTraceFile(
     performance.mark('parseTraceFile:formatDesc:start');
     const formatDescriptors: FormatDescriptor[] = [];
     for (let i = 0; i < formatDescCount; i++) {
-        const { str: formatString, newOffset: o2 } = readString(view, offset);
+        const { str: labelString, newOffset: o2 } = readString(view, offset);
         offset = o2;
+        const { str: tooltipString, newOffset: o3 } = readString(view, offset);
+        offset = o3;
         const placeholderCount = view.getUint8(offset); offset += 1;
-        formatDescriptors.push({ formatString, placeholderCount });
+        formatDescriptors.push({ labelString, tooltipString, placeholderCount });
     }
     performance.mark('parseTraceFile:formatDesc:end');
     performance.measure('Parse Format Descriptors', 'parseTraceFile:formatDesc:start', 'parseTraceFile:formatDesc:end');
@@ -218,14 +220,12 @@ export async function parseTraceFile(
     performance.mark('parseTraceFile:blockDesc:start');
     const blockDescriptors: BlockDescriptor[] = [];
     for (let i = 0; i < blockDescCount; i++) {
+        const blockId = view.getUint32(offset, true); offset += 4;
+        const clusterId = view.getUint32(offset, true); offset += 4;
         const smId = view.getUint16(offset, true); offset += 2;
         const formatDescId = view.getUint16(offset, true); offset += 2;
-        const paramCount = formatDescriptors[formatDescId].placeholderCount;
-        const params: number[] = [];
-        for (let j = 0; j < paramCount; j++) {
-            params.push(view.getUint32(offset, true)); offset += 4;
-        }
-        blockDescriptors.push({ smId, formatDescId, params });
+        // No parameters - special placeholders computed from blockId and grid dimensions
+        blockDescriptors.push({ blockId, clusterId, smId, formatDescId });
     }
     performance.mark('parseTraceFile:blockDesc:end');
     performance.measure('Parse Block Descriptors', 'parseTraceFile:blockDesc:start', 'parseTraceFile:blockDesc:end');
@@ -235,6 +235,7 @@ export async function parseTraceFile(
     for (let i = 0; i < trackCount; i++) {
         const blockDescId = view.getUint32(offset, true); offset += 4;
         const formatDescId = view.getUint16(offset, true); offset += 2;
+        const laneId = view.getUint32(offset, true); offset += 4;
         const warpParamCount = formatDescriptors[formatDescId].placeholderCount;
         const params: number[] = [];
         for (let j = 0; j < warpParamCount; j++) {
@@ -253,7 +254,7 @@ export async function parseTraceFile(
             }
             events.push({ timeOffset, duration, formatDescId: eventFormatDescId, params: eventParams });
         }
-        tracks.push({ blockDescId, formatDescId, params, events });
+        tracks.push({ blockDescId, formatDescId, laneId, params, events });
     }
     performance.mark('parseTraceFile:tracks:end');
     performance.measure('Parse Event Tracks', 'parseTraceFile:tracks:start', 'parseTraceFile:tracks:end');
@@ -371,6 +372,7 @@ export function buildHierarchy(
                         formatDescId: event.formatDescId,
                         params: event.params,
                         warpFormatDescId: track.formatDescId,
+                        warpLaneId: track.laneId,
                         warpParams: track.params,
                         laneIdx: smId,
                         blockLaneIdx: -1,
@@ -396,7 +398,8 @@ export function buildHierarchy(
                 numSublanes: sublanes.length,
                 maxZoneWidth,
                 formatDescId: desc.formatDescId,
-                params: desc.params,
+                blockId: desc.blockId,
+                clusterId: desc.clusterId,
                 laneIdx: smId,
                 blockLaneIdx: -1,
                 x: 0,
@@ -515,15 +518,183 @@ export function buildHierarchy(
 }
 
 /**
- * Substitutes parameters into format descriptor template string.
+ * Substitutes parameters into format descriptor label string.
  * Replaces placeholders {0}, {1}, etc. with corresponding parameter values.
  * Example: "Warp {0}" with params [5] → "Warp 5"
+ * Uses the short label string (not tooltip).
  */
 export function formatString(formatDescriptors: FormatDescriptor[], formatDescId: number, params: number[]): string {
     const desc = formatDescriptors[formatDescId];
-    let result = desc.formatString;
+    let result = desc.labelString;
     for (let i = 0; i < params.length; i++) {
         result = result.replace(`{${i}}`, params[i].toString());
     }
+    return result;
+}
+
+/**
+ * Substitutes parameters into format descriptor tooltip string.
+ * Replaces placeholders {0}, {1}, etc. with corresponding parameter values.
+ * Example: "Warp {0} on SM {1}" with params [5, 3] → "Warp 5 on SM 3"
+ * Uses the full tooltip string.
+ */
+export function formatTooltipString(formatDescriptors: FormatDescriptor[], formatDescId: number, params: number[]): string {
+    const desc = formatDescriptors[formatDescId];
+    let result = desc.tooltipString;
+    for (let i = 0; i < params.length; i++) {
+        result = result.replace(`{${i}}`, params[i].toString());
+    }
+    return result;
+}
+
+/**
+ * Substitutes track parameters and {lane} placeholder into format descriptor label string.
+ * Replaces {lane} with laneId and {0}, {1}, etc. with parameter values.
+ * Example: "Warp {lane}" with laneId=5 → "Warp 5"
+ * Uses the short label string (not tooltip).
+ */
+export function formatTrackString(formatDescriptors: FormatDescriptor[], formatDescId: number, laneId: number, params: number[]): string {
+    const desc = formatDescriptors[formatDescId];
+    let result = desc.labelString;
+
+    // Replace {lane} placeholder
+    result = result.replace('{lane}', laneId.toString());
+
+    // Replace numbered placeholders
+    for (let i = 0; i < params.length; i++) {
+        result = result.replace(`{${i}}`, params[i].toString());
+    }
+    return result;
+}
+
+/**
+ * Substitutes track parameters and {lane} placeholder into format descriptor tooltip string.
+ * Replaces {lane} with laneId and {0}, {1}, etc. with parameter values.
+ * Example: "Warp {lane} on SM" with laneId=5 → "Warp 5 on SM"
+ * Uses the full tooltip string.
+ */
+export function formatTrackTooltipString(formatDescriptors: FormatDescriptor[], formatDescId: number, laneId: number, params: number[]): string {
+    const desc = formatDescriptors[formatDescId];
+    let result = desc.tooltipString;
+
+    // Replace {lane} placeholder
+    result = result.replace('{lane}', laneId.toString());
+
+    // Replace numbered placeholders
+    for (let i = 0; i < params.length; i++) {
+        result = result.replace(`{${i}}`, params[i].toString());
+    }
+    return result;
+}
+
+/**
+ * Formats block descriptor label string with special placeholders.
+ * Supports: {blockLinear}, {blockX}, {blockY}, {blockZ},
+ *           {clusterLinear}, {clusterX}, {clusterY}, {clusterZ}
+ *
+ * Block coordinates are computed from linear block ID using row-major layout.
+ * Uses the short label string (not tooltip).
+ */
+export function formatBlockString(
+    formatDescriptors: FormatDescriptor[],
+    formatDescId: number,
+    blockId: number,
+    clusterId: number,
+    gridDimX: number,
+    gridDimY: number,
+    gridDimZ: number,
+    clusterDimX: number,
+    clusterDimY: number,
+    clusterDimZ: number
+): string {
+    const desc = formatDescriptors[formatDescId];
+    let result = desc.labelString;
+
+    // Compute block coordinates (row-major: x + y*dimX + z*dimX*dimY)
+    const blockX = blockId % gridDimX;
+    const blockY = Math.floor(blockId / gridDimX) % gridDimY;
+    const blockZ = Math.floor(blockId / (gridDimX * gridDimY));
+
+    // Validate block coordinates
+    if (blockZ >= gridDimZ) {
+        console.warn(`Invalid block ID ${blockId}: blockZ=${blockZ} >= gridDimZ=${gridDimZ}`);
+    }
+
+    // Compute cluster coordinates (row-major, if using clusters)
+    const clusterX = clusterDimX > 0 ? (clusterId % clusterDimX) : 0;
+    const clusterY = clusterDimY > 0 ? (Math.floor(clusterId / clusterDimX) % clusterDimY) : 0;
+    const clusterZ = clusterDimZ > 0 ? Math.floor(clusterId / (clusterDimX * clusterDimY)) : 0;
+
+    // Validate cluster coordinates
+    if (clusterDimZ > 0 && clusterZ >= clusterDimZ) {
+        console.warn(`Invalid cluster ID ${clusterId}: clusterZ=${clusterZ} >= clusterDimZ=${clusterDimZ}`);
+    }
+
+    // Replace special placeholders
+    result = result.replace('{blockLinear}', blockId.toString());
+    result = result.replace('{blockX}', blockX.toString());
+    result = result.replace('{blockY}', blockY.toString());
+    result = result.replace('{blockZ}', blockZ.toString());
+    result = result.replace('{clusterLinear}', clusterId.toString());
+    result = result.replace('{clusterX}', clusterX.toString());
+    result = result.replace('{clusterY}', clusterY.toString());
+    result = result.replace('{clusterZ}', clusterZ.toString());
+
+    return result;
+}
+
+/**
+ * Formats block descriptor tooltip string with special placeholders.
+ * Supports: {blockLinear}, {blockX}, {blockY}, {blockZ},
+ *           {clusterLinear}, {clusterX}, {clusterY}, {clusterZ}
+ *
+ * Block coordinates are computed from linear block ID using row-major layout.
+ * Uses the full tooltip string.
+ */
+export function formatBlockTooltipString(
+    formatDescriptors: FormatDescriptor[],
+    formatDescId: number,
+    blockId: number,
+    clusterId: number,
+    gridDimX: number,
+    gridDimY: number,
+    gridDimZ: number,
+    clusterDimX: number,
+    clusterDimY: number,
+    clusterDimZ: number
+): string {
+    const desc = formatDescriptors[formatDescId];
+    let result = desc.tooltipString;
+
+    // Compute block coordinates (row-major: x + y*dimX + z*dimX*dimY)
+    const blockX = blockId % gridDimX;
+    const blockY = Math.floor(blockId / gridDimX) % gridDimY;
+    const blockZ = Math.floor(blockId / (gridDimX * gridDimY));
+
+    // Validate block coordinates
+    if (blockZ >= gridDimZ) {
+        console.warn(`Invalid block ID ${blockId}: blockZ=${blockZ} >= gridDimZ=${gridDimZ}`);
+    }
+
+    // Compute cluster coordinates (row-major, if using clusters)
+    const clusterX = clusterDimX > 0 ? (clusterId % clusterDimX) : 0;
+    const clusterY = clusterDimY > 0 ? (Math.floor(clusterId / clusterDimX) % clusterDimY) : 0;
+    const clusterZ = clusterDimZ > 0 ? Math.floor(clusterId / (clusterDimX * clusterDimY)) : 0;
+
+    // Validate cluster coordinates
+    if (clusterDimZ > 0 && clusterZ >= clusterDimZ) {
+        console.warn(`Invalid cluster ID ${clusterId}: clusterZ=${clusterZ} >= clusterDimZ=${clusterDimZ}`);
+    }
+
+    // Replace special placeholders
+    result = result.replace('{blockLinear}', blockId.toString());
+    result = result.replace('{blockX}', blockX.toString());
+    result = result.replace('{blockY}', blockY.toString());
+    result = result.replace('{blockZ}', blockZ.toString());
+    result = result.replace('{clusterLinear}', clusterId.toString());
+    result = result.replace('{clusterX}', clusterX.toString());
+    result = result.replace('{clusterY}', clusterY.toString());
+    result = result.replace('{clusterZ}', clusterZ.toString());
+
     return result;
 }

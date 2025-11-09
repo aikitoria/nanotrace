@@ -236,7 +236,9 @@ export class InteractionManager {
         lanes: Lane[],
         blocks: Block[],
         formatDescriptors: FormatDescriptor[],
-        formatString: (formatDescId: number, params: number[]) => string
+        formatString: (formatDescId: number, params: number[]) => string,
+        formatTrackString: (formatDescId: number, laneId: number, params: number[]) => string,
+        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
     ): void {
         const result = this.findZoneAtPosition(screenX, screenY, lanes, blocks);
 
@@ -257,11 +259,11 @@ export class InteractionManager {
                 : `Zone #${result.zone.id}`;
 
             const blockName = (formatDescriptors.length > 0 && result.block)
-                ? formatString(result.block.formatDescId, result.block.params)
+                ? formatBlockString(result.block.formatDescId, result.block.blockId, result.block.clusterId)
                 : `Block ${result.zone.blockIdx}`;
 
             const warpName = (formatDescriptors.length > 0 && result.zone.warpFormatDescId !== undefined)
-                ? formatString(result.zone.warpFormatDescId, result.zone.warpParams)
+                ? formatTrackString(result.zone.warpFormatDescId, result.zone.warpLaneId, result.zone.warpParams)
                 : `Sublane ${result.zone.sublaneIdx}`;
 
             // Display hierarchical tooltip: Zone / Warp / Block / Timing

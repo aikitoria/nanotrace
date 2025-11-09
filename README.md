@@ -1,34 +1,87 @@
 # nanotrace
 
-Low-overhead trace recorder and visualizer for inspecting pipelined CUDA kernels.
+Nanosecond-precision tracing for CUDA kernels with GPU-accelerated visualization.
 
 ## Overview
 
-Nanotrace provides nanosecond-precision tracing for GPU kernel execution with a WebGPU-based visualizer. The system handles traces with millions of events while maintaining interactive performance through GPU-accelerated rendering.
+Nanotrace consists of a CUDA library for instrumenting kernels and a WebGPU visualizer for inspecting execution traces. Traces capture timing data with 32ns resolution using the GPU's global timer.
 
 **Live demo**: [aikitoria.github.io/nanotrace](https://aikitoria.github.io/nanotrace)
 
-## Features
+## Components
 
-**Visualizer:**
-- WebGPU instanced rendering with adaptive detail levels
-- Four-level hierarchy: SM lanes → block lanes → blocks → event tracks
-- Pan, zoom (X/Y/uniform), and time range selection
-- Hover tooltips and labels with hierarchical context
-- Drag-and-drop file loading with sample traces included
-- Handles traces with 10M+ events at 60 FPS
+**CUDA Library (`nanotrace-cuda/`):**
+- Header-only device API with inline PTX assembly
+- Static and dynamic trace tensors
+- Conditional tracing (per-thread enable/disable)
+- Vectorized writes with cache streaming
+- Optional deflate compression
+
+**Visualizer (`visualizer/`):**
+- WebGPU instanced rendering
+- Four-level hierarchy: SM lanes → block lanes → blocks → tracks
+- Independent X/Y zoom, time range selection
+- Handles 10M+ events at 60 FPS
 
 **File Format:**
-- Compact binary format with optional deflate compression
-- Format descriptors for reusable string templates
-- Nanosecond-precision timing data
-- See `docs/nanotrace.md` for specification
+- Compact binary with optional compression
+- Dual string templates (labels and tooltips)
+- Nanosecond timing, parameter substitution
+- Full spec in `docs/nanotrace.md`
 
 ## Quick Start
 
-### Using the Visualizer
+### CUDA Library
 
-Visit [aikitoria.github.io/nanotrace](https://aikitoria.github.io/nanotrace) or build locally:
+```cpp
+#include <nanotrace/nanotrace.cuh>
+#include <nanotrace/nanotrace_host.h>
+
+// Define trace types
+NANOTRACE_DEFINE_TRACE_TYPE(Work, "Work", "Work execution", 0, nanotrace::lane_type::STATIC);
+NANOTRACE_DEFINE_BLOCK_TYPE(Block, "Block {blockX}", "Block {blockX} on SM");
+NANOTRACE_DEFINE_TRACK_TYPE(Warp, "Warp {lane}", "Warp {lane}", 0);
+
+// Create trace tensor
+using TraceConfig = nanotrace::static_trace_builder<8, Work, Work, Work, Work, Work, Work, Work, Work>;
+TraceConfig trace(1024, dim3(16, 1, 1));
+
+__global__ void kernel(nanotrace::static_tensor_handle<8, 2> handle) {
+    uint32_t warp_id = threadIdx.x / 32;
+    bool should_trace = (threadIdx.x % 32 == 0);  // Only lane 0 traces
+
+    auto lane = nanotrace::begin_lane(handle, blockIdx.x, warp_id, should_trace);
+    auto s = nanotrace::start();
+
+    // ... work ...
+
+    nanotrace::end(s, handle, lane);
+    nanotrace::finish_lane(handle, lane);
+}
+
+int main() {
+    kernel<<<dim3(16,1,1), dim3(256,1,1)>>>(trace.get_handle());
+
+    nanotrace::trace_writer writer("kernel");
+    writer.set_block_type<Block>();
+    writer.set_track_type<Warp>();
+    writer.register_trace_type<Work>();
+    writer.add_tensor(trace);
+    writer.write("trace.nanotrace");
+}
+```
+
+Build with CMake (requires CUDA 13.0+, sm_100 target):
+```bash
+cd nanotrace-cuda
+mkdir build && cd build
+cmake ..
+make
+```
+
+### Visualizer
+
+Visit [aikitoria.github.io/nanotrace](https://aikitoria.github.io/nanotrace) or run locally:
 
 ```bash
 cd visualizer
@@ -36,130 +89,47 @@ npm install
 npm run dev
 ```
 
-Load a trace file or try the included samples:
-- **Minimal**: 1 block, 2 events (133 bytes)
-- **Small Random**: 16 SMs, ~48K events (347 KB)
-- **Large Random**: 144 SMs, ~10M events (82 MB)
+Sample traces included:
+- **B200 samples**: Real kernel traces from NVIDIA B200 (Blackwell)
+- **Test generators**: Synthetic traces for testing
 
-### Navigation
+## Navigation
 
 - **Pan**: Right-click + drag
-- **Zoom X-axis**: Scroll (0.001x to 1,000,000x)
-- **Zoom Y-axis**: Shift + scroll (0.01x to 2.0x)
-- **Zoom uniform**: Ctrl + scroll (0.01x to 2.0x)
+- **Zoom**: Scroll (X-axis), Shift+Scroll (Y-axis), Ctrl+Scroll (uniform)
 - **Select time range**: Left-click + drag
 - **Snap selection**: Double-click on zone or block
 - **Reset view**: Press R
 
-## File Format
+## Test Trace Generation
 
-Binary format with little-endian encoding:
-
-```
-Header:
-  - Magic: "nanotrace\0" (10 bytes)
-  - Version: uint8 (currently 1)
-  - Compression: uint8 (0=none, 1=deflate)
-  - Kernel name: string (uint16 length + UTF-8 bytes)
-  - Counts: format descriptors, blocks, tracks, total events
-
-Format Descriptors:
-  - Template string with {0}, {1}, ... placeholders
-  - Parameter count: uint8
-
-Block Descriptors:
-  - SM ID: uint16
-  - Format descriptor ID: uint16
-  - Parameters: uint32[] (count from format descriptor)
-
-Event Tracks:
-  - Block ID: uint32
-  - Format descriptor ID: uint16
-  - Parameters: uint32[]
-  - Event count: uint32
-  - Events: [time: uint32, duration: uint32, format_desc_id: uint16, params: uint32[]]
-```
-
-Full specification: `docs/nanotrace.md`
-
-## Generating Test Traces
-
-TypeScript generator in `visualizer/scripts/generate.ts`:
+Synthetic traces for testing (TypeScript generators):
 
 ```bash
 cd visualizer
-
-# Minimal trace (1 block, 2 events)
-npm run generate:minimal
-
-# Small random trace (~50K events, 16 SMs)
-npm run generate:small
-
-# Large random trace (~9M events, 144 SMs)
-npm run generate:large
-
-# Generate all samples
-npm run generate:all
-
-# Validate a trace file
-npm run validate <file.nanotrace>
-```
-
-Samples are generated automatically during `npm run build`.
-
-## Building
-
-Production build:
-
-```bash
-cd visualizer
-npm run build
-```
-
-Output in `visualizer/dist/`. The build process:
-- Type-checks TypeScript
-- Bundles and minifies JS/CSS/HTML
-- Converts images to WebP
-- Optimizes assets for deployment
-
-Preview the build:
-
-```bash
-npm run preview
+npm run generate:minimal   # 1 block, 2 events
+npm run generate:small     # ~50K events, 16 SMs
+npm run generate:large     # ~10M events, 144 SMs
+npm run validate <file>    # Validate binary format
 ```
 
 ## Project Structure
 
 ```
 nanotrace/
-├── visualizer/              # WebGPU trace visualizer
-│   ├── src/
-│   │   ├── renderers/       # GPU, label, timeline renderers
-│   │   ├── utils/           # Camera, file loader, types
-│   │   ├── styles/          # CSS with design system variables
-│   │   ├── interaction-manager.ts
-│   │   ├── visualizer.ts
-│   │   └── main.ts
-│   ├── scripts/             # TypeScript trace generator
-│   ├── public/              # Sample traces
+├── nanotrace-cuda/          # CUDA tracing library
+│   ├── include/nanotrace/   # Header-only device API
+│   ├── src/                 # Host-side implementation
+│   ├── examples/            # Example kernels
+│   └── CMakeLists.txt
+├── visualizer/              # WebGPU visualizer
+│   ├── src/                 # TypeScript source
+│   ├── scripts/             # Test trace generators
+│   ├── public/samples/      # B200 sample traces
 │   └── dist/                # Build output
-├── docs/
-│   └── nanotrace.md         # Binary format specification
-└── old-warptrace-cuda/      # Previous CUDA implementation
+└── docs/
+    └── nanotrace.md         # Binary format specification
 ```
-
-## Implementation Notes
-
-The visualizer uses a modular architecture:
-
-- `gpu-renderer.ts`: WebGPU pipelines with WGSL shaders for instanced rendering
-- `label-renderer.ts`: Canvas 2D text overlay with hierarchical culling
-- `timeline-renderer.ts`: Adaptive timeline with power-of-10 tick intervals
-- `interaction-manager.ts`: Hierarchical binary search for O(log n) hit detection
-- `camera.ts`: Zoom/pan with screen-to-world coordinate transforms
-- `file-loader.ts`: Binary parser and hierarchy builder
-
-All rendering happens on the GPU via storage buffers. Labels are culled based on hierarchical max-width tracking to maintain 60 FPS with dense traces.
 
 ## License
 

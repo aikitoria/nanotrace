@@ -81,8 +81,10 @@ class BinaryWriter {
 }
 
 interface BlockDescriptor {
+    blockId: number;
+    clusterId: number;
     smId: number;
-    blockNum: number;
+    formatDescId: number;
 }
 
 interface Event {
@@ -155,23 +157,28 @@ function generateMinimal() {
     writer.writeUint32(1);  // track count
     writer.writeUint64(2n); // total event count
 
-    // Format descriptors
-    writer.writeString('Block {0}');
-    writer.writeUint8(1);
-    writer.writeString('Track {0}');
-    writer.writeUint8(1);
-    writer.writeString('Event {0}');
-    writer.writeUint8(1);
+    // Format descriptors (label + tooltip + param count)
+    writer.writeString('Block {blockLinear}');  // label
+    writer.writeString('Block {blockLinear} on SM');  // tooltip
+    writer.writeUint8(0);  // param count
+    writer.writeString('Track {lane}');  // label
+    writer.writeString('Track {lane}');  // tooltip
+    writer.writeUint8(0);  // param count
+    writer.writeString('Event {0}');  // label
+    writer.writeString('Event {0}');  // tooltip
+    writer.writeUint8(1);  // param count
 
     // Block descriptor
+    writer.writeUint32(0);  // block ID
+    writer.writeUint32(0);  // cluster ID
     writer.writeUint16(0);  // SM ID
     writer.writeUint16(0);  // format desc ID
-    writer.writeUint32(0);  // param
 
     // Track
-    writer.writeUint32(0);  // block ID
-    writer.writeUint16(1);  // format desc ID
-    writer.writeUint32(0);  // param
+    writer.writeUint32(0);  // block descriptor ID
+    writer.writeUint16(1);  // format descriptor ID
+    writer.writeUint32(0);  // lane ID (for {lane} placeholder)
+    // No track parameters (format has 0 params)
     writer.writeUint32(2);  // event count
 
     // Events
@@ -238,8 +245,10 @@ function generateRandom(small: boolean) {
 
                 const blockIdx = blockDescriptors.length;
                 blockDescriptors.push({
+                    blockId: blockIdx,
+                    clusterId: 0,
                     smId: laneIdx,
-                    blockNum: blockIdx
+                    formatDescId: 0
                 });
 
                 for (let trackId = 0; trackId < numTracks; trackId++) {
@@ -317,35 +326,44 @@ function generateRandom(small: boolean) {
     data.writeUint32(tracks.length);
     data.writeUint64(BigInt(totalEvents));
 
-    // Format descriptors
-    data.writeString('Block {0}');
-    data.writeUint8(1);
-    data.writeString('Track {0}');
-    data.writeUint8(1);
-    data.writeString('Event {0}');
-    data.writeUint8(1);
-    data.writeString('Load {0}');
-    data.writeUint8(1);
-    data.writeString('Store {0}');
-    data.writeUint8(1);
-    data.writeString('Compute {0}');
-    data.writeUint8(1);
-    data.writeString('Tile {0}x{1}');
-    data.writeUint8(2);
+    // Format descriptors (label + tooltip + param count)
+    data.writeString('Block {blockLinear}');  // label
+    data.writeString('Block {blockLinear} on SM');  // tooltip
+    data.writeUint8(0);  // param count
+    data.writeString('Track {lane}');  // label
+    data.writeString('Track {lane}');  // tooltip
+    data.writeUint8(0);  // param count
+    data.writeString('Event {0}');  // label
+    data.writeString('Event {0}');  // tooltip
+    data.writeUint8(1);  // param count
+    data.writeString('Load {0}');  // label
+    data.writeString('Load from address {0}');  // tooltip
+    data.writeUint8(1);  // param count
+    data.writeString('Store {0}');  // label
+    data.writeString('Store to address {0}');  // tooltip
+    data.writeUint8(1);  // param count
+    data.writeString('Compute {0}');  // label
+    data.writeString('Compute iteration {0}');  // tooltip
+    data.writeUint8(1);  // param count
+    data.writeString('Tile {0}x{1}');  // label
+    data.writeString('Tile operation {0}×{1}');  // tooltip
+    data.writeUint8(2);  // param count
 
     // Block descriptors
     for (const block of blockDescriptors) {
+        data.writeUint32(block.blockId);
+        data.writeUint32(block.clusterId);
         data.writeUint16(block.smId);
-        data.writeUint16(0);
-        data.writeUint32(block.blockNum);
+        data.writeUint16(block.formatDescId);
     }
 
     // Tracks
     for (const track of tracks) {
-        data.writeUint32(track.blockIdx);
-        data.writeUint16(1);
-        data.writeUint32(track.trackId);
-        data.writeUint32(track.events.length);
+        data.writeUint32(track.blockIdx);  // Block descriptor ID
+        data.writeUint16(1);  // Format descriptor ID
+        data.writeUint32(track.trackId);  // Lane ID (for {lane} placeholder)
+        // No track parameters (format has 0 params)
+        data.writeUint32(track.events.length);  // Event count
 
         for (const event of track.events) {
             data.writeUint32(event.time);

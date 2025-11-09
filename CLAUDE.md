@@ -44,10 +44,22 @@ WebGPU-based trace visualizer for GPU kernel execution. Displays execution trace
 Binary `.nanotrace` format (see `docs/nanotrace.md`):
 - Magic: "nanotrace\0" + version + compression flag
 - Kernel name + grid dimensions (x, y, z) + cluster dimensions (x, y, z)
-- Format descriptors (string templates with placeholders)
-- Block descriptors (SM assignment + params)
+- Format descriptors (dual strings: label + tooltip, with placeholders)
+- Block descriptors (blockId, clusterId, smId, formatDescId - no parameters)
 - Event tracks (timing data in nanoseconds)
 - Little-endian, deflate compression optional
+
+**Format Descriptor Structure**: Each format has two strings:
+- **Label string**: Short format for canvas labels (e.g., "Load {0}")
+- **Tooltip string**: Full format for hover tooltips (e.g., "Load from address {0}")
+
+**Block Descriptor Structure** (12 bytes):
+- blockId (uint32), clusterId (uint32), smId (uint16), formatDescId (uint16)
+- Block strings support special placeholders: `{blockX}`, `{blockY}`, `{blockZ}`, `{blockLinear}`, `{clusterX}`, `{clusterY}`, `{clusterZ}`, `{clusterLinear}`
+
+**Track Structure** (per track in event tracks section):
+- Block descriptor ID (uint32), format descriptor ID (uint16), lane ID (uint32), format parameters (uint32[]), event count (uint32)
+- Track strings support special placeholder: `{lane}` (automatically substituted from lane ID field)
 
 ## CUDA Tracing Library (nanotrace-cuda)
 
@@ -63,23 +75,53 @@ High-performance CUDA library for generating `.nanotrace` files from GPU kernels
 
 ### Device-Side API (nanotrace.cuh)
 Header-only implementation with zero overhead:
-- `NANOTRACE_DEFINE_TRACE_TYPE(name, format_str, param_count, lane_usage)` - Compile-time trace type registration
-- `start()` - Capture timestamp using `%%globaltimer_lo` (32-bit lower portion)
-- `begin_lane(handle, block_id, lane_index)` - Initialize lane context (2 uint32s)
-- `end(start, handle, lane, [p0-p6])` - Record event (7 overloads for 0-6 params)
-- `finish_lane(handle, lane)` - Write header with SM ID (`%%smid`) and event count
+- `NANOTRACE_DEFINE_TRACE_TYPE(name, label_str, tooltip_str, param_count, lane_usage)` - Compile-time trace type registration
+- `NANOTRACE_DEFINE_BLOCK_TYPE(name, label_str, tooltip_str)` - Compile-time block type registration (0 params)
+- `NANOTRACE_DEFINE_TRACK_TYPE(name, label_str, tooltip_str, param_count)` - Compile-time track type registration (supports {lane} placeholder)
+- `start()` - Capture timestamp using `%%globaltimer_lo` (32-bit lower portion, 32ns resolution)
+- `begin_lane(handle, block_id, lane_index, enabled=true)` - Initialize lane context (2 uint32s + 1 bool), returns `lane_context_static<MaxEventWidth>`
+- `end(start, handle, lane, [p0-p6])` - Record event (7 overloads for 0-6 params), no-op if `!lane.enabled()`
+- `finish_lane(handle, lane)` - Write header with SM ID (`%%smid`) and event count, no-op if `!lane.enabled()`
+
+**Conditional Tracing**: Pass `enabled` boolean to `begin_lane()` to control tracing per-thread/warp:
+```cuda
+bool should_trace = (threadIdx.x == 0);  // Only thread 0 traces
+auto lane = nanotrace::begin_lane(handle, blockIdx.x, 0, should_trace);
+auto s = nanotrace::start();
+// ... work ...
+nanotrace::end(s, handle, lane);  // No-op if !should_trace
+nanotrace::finish_lane(handle, lane);  // No-op if !should_trace
+```
+All operations are forceinlined and use predicated execution for zero overhead when disabled.
+
+**Type Safety**: `lane_context_static<MaxEventWidth>` is typed to match the handle's width, preventing mismatched usage at compile time.
+
+**Important**: Types can be defined in any order. The `trace_writer` automatically maps `__COUNTER__` IDs to sequential file indices, so block/track/trace types don't need to be defined in a specific order.
 
 ### Host-Side API (nanotrace_host.h/cpp)
-- `static_trace_builder<NumLanes, TraceTypes...>` - Static tensor with per-lane trace types
+- `static_trace_builder<NumLanes, TraceTypes...>(max_events, grid_dims, cluster_dims=0)` - Static tensor with per-lane trace types
+  - Constructor: `(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0,0,0))`
   - Computes `max_event_width` at compile time (2/4/8 based on param counts)
   - Allocates GPU buffer matching grid dimensions
-  - Stores grid dimensions from tensor construction
-- `dynamic_trace_builder<NumLanes>` - Dynamic tensor (always event_width=8)
+  - Stores grid and cluster dimensions from construction
+- `dynamic_trace_builder<NumLanes>(max_events, grid_dims, cluster_dims=0)` - Dynamic tensor (always event_width=8)
+  - Constructor: `(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0,0,0))`
 - `trace_writer` - Generates `.nanotrace` file from tensors
+  - `set_block_type<BlockType>()` - Set block format descriptor (call before add_tensor)
+  - `set_track_type<TrackType>()` - Set track format descriptor (call before add_tensor)
+  - `register_trace_type<T>()` - Register trace type (throws on duplicate IDs)
+  - `add_tensor(builder)` - Add tensor to trace file
   - Copies device buffers to host
+  - **Multiple tensors stack lanes within blocks**: All tensors must have same grid dimensions
+  - Tensor 0: lanes [0, L₀), Tensor 1: lanes [L₀, L₀+L₁), etc. within each block
   - Writes kernel name, grid/cluster dimensions (6 uint32s)
-  - Writes format descriptors, block descriptors, event tracks
+  - Writes format descriptors (label + tooltip strings), block descriptors, event tracks
+  - Automatically maps `__COUNTER__` IDs to file indices for all format types
+  - Clamps event durations to minimum 32ns (global timer resolution)
   - Optional deflate compression (enabled by default)
+- `builder.reset()` - Reset trace tensor to zeros (cudaMemset)
+  - **Best practice**: Warmup GPU (10 iterations) → reset() → traced run
+  - Avoids cold-start timing artifacts in traces
 
 ### Performance Optimizations
 - **Cache streaming**: `.cs` specifier uses evict-first policy to minimize cache pollution for write-once data
@@ -93,7 +135,7 @@ Header-only implementation with zero overhead:
 
 ### Memory Layout
 
-**Important**: All event slots have the same width (`max_event_width`) for a given tensor, even if individual events don't fill the entire slot. The `lane.advance<MaxW>()` call ensures proper spacing.
+**Important**: All event slots have the same width (`max_event_width`) for a given tensor, even if individual events don't fill the entire slot. The `lane.advance()` call always advances by `MaxEventWidth` to ensure proper spacing.
 
 ```
 Static lane (max_event_width=2, 0 params):
@@ -112,27 +154,31 @@ Dynamic lane (max_event_width=8, 0-5 params):
 
 ### Example Usage
 ```cuda
-// Define trace types
-NANOTRACE_DEFINE_TRACE_TYPE(TraceKernel, "kernel", 0, lane_type::STATIC);
+// Define trace, block, and track types
+NANOTRACE_DEFINE_TRACE_TYPE(TraceKernel, "Kernel", "Kernel execution", 0, lane_type::STATIC);
+NANOTRACE_DEFINE_BLOCK_TYPE(MyBlock, "Block {blockX}", "Block {blockX} on SM");
+NANOTRACE_DEFINE_TRACK_TYPE(MyTrack, "Warp {lane}", "Warp {lane}", 0);
 
-// Create tensor
+// Create tensor (max_events first, then grid, then optional cluster)
 using Tensor = nanotrace::static_trace_builder<8, TraceKernel, ...>;
-Tensor trace(dim3(16,1,1), 1024);  // 16 blocks, 1024 events/lane
+Tensor trace(1024, dim3(16,1,1));  // 1024 events/lane, 16 blocks
 
 // Kernel
 __global__ void kernel(nanotrace::static_tensor_handle<8,2> handle, dim3 grid) {
     auto lane = nanotrace::begin_lane(handle, blockIdx.x, warp_id);
     auto s = nanotrace::start();
-    // ... work ...
+    // ... work (should take >32ns for meaningful duration) ...
     nanotrace::end(s, handle, lane);
     nanotrace::finish_lane(handle, lane);
 }
 
-// Write trace
+// Write trace (set_block_type and set_track_type before add_tensor)
 nanotrace::trace_writer writer("kernel");
+writer.set_block_type<MyBlock>();
+writer.set_track_type<MyTrack>();
 writer.register_trace_type<TraceKernel>();
 writer.add_tensor(trace);
-writer.write("out.nanotrace");
+writer.write("out.nanotrace");  // Compressed by default
 ```
 
 ### Build Requirements
@@ -217,6 +263,45 @@ npm run generate:large    # ~9M events, 144 SMs, grid (99071,1,1)
 
 Samples use seeded random (seed=42), sequential block placement, weighted event distribution.
 Grid dimensions match total block count. Cluster dimensions are (0,0,0) for all samples.
+
+**Format**: Generators output new binary format with:
+- Dual strings (label + tooltip) for all format descriptors
+- Block descriptors with blockId, clusterId, smId, formatDescId (12 bytes each)
+- Special block placeholders like `{blockLinear}` automatically expanded by visualizer
+
+**Validation**: Use `npm run validate <file.nanotrace>` to parse and validate binary format, showing:
+- Format descriptors (label + tooltip strings)
+- Block descriptors (blockId, clusterId, smId, formatDescId)
+- Track and event samples with timing information
+
+## B200 Sample Traces
+
+Real traces from nanotrace-cuda examples running on NVIDIA B200 (Blackwell, CC 10.0).
+Generated with the latest conditional tracing API improvements (clean `begin_lane(..., enabled)` pattern).
+
+**Files** (in `visualizer/public/samples/`, committed to repo):
+- `simple_trace_b200.nanotrace` - From simple_trace.cu example
+  - 16 blocks, 128 tracks (8 warps/block), ~12.8K events
+  - Grid (16,1,1), block (256,1,1)
+  - Static lanes with 0-param trace type
+  - Only lane 0 of each warp traces using conditional API
+- `mixed_trace_b200.nanotrace` - From mixed_trace.cu example
+  - 32 blocks, 384 tracks (12 warps/block), ~2.5K events
+  - Grid (8,4,1), block (384,1,1)
+  - Mixed static (8 lanes) + dynamic (4 lanes) tensors stacked within each block
+  - Demonstrates multiple tensor stacking with same grid dimensions
+  - Only lane 0 of each warp traces using conditional API
+- `grayscale_trace_b200.nanotrace` - From grayscale_trace.cu example
+  - 419,431 blocks, 419,431 tracks (1 per block), 419K events (1 event per block)
+  - Grid (419431,1,1), block (160,1,1)
+  - RGB to grayscale conversion kernel (16384×16384 image = 268M pixels)
+  - Only thread 0 per block traces using conditional API
+  - L2 cache flushed before warmup and before traced run
+  - All 148 SMs utilized
+
+**Access**: Available via "Load Sample File" menu in visualizer (bundled in build at `/nanotrace/samples/`)
+
+**Tooltips**: Visualizer now properly displays full tooltip strings on hover (uses `tooltipString` field instead of `labelString`)
 
 ## Controls
 

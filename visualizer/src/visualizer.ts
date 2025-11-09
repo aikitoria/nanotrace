@@ -14,7 +14,7 @@
  */
 
 import { Camera } from './utils/camera.js';
-import { parseTraceFile, buildHierarchy, formatString as formatStringHelper } from './utils/file-loader.js';
+import { parseTraceFile, buildHierarchy, formatString as formatStringHelper, formatTrackString as formatTrackStringHelper, formatBlockString as formatBlockStringHelper, formatTooltipString as formatTooltipStringHelper, formatTrackTooltipString as formatTrackTooltipStringHelper, formatBlockTooltipString as formatBlockTooltipStringHelper } from './utils/file-loader.js';
 import { createGPUBuffers, createPipelines, GPUResources } from './renderers/gpu-renderer.js';
 import { LabelRenderer } from './renderers/label-renderer.js';
 import { TimelineRenderer } from './renderers/timeline-renderer.js';
@@ -395,6 +395,9 @@ export class ZoneVisualizer {
      * Sample 1: Minimal trace (1 block, 2 events)
      * Sample 2: Small random trace (~48K events, 16 SMs)
      * Sample 3: Large random trace (~10M events, 144 SMs)
+     * Simple B200: Simple trace from nanotrace-cuda example (16 blocks, 128 tracks, ~13K events)
+     * Mixed B200: Mixed trace from nanotrace-cuda example (32 blocks, 384 tracks, ~2.5K events)
+     * Grayscale B200: Grayscale trace from nanotrace-cuda example (419K blocks, 419K events, all 148 SMs)
      * Uses Vite's import.meta.url for proper bundled path resolution.
      */
     async loadSampleFile(sampleName: string): Promise<void> {
@@ -403,11 +406,14 @@ export class ZoneVisualizer {
             'sample1': 'minimal.nanotrace',
             'sample2': 'random_small.nanotrace',
             'sample3': 'random.nanotrace',
+            'simple_b200': 'samples/simple_trace_b200.nanotrace',
+            'mixed_b200': 'samples/mixed_trace_b200.nanotrace',
+            'grayscale_b200': 'samples/grayscale_trace_b200.nanotrace',
         };
 
         const fileName = sampleFiles[sampleName];
         if (!fileName) {
-            alert('This sample is not yet available. Only Samples 1-3 are currently included.');
+            alert('This sample is not available.');
             this.fileSelector.classList.remove('hidden');
             return;
         }
@@ -505,6 +511,68 @@ export class ZoneVisualizer {
      */
     formatString(formatDescId: number, params: number[]): string {
         return formatStringHelper(this.formatDescriptors, formatDescId, params);
+    }
+
+    /**
+     * Wrapper around formatTrackStringHelper to use instance's format descriptors.
+     * Replaces {lane} placeholder and numbered placeholders like {0}, {1} with values.
+     */
+    formatTrackString(formatDescId: number, laneId: number, params: number[]): string {
+        return formatTrackStringHelper(this.formatDescriptors, formatDescId, laneId, params);
+    }
+
+    /**
+     * Wrapper around formatBlockStringHelper to use instance's format descriptors and grid dimensions.
+     * Replaces special placeholders like {blockX}, {blockY}, {blockZ}, {clusterX}, etc.
+     */
+    formatBlockString(formatDescId: number, blockId: number, clusterId: number): string {
+        return formatBlockStringHelper(
+            this.formatDescriptors,
+            formatDescId,
+            blockId,
+            clusterId,
+            this.gridDimX,
+            this.gridDimY,
+            this.gridDimZ,
+            this.clusterDimX,
+            this.clusterDimY,
+            this.clusterDimZ
+        );
+    }
+
+    /**
+     * Wrapper around formatTooltipStringHelper to use instance's format descriptors.
+     * Uses tooltip string instead of label string for hover display.
+     */
+    formatTooltipString(formatDescId: number, params: number[]): string {
+        return formatTooltipStringHelper(this.formatDescriptors, formatDescId, params);
+    }
+
+    /**
+     * Wrapper around formatTrackTooltipStringHelper to use instance's format descriptors.
+     * Uses tooltip string instead of label string for hover display.
+     */
+    formatTrackTooltipString(formatDescId: number, laneId: number, params: number[]): string {
+        return formatTrackTooltipStringHelper(this.formatDescriptors, formatDescId, laneId, params);
+    }
+
+    /**
+     * Wrapper around formatBlockTooltipStringHelper to use instance's format descriptors and grid dimensions.
+     * Uses tooltip string instead of label string for hover display.
+     */
+    formatBlockTooltipString(formatDescId: number, blockId: number, clusterId: number): string {
+        return formatBlockTooltipStringHelper(
+            this.formatDescriptors,
+            formatDescId,
+            blockId,
+            clusterId,
+            this.gridDimX,
+            this.gridDimY,
+            this.gridDimZ,
+            this.clusterDimX,
+            this.clusterDimY,
+            this.clusterDimZ
+        );
     }
 
     /**
@@ -714,7 +782,7 @@ export class ZoneVisualizer {
                 this.cursorTimestamp.style.display = 'none';
             }
 
-            this.interactionManager.updateHover(e.clientX, e.clientY, this.lanes, this.blocks, this.formatDescriptors, this.formatString.bind(this));
+            this.interactionManager.updateHover(e.clientX, e.clientY, this.lanes, this.blocks, this.formatDescriptors, this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this), this.formatBlockTooltipString.bind(this));
         });
 
         document.body.addEventListener('mouseleave', () => {
@@ -729,7 +797,7 @@ export class ZoneVisualizer {
      */
     renderZoneLabels(): void {
         if (!this.camera || !this.labelRenderer) return;
-        this.labelRenderer.renderZoneLabels(this.lanes, this.blockLanes, this.formatDescriptors, this.formatString.bind(this));
+        this.labelRenderer.renderZoneLabels(this.lanes, this.blockLanes, this.formatDescriptors, this.formatString.bind(this), this.formatBlockString.bind(this));
     }
 
     /**

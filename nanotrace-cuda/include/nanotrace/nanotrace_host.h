@@ -1,0 +1,332 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <tuple>
+#include <utility>
+#include <stdexcept>
+#include <cuda_runtime.h>
+
+#include "nanotrace.cuh"
+
+namespace nanotrace {
+
+// ============================================================================
+// Static trace builder
+// ============================================================================
+
+template<uint32_t NumLanes, typename... TraceTypes>
+class static_trace_builder {
+public:
+    static_assert(sizeof...(TraceTypes) == NumLanes,
+                  "Must provide exactly one TraceType per lane");
+
+    static_assert((... && (TraceTypes::usage == lane_type::STATIC)),
+                  "All trace types must be STATIC");
+
+    // Compute max event width at compile time
+    static constexpr uint32_t max_event_width = []() {
+        uint32_t widths[] = {
+            (TraceTypes::param_count == 0 ? 2 :
+             TraceTypes::param_count <= 2 ? 4 : 8)...
+        };
+        uint32_t max_w = 0;
+        for (uint32_t w : widths) {
+            if (w > max_w) max_w = w;
+        }
+        return max_w;
+    }();
+
+    static_trace_builder(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0, 0, 0))
+    {
+        this->grid_dims = grid_dims;
+        this->cluster_dims = cluster_dims;
+        total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
+        row_stride = max_event_width + max_events_per_lane * max_event_width;
+
+        buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
+        cudaMalloc(&d_buffer, buffer_size);
+    }
+
+    ~static_trace_builder() {
+        if (d_buffer) cudaFree(d_buffer);
+    }
+
+    // Deleted copy/move to prevent double-free
+    static_trace_builder(const static_trace_builder&) = delete;
+    static_trace_builder& operator=(const static_trace_builder&) = delete;
+    static_trace_builder(static_trace_builder&&) = delete;
+    static_trace_builder& operator=(static_trace_builder&&) = delete;
+
+    static_tensor_handle<NumLanes, max_event_width> get_handle() const {
+        return {d_buffer, row_stride};
+    }
+
+    template<uint32_t LaneIndex>
+    static constexpr uint16_t get_lane_format_id() {
+        static_assert(LaneIndex < NumLanes, "Lane index out of bounds");
+        return std::tuple_element_t<LaneIndex, std::tuple<TraceTypes...>>::id;
+    }
+
+    void reset() {
+        cudaMemset(d_buffer, 0, buffer_size);
+    }
+
+    uint32_t* d_buffer;
+    dim3 grid_dims;
+    dim3 cluster_dims;
+    uint32_t total_blocks;
+    uint32_t row_stride;
+    size_t buffer_size;
+};
+
+// ============================================================================
+// Dynamic trace builder
+// ============================================================================
+
+template<uint32_t NumLanes>
+class dynamic_trace_builder {
+public:
+    static constexpr uint32_t event_width = 8;
+
+    dynamic_trace_builder(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0, 0, 0))
+    {
+        this->grid_dims = grid_dims;
+        this->cluster_dims = cluster_dims;
+        total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
+        row_stride = event_width + max_events_per_lane * event_width;
+
+        buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
+        cudaMalloc(&d_buffer, buffer_size);
+    }
+
+    ~dynamic_trace_builder() {
+        if (d_buffer) cudaFree(d_buffer);
+    }
+
+    // Deleted copy/move to prevent double-free
+    dynamic_trace_builder(const dynamic_trace_builder&) = delete;
+    dynamic_trace_builder& operator=(const dynamic_trace_builder&) = delete;
+    dynamic_trace_builder(dynamic_trace_builder&&) = delete;
+    dynamic_trace_builder& operator=(dynamic_trace_builder&&) = delete;
+
+    dynamic_tensor_handle<NumLanes> get_handle() const {
+        return {d_buffer, row_stride};
+    }
+
+    void reset() {
+        cudaMemset(d_buffer, 0, buffer_size);
+    }
+
+    uint32_t* d_buffer;
+    dim3 grid_dims;
+    dim3 cluster_dims;
+    uint32_t total_blocks;
+    uint32_t row_stride;
+    size_t buffer_size;
+};
+
+// ============================================================================
+// Trace writer
+// ============================================================================
+
+class trace_writer {
+public:
+    trace_writer(const char* kernel_name);
+    ~trace_writer();
+
+    // Deleted copy/move
+    trace_writer(const trace_writer&) = delete;
+    trace_writer& operator=(const trace_writer&) = delete;
+    trace_writer(trace_writer&&) = delete;
+    trace_writer& operator=(trace_writer&&) = delete;
+
+    template<typename TraceType>
+    void register_trace_type();
+
+    template<typename BlockType>
+    void set_block_type();
+
+    template<typename TrackType>
+    void set_track_type();
+
+    template<uint32_t NumLanes, typename... TraceTypes>
+    void add_tensor(const static_trace_builder<NumLanes, TraceTypes...>& builder);
+
+    template<uint32_t NumLanes>
+    void add_tensor(const dynamic_trace_builder<NumLanes>& builder);
+
+    void write(const char* filename, bool compress = true);
+
+private:
+    struct format_descriptor {
+        uint16_t id;
+        std::string label_string;
+        std::string tooltip_string;
+        uint8_t param_count;
+    };
+
+    struct tensor_info {
+        uint32_t* device_buffer;
+        std::vector<uint32_t> host_buffer;  // Copied from device
+        dim3 grid_dims;
+        dim3 cluster_dims;
+        uint32_t total_blocks;
+        uint32_t num_lanes;
+        uint32_t row_stride;
+        uint32_t event_width;
+        std::vector<uint16_t> lane_format_ids;  // 0xFFFF for dynamic lanes
+    };
+
+    struct parsed_event {
+        uint32_t block_id;
+        uint32_t cluster_id;
+        uint32_t lane_id;
+        uint64_t time_offset;    // 64-bit after unwrap, ns from kernel start after conversion
+        uint32_t duration;       // Nanoseconds
+        uint16_t sm_id;
+        uint16_t format_id;
+        uint8_t param_count;
+        uint32_t params[6];      // Maximum 6 parameters (static lanes)
+    };
+
+    std::string kernel_name;
+    uint16_t block_format_id;
+    uint16_t track_format_id;
+    std::vector<format_descriptor> formats;
+    std::vector<tensor_info> tensors;
+
+    void write_uint8(std::vector<uint8_t>& buf, uint8_t val);
+    void write_uint16(std::vector<uint8_t>& buf, uint16_t val);
+    void write_uint32(std::vector<uint8_t>& buf, uint32_t val);
+    void write_uint64(std::vector<uint8_t>& buf, uint64_t val);
+    void write_string(std::vector<uint8_t>& buf, const std::string& str);
+
+    // Post-processing pipeline (warptrace-style)
+    std::vector<parsed_event> parse_all_events();
+    void fix_timer_wraparound(std::vector<parsed_event>& events);
+    uint64_t find_kernel_start_time(const std::vector<parsed_event>& events);
+    void convert_to_offsets(std::vector<parsed_event>& events, uint64_t kernel_start_time);
+};
+
+// ============================================================================
+// Template implementations
+// ============================================================================
+
+template<typename TraceType>
+void trace_writer::register_trace_type() {
+    // Check for duplicate trace type ID
+    for (const auto& fmt : formats) {
+        if (fmt.id == TraceType::id) {
+            throw std::runtime_error(std::string("Duplicate trace type ID ") +
+                                     std::to_string(TraceType::id));
+        }
+    }
+
+    formats.push_back({
+        TraceType::id,
+        TraceType::label_string,
+        TraceType::tooltip_string,
+        TraceType::param_count
+    });
+}
+
+template<typename BlockType>
+void trace_writer::set_block_type() {
+    static_assert(BlockType::is_block_type, "Must use NANOTRACE_DEFINE_BLOCK_TYPE macro");
+
+    // Check for duplicate block type ID
+    for (const auto& fmt : formats) {
+        if (fmt.id == BlockType::id) {
+            throw std::runtime_error(std::string("Duplicate block type ID ") +
+                                     std::to_string(BlockType::id));
+        }
+    }
+
+    block_format_id = BlockType::id;
+    formats.push_back({
+        BlockType::id,
+        BlockType::label_string,
+        BlockType::tooltip_string,
+        BlockType::param_count
+    });
+}
+
+template<typename TrackType>
+void trace_writer::set_track_type() {
+    static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
+
+    // Check for duplicate track type ID
+    for (const auto& fmt : formats) {
+        if (fmt.id == TrackType::id) {
+            throw std::runtime_error(std::string("Duplicate track type ID ") +
+                                     std::to_string(TrackType::id));
+        }
+    }
+
+    track_format_id = TrackType::id;
+    formats.push_back({
+        TrackType::id,
+        TrackType::label_string,
+        TrackType::tooltip_string,
+        TrackType::param_count
+    });
+}
+
+template<uint32_t NumLanes, typename... TraceTypes>
+void trace_writer::add_tensor(const static_trace_builder<NumLanes, TraceTypes...>& builder) {
+    // Extract lane format IDs for static tensor using index_sequence
+    std::vector<uint16_t> format_ids;
+    format_ids.reserve(NumLanes);
+
+    [&]<size_t... Is>(std::index_sequence<Is...>) {
+        (format_ids.push_back(builder.template get_lane_format_id<Is>()), ...);
+    }(std::make_index_sequence<NumLanes>{});
+
+    // Allocate host buffer and copy from device
+    size_t buffer_size = builder.total_blocks * NumLanes * builder.row_stride;
+    std::vector<uint32_t> host_buffer(buffer_size);
+
+    cudaMemcpy(host_buffer.data(), builder.d_buffer,
+               buffer_size * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+    tensors.push_back({
+        builder.d_buffer,
+        std::move(host_buffer),
+        builder.grid_dims,
+        builder.cluster_dims,
+        builder.total_blocks,
+        NumLanes,
+        builder.row_stride,
+        builder.max_event_width,
+        std::move(format_ids)
+    });
+}
+
+template<uint32_t NumLanes>
+void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
+    // Dynamic tensor: all lanes have format_id = 0xFFFF
+    std::vector<uint16_t> format_ids(NumLanes, 0xFFFF);
+
+    // Allocate host buffer and copy from device
+    size_t buffer_size = builder.total_blocks * NumLanes * builder.row_stride;
+    std::vector<uint32_t> host_buffer(buffer_size);
+
+    cudaMemcpy(host_buffer.data(), builder.d_buffer,
+               buffer_size * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+    tensors.push_back({
+        builder.d_buffer,
+        std::move(host_buffer),
+        builder.grid_dims,
+        builder.cluster_dims,
+        builder.total_blocks,
+        NumLanes,
+        builder.row_stride,
+        8,  // event_width for dynamic
+        std::move(format_ids)
+    });
+}
+
+} // namespace nanotrace

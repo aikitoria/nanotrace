@@ -10,7 +10,8 @@ import * as fs from 'fs';
 import * as zlib from 'zlib';
 
 interface FormatDescriptor {
-    formatString: string;
+    labelString: string;
+    tooltipString: string;
     paramCount: number;
 }
 
@@ -89,37 +90,34 @@ function validateNanotrace(filename: string): boolean {
     console.log('\nFormat Descriptors:');
     const formatDescriptors: FormatDescriptor[] = [];
     for (let i = 0; i < formatDescCount; i++) {
-        const formatString = readString();
+        const labelString = readString();
+        const tooltipString = readString();
         const paramCount = buffer.readUInt8(offset); offset += 1;
-        formatDescriptors.push({ formatString, paramCount });
-        console.log(`  [${i}] ${formatString} (${paramCount} params)`);
+        formatDescriptors.push({ labelString, tooltipString, paramCount });
+        console.log(`  [${i}] Label: "${labelString}", Tooltip: "${tooltipString}" (${paramCount} params)`);
     }
 
     // Read block descriptors
     console.log(`\nBlock Descriptors: (${blockDescCount} total)`);
     const smIds = new Set<number>();
     for (let i = 0; i < Math.min(5, blockDescCount); i++) {
+        const blockId = buffer.readUInt32LE(offset); offset += 4;
+        const clusterId = buffer.readUInt32LE(offset); offset += 4;
         const smId = buffer.readUInt16LE(offset); offset += 2;
         const formatId = buffer.readUInt16LE(offset); offset += 2;
         smIds.add(smId);
 
-        const paramCount = formatDescriptors[formatId].paramCount;
-        const params: number[] = [];
-        for (let j = 0; j < paramCount; j++) {
-            params.push(buffer.readUInt32LE(offset)); offset += 4;
-        }
-
-        const fmtStr = formatDescriptors[formatId].formatString;
-        console.log(`  [${i}] SM ${smId}: ${fmtStr} with params [${params.join(', ')}]`);
+        const labelStr = formatDescriptors[formatId].labelString;
+        console.log(`  [${i}] Block ${blockId}, Cluster ${clusterId}, SM ${smId}: "${labelStr}"`);
     }
 
     // Skip remaining block descriptors
     for (let i = 5; i < blockDescCount; i++) {
+        offset += 4; // block ID
+        offset += 4; // cluster ID
         const smId = buffer.readUInt16LE(offset); offset += 2;
-        const formatId = buffer.readUInt16LE(offset); offset += 2;
+        offset += 2; // format ID
         smIds.add(smId);
-        const paramCount = formatDescriptors[formatId].paramCount;
-        offset += paramCount * 4; // Skip params
     }
 
     if (blockDescCount > 5) {
@@ -134,6 +132,7 @@ function validateNanotrace(filename: string): boolean {
     for (let i = 0; i < Math.min(3, trackCount); i++) {
         const blockDescId = buffer.readUInt32LE(offset); offset += 4;
         const formatId = buffer.readUInt16LE(offset); offset += 2;
+        const laneId = buffer.readUInt32LE(offset); offset += 4;
 
         // Read track params
         const trackParamCount = formatDescriptors[formatId].paramCount;
@@ -145,8 +144,12 @@ function validateNanotrace(filename: string): boolean {
         const eventCount = buffer.readUInt32LE(offset); offset += 4;
         totalEventsRead += eventCount;
 
-        const trackFmt = formatDescriptors[formatId].formatString;
-        console.log(`  [${i}] Block ${blockDescId}, ${trackFmt} with params [${trackParams.join(', ')}]: ${eventCount} events`);
+        const trackLabel = formatDescriptors[formatId].labelString
+            .replace('{lane}', laneId.toString());
+        const trackLabelWithParams = trackParams.length > 0
+            ? `${trackLabel} with params [${trackParams.join(', ')}]`
+            : trackLabel;
+        console.log(`  [${i}] Block ${blockDescId}, "${trackLabelWithParams}": ${eventCount} events`);
 
         // Read events
         for (let j = 0; j < Math.min(2, eventCount); j++) {
@@ -160,8 +163,8 @@ function validateNanotrace(filename: string): boolean {
                 eventParams.push(buffer.readUInt32LE(offset)); offset += 4;
             }
 
-            const eventFmt = formatDescriptors[eventFormatId].formatString;
-            console.log(`    Event ${j}: t=${timeOffset}ns, dur=${duration}ns, ${eventFmt} with params [${eventParams.join(', ')}]`);
+            const eventLabel = formatDescriptors[eventFormatId].labelString;
+            console.log(`    Event ${j}: t=${timeOffset}ns, dur=${duration}ns, "${eventLabel}" with params [${eventParams.join(', ')}]`);
         }
 
         // Skip remaining events in this track
@@ -181,6 +184,7 @@ function validateNanotrace(filename: string): boolean {
     for (let i = 3; i < trackCount; i++) {
         offset += 4; // block desc id
         const formatId = buffer.readUInt16LE(offset); offset += 2;
+        offset += 4; // lane id
         const trackParamCount = formatDescriptors[formatId].paramCount;
         offset += trackParamCount * 4;
         const eventCount = buffer.readUInt32LE(offset); offset += 4;

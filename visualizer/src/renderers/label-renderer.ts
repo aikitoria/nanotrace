@@ -105,7 +105,7 @@ export class LabelRenderer {
         blocks: Block[],
         blockLanes: BlockLane[],
         formatDescriptors: FormatDescriptor[],
-        formatString: (formatDescId: number, params: number[]) => string
+        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
     ): void {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
@@ -181,7 +181,7 @@ export class LabelRenderer {
                 const durationNs = Math.round((block.endX - block.startX) * MS_TO_NS);
 
                 const blockName = formatDescriptors.length > 0
-                    ? formatString(block.formatDescId, block.params)
+                    ? formatBlockString(block.formatDescId, block.blockId, block.clusterId)
                     : `Block #${block.id}`;
 
                 // Use maxWidth parameter to clip long labels to fit available space
@@ -213,7 +213,8 @@ export class LabelRenderer {
         lanes: Lane[],
         blockLanes: BlockLane[],
         formatDescriptors: FormatDescriptor[],
-        formatString: (formatDescId: number, params: number[]) => string
+        formatString: (formatDescId: number, params: number[]) => string,
+        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
     ): void {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
@@ -224,7 +225,7 @@ export class LabelRenderer {
         this.labelCtx.scale(devicePixelRatio, devicePixelRatio);
 
         // Use cached blocks array to avoid per-frame allocations
-        this.renderBlockLabels(this.cachedBlocks, blockLanes, formatDescriptors, formatString);
+        this.renderBlockLabels(this.cachedBlocks, blockLanes, formatDescriptors, formatBlockString);
 
         const minWidth = MIN_ZONE_LABEL_WIDTH;
         const minHeight = MIN_ZONE_LABEL_HEIGHT;

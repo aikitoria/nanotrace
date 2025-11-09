@@ -68,10 +68,11 @@ Each format descriptor describes a reusable format string template.
 
 | Field              | Type      | Description                                       |
 |--------------------|-----------|---------------------------------------------------|
-| Format String      | `string`  | Format template (e.g., "Tile {0}x{1}")            |
-| Placeholder Count  | `uint8`   | Number of `{N}` placeholders in the format string |
+| Label String       | `string`  | Short format for labels (e.g., "Tile {0}x{1}")    |
+| Tooltip String     | `string`  | Full format for tooltips (e.g., "Tile {0}x{1} at offset {2}") |
+| Placeholder Count  | `uint8`   | Number of `{N}` placeholders in the format strings |
 
-**Size per descriptor:** 2 + format_string_length + 1 bytes
+**Size per descriptor:** 2 + label_string_length + 2 + tooltip_string_length + 1 bytes
 
 ### 3. Block Descriptors
 
@@ -81,13 +82,27 @@ Each block descriptor represents a thread block execution on a specific SM.
 
 | Field                 | Type        | Description                                                                  |
 |-----------------------|-------------|------------------------------------------------------------------------------|
+| Block ID              | `uint32`    | Linear block index (row-major: blockIdx.x + blockIdx.y * gridDim.x + blockIdx.z * gridDim.x * gridDim.y) |
+| Cluster ID            | `uint32`    | Linear cluster index (0 if not using clusters)                              |
 | SM ID                 | `uint16`    | Streaming Multiprocessor ID (0-65535)                                        |
 | Format Descriptor ID  | `uint16`    | Index into format descriptors array                                          |
-| Format Parameters     | `uint32[]`  | Parameter values (count = placeholder count of referenced format descriptor) |
 
-**Size per descriptor:** 2 + 2 + (placeholder_count × 4) bytes
+**Size per descriptor:** 4 + 4 + 2 + 2 = 12 bytes
 
-**Note:** To parse format parameters, look up the Format Descriptor at the specified ID and read as many `uint32` values as its placeholder count indicates.
+**Special Placeholders:** Block format strings support special placeholders that are computed from Block ID, Cluster ID, and grid/cluster dimensions:
+- `{blockLinear}` - Linear block index (same as Block ID field)
+- `{blockX}` - Block X coordinate: `block_id % grid.x`
+- `{blockY}` - Block Y coordinate: `(block_id / grid.x) % grid.y`
+- `{blockZ}` - Block Z coordinate: `block_id / (grid.x * grid.y)`
+- `{clusterLinear}` - Linear cluster index (same as Cluster ID field)
+- `{clusterX}` - Cluster X coordinate: `cluster_id % cluster.x`
+- `{clusterY}` - Cluster Y coordinate: `(cluster_id / cluster.x) % cluster.y`
+- `{clusterZ}` - Cluster Z coordinate: `cluster_id / (cluster.x * cluster.y)`
+
+**Examples:**
+- Label: `"Block {blockLinear}"` → "Block 42"
+- Label: `"B{blockX},{blockY}"` → "B3,5"
+- Tooltip: `"Block ({blockX},{blockY},{blockZ}) on SM{smId}"` → "Block (2,1,0) on SM7"
 
 ### 4. Event Tracks
 
@@ -99,6 +114,7 @@ Each track contains a sequence of events for a specific execution unit (e.g., wa
 |-----------------------|-------------|------------------------------------------------------------------------------|
 | Block Descriptor ID   | `uint32`    | Index into block descriptors array                                           |
 | Format Descriptor ID  | `uint16`    | Index into format descriptors array (for track/sublane name)                 |
+| Lane ID               | `uint32`    | Lane/warp identifier for `{lane}` placeholder expansion                      |
 | Format Parameters     | `uint32[]`  | Parameter values (count = placeholder count of referenced format descriptor) |
 | Event Count           | `uint32`    | Number of events in this track                                               |
 
@@ -111,7 +127,10 @@ Followed by **Event Count** event descriptors:
 | Format Descriptor ID  | `uint16`    | Index into format descriptors array                                          |
 | Format Parameters     | `uint32[]`  | Parameter values (count = placeholder count of referenced format descriptor) |
 
-**Size per track:** 4 + 2 + (track_placeholder_count × 4) + 4 + Σ(8 + 2 + (event_placeholder_count × 4)) bytes for each event
+**Size per track:** 4 + 2 + 4 + (track_placeholder_count × 4) + 4 + Σ(8 + 2 + (event_placeholder_count × 4)) bytes for each event
+
+**Special track placeholders:**
+- `{lane}` - Lane/warp ID (automatically substituted from Lane ID field)
 
 ## Parsing Order and Requirements
 
@@ -160,25 +179,33 @@ Offset  Hex                                         Description
 0x0036  01 00 00 00                                 Track count: 1
 0x003A  02 00 00 00 00 00 00 00                     Total event count: 2
 
-# Format Descriptor 0
-0x0042  09 00                                       String length: 9
-0x0044  42 6C 6F 63 6B 20 7B 30 7D                  "Block {0}"
-0x004D  01                                          Placeholder count: 1
+# Format Descriptor 0 (Block format)
+0x0042  08 00                                       Label string length: 8
+0x0044  42 6C 6F 63 6B 20 7B 30 7D                  "Block {blockLinear}" (label - WRONG, should be special placeholder)
+0x004C  0D 00                                       Tooltip string length: 13
+0x004E  42 6C 6F 63 6B 20 7B 62 6C 6F 63 6B 4C 69  "Block {blockLinear}" (tooltip)
+        6E 65 61 72 7D
+0x005B  00                                          Placeholder count: 0 (special placeholders)
 
-# Format Descriptor 1
-0x004E  08 00                                       String length: 8
-0x0050  57 61 72 70 20 7B 30 7D                     "Warp {0}"
-0x0058  01                                          Placeholder count: 1
+# Format Descriptor 1 (Warp format)
+0x005C  08 00                                       Label string length: 8
+0x005E  57 61 72 70 20 7B 30 7D                     "Warp {0}" (label)
+0x0066  08 00                                       Tooltip string length: 8
+0x0068  57 61 72 70 20 7B 30 7D                     "Warp {0}" (tooltip)
+0x0070  01                                          Placeholder count: 1
 
-# Format Descriptor 2
-0x0059  08 00                                       String length: 8
-0x005B  4C 6F 61 64 20 7B 30 7D                     "Load {0}"
-0x0063  01                                          Placeholder count: 1
+# Format Descriptor 2 (Load event)
+0x0071  08 00                                       Label string length: 8
+0x0073  4C 6F 61 64 20 7B 30 7D                     "Load {0}" (label)
+0x007B  08 00                                       Tooltip string length: 8
+0x007D  4C 6F 61 64 20 7B 30 7D                     "Load {0}" (tooltip)
+0x0085  01                                          Placeholder count: 1
 
 # Block Descriptor 0
-0x0064  00 00                                       SM ID: 0
-0x0066  00 00                                       Format descriptor ID: 0
-0x0068  2A 00 00 00                                 Param[0]: 42
+0x0086  00 00 00 00                                 Block ID: 0
+0x008A  00 00 00 00                                 Cluster ID: 0
+0x008E  00 00                                       SM ID: 0
+0x0090  00 00                                       Format descriptor ID: 0
 
 # Event Track 0
 0x006C  00 00 00 00                                 Block descriptor ID: 0

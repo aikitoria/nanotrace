@@ -14,12 +14,14 @@
  */
 
 /**
- * Format descriptor with placeholder string template.
+ * Format descriptor with dual string templates for labels and tooltips.
  * Used for blocks, warps/tracks, and events to reduce memory usage.
- * Example: "Warp {0}" with params [5] → "Warp 5"
+ * Example label: "Warp {0}" with params [5] → "Warp 5"
+ * Example tooltip: "Warp {0} on SM {1}" with params [5, 3] → "Warp 5 on SM 3"
  */
 export interface FormatDescriptor {
-    formatString: string;           // Template with {0}, {1}, etc. placeholders
+    labelString: string;             // Short template for labels (visible on canvas)
+    tooltipString: string;           // Full template for tooltips (on hover)
     placeholderCount: number;        // Number of parameters required
 }
 
@@ -28,9 +30,10 @@ export interface FormatDescriptor {
  * Represents a GPU thread block scheduled on a specific SM.
  */
 export interface BlockDescriptor {
+    blockId: number;                 // Linear block index (row-major)
+    clusterId: number;               // Linear cluster index (0 if not using clusters)
     smId: number;                    // Streaming multiprocessor ID
-    formatDescId: number;            // Index into FormatDescriptor array
-    params: number[];                // Values to substitute into format string
+    formatDescId: number;            // Index into FormatDescriptor array (typically 0 for block format)
 }
 
 /**
@@ -51,6 +54,7 @@ export interface EventData {
 export interface WarpTrack {
     blockDescId: number;             // Index into BlockDescriptor array
     formatDescId: number;            // Format descriptor for track/warp name
+    laneId: number;                  // Lane/warp identifier for {lane} placeholder
     params: number[];                // Parameters for track/warp name
     events: EventData[];             // Timed events within this track
 }
@@ -72,6 +76,7 @@ export interface Zone {
     formatDescId: number;            // Format descriptor for zone name
     params: number[];                // Parameters for zone name
     warpFormatDescId: number;        // Format descriptor for parent warp name
+    warpLaneId: number;              // Parent warp lane ID for {lane} placeholder
     warpParams: number[];            // Parameters for parent warp name
     laneIdx: number;                 // Parent SM lane index
     blockLaneIdx: number;            // Parent block lane index
@@ -96,7 +101,8 @@ export interface Block {
     numSublanes: number;             // Number of sublanes (cached)
     maxZoneWidth: number;            // Widest zone (for label culling)
     formatDescId: number;            // Format descriptor for block name
-    params: number[];                // Parameters for block name
+    blockId: number;                 // Linear block index (for computing {blockX}, {blockY}, etc.)
+    clusterId: number;               // Linear cluster index (0 if not using clusters)
     laneIdx: number;                 // Parent SM lane index
     blockLaneIdx: number;            // Parent block lane index
     x: number;                       // Center X (world space, for GPU)
