@@ -8,3 +8,9 @@ target_link_libraries(mixed_trace PRIVATE nanotrace_host)
 
 add_executable(grayscale_trace grayscale_trace.cu)
 target_link_libraries(grayscale_trace PRIVATE nanotrace_host)
+
+add_executable(tma_bandwidth_bench_static tma_bandwidth_bench_static.cu)
+target_link_libraries(tma_bandwidth_bench_static PRIVATE nanotrace_host cuda)
+
+add_executable(tma_bandwidth_bench_atomic tma_bandwidth_bench_atomic.cu)
+target_link_libraries(tma_bandwidth_bench_atomic PRIVATE nanotrace_host cuda)

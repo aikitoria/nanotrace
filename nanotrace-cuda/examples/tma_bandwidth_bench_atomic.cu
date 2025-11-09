@@ -1,0 +1,380 @@
+#include <cuda_runtime.h>
+#include <cudaTypedefs.h>
+#include <cuda.h>
+#include <cuda/barrier>
+#include <cooperative_groups.h>
+#include <stdio.h>
+#include <assert.h>
+#include <nanotrace/nanotrace.cuh>
+#include <nanotrace/nanotrace_host.h>
+
+using barrier = cuda::barrier<cuda::thread_scope_block>;
+namespace cde = cuda::device::experimental;
+namespace cg = cooperative_groups;
+
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+constexpr int TILE_HEIGHT = 64;
+constexpr int TILE_WIDTH = 128;
+constexpr int TILE_SIZE_BYTES = TILE_HEIGHT * TILE_WIDTH * sizeof(float);
+
+constexpr int TENSOR_WIDTH = 131072;
+constexpr int TENSOR_HEIGHT = 131072;
+constexpr size_t TENSOR_NUM_ELEMENTS = static_cast<size_t>(TENSOR_WIDTH) * TENSOR_HEIGHT;
+constexpr size_t TENSOR_SIZE_BYTES = TENSOR_NUM_ELEMENTS * sizeof(float);
+
+// Define trace types
+NANOTRACE_DEFINE_TRACE_TYPE(TileTransfer, "Tile {0},{1}", "Transfer tile ({0},{1})", 2, nanotrace::lane_type::STATIC);
+NANOTRACE_DEFINE_BLOCK_TYPE(TMABlock, "Block {blockLinear}", "Block {blockLinear} on SM");
+NANOTRACE_DEFINE_TRACK_TYPE(BufferTrack, "Buffer {lane}", "Buffer {lane}", 0);
+
+PFN_cuTensorMapEncodeTiled_v12000 get_cuTensorMapEncodeTiled() {
+    cudaDriverEntryPointQueryResult driver_status;
+    void* cuTensorMapEncodeTiled_ptr = nullptr;
+    CUDA_CHECK(cudaGetDriverEntryPointByVersion(
+        "cuTensorMapEncodeTiled",
+        &cuTensorMapEncodeTiled_ptr,
+        12000,
+        cudaEnableDefault,
+        &driver_status
+    ));
+    assert(driver_status == cudaDriverEntryPointSuccess);
+    return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(cuTensorMapEncodeTiled_ptr);
+}
+
+constexpr int NUM_BUFFERS = 3;
+
+__global__ void tma_bandwidth_kernel(
+    const __grid_constant__ CUtensorMap tensor_map,
+    int total_tiles,
+    int* global_tile_counter,
+    nanotrace::static_tensor_handle<3, 4> trace_handle
+) {
+    extern __shared__ __align__(128) float smem_buffer_raw[];
+    float (*smem_buffer)[TILE_HEIGHT][TILE_WIDTH] =
+        reinterpret_cast<float (*)[TILE_HEIGHT][TILE_WIDTH]>(smem_buffer_raw);
+
+    #pragma nv_diag_suppress static_var_with_dynamic_init
+    __shared__ barrier bar[NUM_BUFFERS];
+    __shared__ int shared_tile_idx;
+
+    const int tid = threadIdx.x;
+
+    // Initialize 3 lane contexts (one per buffer) - only thread 0 traces
+    const int block_id = blockIdx.x + blockIdx.y * gridDim.x + blockIdx.z * gridDim.x * gridDim.y;
+    bool should_trace = (tid == 0);
+    nanotrace::lane_context_static<4> lanes[3] = {
+        nanotrace::begin_lane(trace_handle, block_id, 0, should_trace),
+        nanotrace::begin_lane(trace_handle, block_id, 1, should_trace),
+        nanotrace::begin_lane(trace_handle, block_id, 2, should_trace)
+    };
+
+    nanotrace::start_token trace_start[3] = {
+        nanotrace::start_zero(),
+        nanotrace::start_zero(),
+        nanotrace::start_zero()
+    };
+    int tile_coords_x[NUM_BUFFERS];
+    int tile_coords_y[NUM_BUFFERS];
+
+    if (tid == 0) {
+        for (int i = 0; i < NUM_BUFFERS; i++) {
+            init(&bar[i], 1);
+        }
+    }
+    __syncthreads();
+
+    constexpr int tiles_per_row = TENSOR_WIDTH / TILE_WIDTH;
+
+    int stage = 0;
+    int tile_buffer[NUM_BUFFERS];
+    for (int i = 0; i < NUM_BUFFERS; i++) {
+        tile_buffer[i] = -1;
+    }
+
+    for (int i = 0; i < (NUM_BUFFERS - 1); i++) {
+        if (tid == 0) {
+            int tile = atomicAdd(global_tile_counter, 1);
+            shared_tile_idx = (tile < total_tiles) ? tile : -1;
+        }
+        __syncthreads();
+        int tile_idx = shared_tile_idx;
+
+        tile_buffer[stage] = tile_idx;
+
+        if (tile_idx >= 0 && tid == 0) {
+            int tile_y = tile_idx / tiles_per_row;
+            int tile_x = tile_idx % tiles_per_row;
+            int coord_x = tile_x * TILE_WIDTH;
+            int coord_y = tile_y * TILE_HEIGHT;
+
+            tile_coords_x[stage] = tile_x;
+            tile_coords_y[stage] = tile_y;
+
+            trace_start[stage] = nanotrace::start();
+
+            cg::invoke_one(cg::coalesced_threads(), [&]() {
+                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                    &smem_buffer[stage],
+                    &tensor_map,
+                    coord_x,
+                    coord_y,
+                    bar[stage]
+                );
+                (void)cuda::device::barrier_arrive_tx(bar[stage], 1, TILE_SIZE_BYTES);
+            });
+        }
+        stage = (stage + 1) % NUM_BUFFERS;
+    }
+    __syncthreads();
+
+    int parity = 0;
+
+    while (true) {
+        if (tid == 0) {
+            int tile = atomicAdd(global_tile_counter, 1);
+            shared_tile_idx = (tile < total_tiles) ? tile : -1;
+        }
+        __syncthreads();
+        int future_tile = shared_tile_idx;
+
+        if (future_tile >= 0 && tid == 0) {
+            int tile_y = future_tile / tiles_per_row;
+            int tile_x = future_tile % tiles_per_row;
+            int coord_x = tile_x * TILE_WIDTH;
+            int coord_y = tile_y * TILE_HEIGHT;
+
+            tile_coords_x[stage] = tile_x;
+            tile_coords_y[stage] = tile_y;
+
+            trace_start[stage] = nanotrace::start();
+
+            cg::invoke_one(cg::coalesced_threads(), [&]() {
+                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                    &smem_buffer[stage],
+                    &tensor_map,
+                    coord_x,
+                    coord_y,
+                    bar[stage]
+                );
+                (void)cuda::device::barrier_arrive_tx(bar[stage], 1, TILE_SIZE_BYTES);
+            });
+        }
+
+        tile_buffer[stage] = future_tile;
+        stage = (stage + 1) % NUM_BUFFERS;
+
+        int current_tile = tile_buffer[stage];
+        if (current_tile == -1) break;
+
+        while (!cuda::ptx::mbarrier_try_wait_parity(
+            cuda::ptx::sem_acquire,
+            cuda::ptx::scope_cta,
+            cuda::device::barrier_native_handle(bar[stage]),
+            parity)) { }
+
+        if (tid == 0) {
+            nanotrace::end(trace_start[stage], trace_handle, lanes[stage],
+                          tile_coords_x[stage], tile_coords_y[stage]);
+        }
+
+        parity ^= (stage == (NUM_BUFFERS - 1));
+
+        if (tid == 0) {
+            float dummy = smem_buffer[stage][0][0];
+            if (dummy > 1e30f) {
+                smem_buffer[stage][0][1] = dummy;
+            }
+        }
+
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        nanotrace::finish_lane(trace_handle, lanes[0]);
+        nanotrace::finish_lane(trace_handle, lanes[1]);
+        nanotrace::finish_lane(trace_handle, lanes[2]);
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <num_blocks>\n", argv[0]);
+        fprintf(stderr, "  num_blocks: Number of thread blocks (SMs to use)\n");
+        return 1;
+    }
+
+    int num_blocks = atoi(argv[1]);
+    if (num_blocks <= 0) {
+        fprintf(stderr, "Error: num_blocks must be positive\n");
+        return 1;
+    }
+
+    printf("=== TMA Bandwidth Benchmark (Atomic Schedule) ===\n");
+    printf("Tensor size: %.2f GiB (%zu elements)\n",
+           TENSOR_SIZE_BYTES / (1024.0 * 1024 * 1024),
+           TENSOR_NUM_ELEMENTS);
+    printf("Tensor dimensions: %d rows x %d cols\n", TENSOR_HEIGHT, TENSOR_WIDTH);
+    printf("Tile dimensions: %d rows x %d cols (%d bytes)\n",
+           TILE_HEIGHT, TILE_WIDTH, TILE_SIZE_BYTES);
+
+
+    int tiles_per_row = TENSOR_WIDTH / TILE_WIDTH;
+    int tiles_per_col = TENSOR_HEIGHT / TILE_HEIGHT;
+    int total_tiles = tiles_per_row * tiles_per_col;
+
+    printf("Total tiles: %d (grid: %d x %d)\n", total_tiles, tiles_per_col, tiles_per_row);
+    printf("Blocks: %d (dynamic work distribution)\n", num_blocks);
+
+    float* d_tensor;
+    CUDA_CHECK(cudaMalloc(&d_tensor, TENSOR_SIZE_BYTES));
+
+    int* d_tile_counter;
+    CUDA_CHECK(cudaMalloc(&d_tile_counter, sizeof(int)));
+
+    CUDA_CHECK(cudaMemset(d_tensor, 0x42, TENSOR_SIZE_BYTES));
+
+    CUtensorMap tensor_map{};
+    constexpr uint32_t rank = 2;
+    uint64_t size[rank] = {TENSOR_WIDTH, TENSOR_HEIGHT};
+    uint64_t stride[rank - 1] = {TENSOR_WIDTH * sizeof(float)};
+    uint32_t box_size[rank] = {TILE_WIDTH, TILE_HEIGHT};
+    uint32_t elem_stride[rank] = {1, 1};
+
+    auto cuTensorMapEncodeTiled = get_cuTensorMapEncodeTiled();
+    CUresult res = cuTensorMapEncodeTiled(
+        &tensor_map,
+        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+        rank,
+        d_tensor,
+        size,
+        stride,
+        box_size,
+        elem_stride,
+        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    );
+
+    if (res != CUDA_SUCCESS) {
+        const char* errStr;
+        cuGetErrorString(res, &errStr);
+        fprintf(stderr, "cuTensorMapEncodeTiled failed: %s\n", errStr);
+        return 1;
+    }
+
+    size_t shared_mem_size = NUM_BUFFERS * TILE_SIZE_BYTES;
+    printf("Dynamic shared memory per block: %zu KB (allows %d blocks per SM)\n",
+           shared_mem_size / 1024, 228 / (int)(shared_mem_size / 1024));
+
+    if (shared_mem_size > 48 * 1024) {
+        CUDA_CHECK(cudaFuncSetAttribute(
+            tma_bandwidth_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            shared_mem_size
+        ));
+        printf("Set max dynamic shared memory to %zu KB\n", shared_mem_size / 1024);
+    }
+
+    // Setup nanotrace: 3 lanes per block (one per buffer)
+    printf("\nSetting up nanotrace...\n");
+    dim3 grid(num_blocks, 1, 1);
+    uint32_t tiles_per_block = (total_tiles + num_blocks - 1) / num_blocks;
+    uint32_t max_events_per_lane = tiles_per_block + 50;  // Add extra buffer for load imbalance
+
+    using TraceConfig = nanotrace::static_trace_builder<3, TileTransfer, TileTransfer, TileTransfer>;
+    TraceConfig trace_tensor(max_events_per_lane, grid);
+
+    printf("Trace setup: %d blocks × 3 lanes/block, %u max events/lane\n",
+           num_blocks, max_events_per_lane);
+
+    printf("\nWarming up...\n");
+    int threads_per_block = 32;
+
+    CUDA_CHECK(cudaGetLastError());
+
+    printf("Launching kernel with: blocks=%d, threads=%d, smem=%zu (dynamic load balancing)\n",
+           num_blocks, threads_per_block, shared_mem_size);
+
+    // Warmup runs
+    for (int i = 0; i < 5; i++) {
+        CUDA_CHECK(cudaMemset(d_tile_counter, 0, sizeof(int)));
+        tma_bandwidth_kernel<<<grid, threads_per_block, shared_mem_size>>>(
+            tensor_map, total_tiles, d_tile_counter, trace_tensor.get_handle());
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaError_t launch_err = cudaGetLastError();
+    if (launch_err != cudaSuccess) {
+        fprintf(stderr, "Kernel launch error: %s\n", cudaGetErrorString(launch_err));
+        return 1;
+    }
+
+    printf("Warmup complete\n");
+
+    printf("Running benchmark...\n");
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    const int num_iters = 10;
+    float total_ms = 0.0f;
+    for (int i = 0; i < num_iters; i++) {
+        CUDA_CHECK(cudaMemset(d_tile_counter, 0, sizeof(int)));
+
+        CUDA_CHECK(cudaEventRecord(start));
+        tma_bandwidth_kernel<<<grid, threads_per_block, shared_mem_size>>>(
+            tensor_map, total_tiles, d_tile_counter, trace_tensor.get_handle());
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float iter_ms;
+        CUDA_CHECK(cudaEventElapsedTime(&iter_ms, start, stop));
+        total_ms += iter_ms;
+    }
+    float elapsed_ms = total_ms / num_iters;
+
+    double elapsed_s = elapsed_ms / 1000.0;
+    double bandwidth_gb_s = TENSOR_SIZE_BYTES / (1000.0 * 1000 * 1000) / elapsed_s;
+    double peak_gb_s = 8000.0;
+
+    printf("\n=== Results ===\n");
+    printf("Elapsed time: %.3f ms\n", elapsed_ms);
+    printf("Bandwidth: %.2f GB/s (%.1f%% of peak %.0f GB/s)\n",
+           bandwidth_gb_s, (bandwidth_gb_s / peak_gb_s) * 100, peak_gb_s);
+    printf("Tiles processed: %d\n", total_tiles);
+    printf("Tiles/ms: %.0f\n", total_tiles / elapsed_ms);
+
+    // Reset and run traced iteration
+    printf("\nRunning traced iteration...\n");
+    trace_tensor.reset();
+    CUDA_CHECK(cudaMemset(d_tile_counter, 0, sizeof(int)));
+    tma_bandwidth_kernel<<<grid, threads_per_block, shared_mem_size>>>(
+        tensor_map, total_tiles, d_tile_counter, trace_tensor.get_handle());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    printf("Writing trace file...\n");
+    nanotrace::trace_writer writer("tma_bandwidth_atomic");
+    writer.set_block_type<TMABlock>();
+    writer.set_track_type<BufferTrack>();
+    writer.register_trace_type<TileTransfer>();
+    writer.add_tensor(trace_tensor);
+    writer.write("tma_bandwidth_atomic.nanotrace", true);
+    printf("Trace written to tma_bandwidth_atomic.nanotrace\n");
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_tensor));
+    CUDA_CHECK(cudaFree(d_tile_counter));
+
+    return 0;
+}

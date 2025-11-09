@@ -237,6 +237,36 @@ canvas {
     background: var(--bg-glass);
     backdrop-filter: var(--blur-lg);
 }
+#close-btn {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 32px;
+    height: 30px;
+    border-radius: 0;
+    border: none;
+    border-left: 1px solid var(--border-secondary);
+    border-bottom: 1px solid var(--border-secondary);
+    background: var(--bg-glass);
+    backdrop-filter: var(--blur-lg);
+    color: var(--text-muted);
+    font-size: 20px;
+    line-height: 30px;
+    cursor: pointer;
+    z-index: 1001;
+    pointer-events: auto;
+    display: none;
+    padding: 0;
+    transition: all 0.15s ease;
+}
+#close-btn:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+    border-color: var(--border-primary);
+}
+#close-btn:active {
+    transform: scale(0.95);
+}
 .timeline-tick {
     position: absolute;
     background: var(--text-muted);
@@ -479,7 +509,7 @@ canvas {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    min-width: 320px;
+    max-width: 1000px;
     box-shadow: var(--shadow-xl);
 }
 .sample-menu-content h3 {
@@ -489,6 +519,11 @@ canvas {
     margin: 0 0 12px 0;
     text-align: center;
     letter-spacing: -0.3px;
+}
+.sample-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
 }
 .sample-option {
     display: flex;
@@ -512,6 +547,7 @@ canvas {
     padding: 12px 28px;
     font-size: 13px;
     margin-top: 10px;
+    align-self: center;
 }
 .loading-text {
     color: var(--text-primary);

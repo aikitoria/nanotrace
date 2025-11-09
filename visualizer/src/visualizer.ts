@@ -82,6 +82,7 @@ export class ZoneVisualizer {
     private loadingOverlay: HTMLElement;
     private loadingText: HTMLElement;
     private fileInput: HTMLInputElement;
+    private closeBtn: HTMLElement;
 
     // WebGPU resources (initialized in initWebGPU)
     private adapter: GPUAdapter | null = null;
@@ -158,9 +159,13 @@ export class ZoneVisualizer {
         this.loadingOverlay = this.getElement('loading-overlay');
         this.loadingText = this.loadingOverlay.querySelector('.loading-text') as HTMLElement;
         this.fileInput = document.getElementById('file-input') as HTMLInputElement;
+        this.closeBtn = this.getElement('close-btn');
 
         // Wire up file input handler for local .nanotrace files
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
+
+        // Wire up close button to return to file selector
+        this.closeBtn.addEventListener('click', () => this.closeVisualization());
 
         // Setup sample trace loading menu with cancel button
         const loadSampleBtn = document.getElementById('load-sample-btn');
@@ -320,9 +325,64 @@ export class ZoneVisualizer {
         this.loading.style.display = 'none';
         this.lastTime = performance.now();
 
+        // Show UI elements
+        this.stats.style.display = 'block';
+
+        // Show close button now that visualization is loaded
+        this.closeBtn.style.display = 'block';
+
         // Start the render loop
         this.isRendering = true;
         this.render();
+    }
+
+    /**
+     * Closes the current visualization and returns to file selector.
+     * Stops the render loop and cleans up resources before showing file selector.
+     */
+    closeVisualization(): void {
+        // Stop render loop
+        this.isRendering = false;
+
+        if (this.animationFrameId !== null) {
+            cancelAnimationFrame(this.animationFrameId);
+            this.animationFrameId = null;
+        }
+
+        // Clean up timeline renderer DOM elements
+        if (this.timelineRenderer) {
+            this.timelineRenderer.destroy();
+            this.timelineRenderer = null;
+        }
+
+        // Clean up lane labels
+        this.laneLabelsContainer.innerHTML = '';
+        this.laneLabels = [];
+
+        // Hide UI elements
+        this.tooltip.style.display = 'none';
+        this.stats.style.display = 'none';
+        this.cursorLine.style.display = 'none';
+        this.cursorTimestamp.style.display = 'none';
+        this.selectionRegion.style.display = 'none';
+        this.selectionLineStart.style.display = 'none';
+        this.selectionLineEnd.style.display = 'none';
+        this.selectionLabel.style.display = 'none';
+
+        // Clear label canvas
+        const rect = this.labelCanvas.getBoundingClientRect();
+        this.labelCtx.clearRect(0, 0, rect.width, rect.height);
+
+        // Clear interaction manager
+        this.interactionManager = null;
+
+        // Clear other renderers
+        this.labelRenderer = null;
+        this.camera = null;
+
+        // Hide close button and show file selector
+        this.closeBtn.style.display = 'none';
+        this.fileSelector.classList.remove('hidden');
     }
 
     /**
@@ -349,6 +409,7 @@ export class ZoneVisualizer {
             console.error(err);
             alert(`Error loading trace: ${(err as Error).message}`);
             this.loadingOverlay.classList.add('hidden');
+            this.closeBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
         } finally {
             // Clear input to allow reloading the same file
@@ -386,6 +447,7 @@ export class ZoneVisualizer {
             console.error(err);
             alert(`Error loading trace: ${(err as Error).message}`);
             this.loadingOverlay.classList.add('hidden');
+            this.closeBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
         }
     }
@@ -409,11 +471,16 @@ export class ZoneVisualizer {
             'simple_b200': 'samples/simple_trace_b200.nanotrace',
             'mixed_b200': 'samples/mixed_trace_b200.nanotrace',
             'grayscale_b200': 'samples/grayscale_trace_b200.nanotrace',
+            'tma_static_144': 'samples/tma_bandwidth_static_144.nanotrace',
+            'tma_static_288': 'samples/tma_bandwidth_static_288.nanotrace',
+            'tma_atomic_144': 'samples/tma_bandwidth_atomic_144.nanotrace',
+            'tma_atomic_288': 'samples/tma_bandwidth_atomic_288.nanotrace',
         };
 
         const fileName = sampleFiles[sampleName];
         if (!fileName) {
             alert('This sample is not available.');
+            this.closeBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
             return;
         }
@@ -439,6 +506,7 @@ export class ZoneVisualizer {
             console.error(err);
             alert(`Error loading sample: ${(err as Error).message}`);
             this.loadingOverlay.classList.add('hidden');
+            this.closeBtn.style.display = 'none';
             this.fileSelector.classList.remove('hidden');
         }
     }

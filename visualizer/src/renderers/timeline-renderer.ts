@@ -131,6 +131,26 @@ export class TimelineRenderer {
     }
 
     /**
+     * Destroys all timeline DOM elements and clears pools.
+     * Called when closing visualization to prevent accumulating elements.
+     */
+    destroy(): void {
+        // Remove all tick elements from DOM
+        for (const tick of this.tickPool) {
+            tick.remove();
+        }
+        // Remove all label elements from DOM
+        for (const label of this.labelPool) {
+            label.remove();
+        }
+        // Clear pools
+        this.tickPool = [];
+        this.labelPool = [];
+        this.activeTickCount = 0;
+        this.activeLabelCount = 0;
+    }
+
+    /**
      * Calculates adaptive tick intervals based on current zoom level.
      *
      * Uses power-of-10 intervals (1, 2, 5, 10, 20, 50, ...) to ensure tick marks

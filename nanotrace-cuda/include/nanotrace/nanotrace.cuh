@@ -152,6 +152,10 @@ __device__ __forceinline__ start_token start() {
     return start_token(t);
 }
 
+__device__ __forceinline__ start_token start_zero() {
+    return start_token(0);
+}
+
 // ============================================================================
 // Begin lane
 // ============================================================================
