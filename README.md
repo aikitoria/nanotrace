@@ -8,7 +8,7 @@ Have you ever looked at nsys and wished you could zoom in much, much further?
 
 ![NSight Systems view](docs/img0.png)
 
-Now you can! <sub>*|*Assuming you wrote that kernel*</sub>
+Now you can! <sub>*\*Assuming you wrote that kernel*</sub>
 
 ![Zoomed in trace view](docs/img1.png)
 
