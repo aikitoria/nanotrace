@@ -1,0 +1,25 @@
+{
+  "name": "nanotrace-visualizer",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run generate:all && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "generate:minimal": "tsx scripts/generate.ts minimal",
+    "generate:small": "tsx scripts/generate.ts small",
+    "generate:large": "tsx scripts/generate.ts large",
+    "generate:all": "npm run generate:minimal && npm run generate:small && npm run generate:large",
+    "validate": "tsx scripts/validate.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@webgpu/types": "^0.1.66",
+    "terser": "^5.44.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2",
+    "vite-imagetools": "^9.0.0",
+    "vite-plugin-html": "^3.2.2"
+  }
+}

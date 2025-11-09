@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nanotrace viewer</title>
+    <link rel="stylesheet" href="./src/styles/style.css">
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <canvas id="labelCanvas" class="overlay-full"></canvas>
+    <div id="tooltip" class="glass-dark mono"></div>
+    <div id="loading">Initializing WebGPU...</div>
+    <div id="stats" class="glass mono"></div>
+    <div id="lane-labels"></div>
+    <div id="timeline" class="glass"></div>
+    <div id="cursor-line"></div>
+    <div id="cursor-timestamp" class="glass-dark mono"></div>
+    <div id="selection-region"></div>
+    <div class="selection-line" id="selection-line-start"></div>
+    <div class="selection-line" id="selection-line-end"></div>
+    <div id="selection-label" class="glass-dark mono"></div>
+
+    <div id="file-selector" class="overlay-full">
+        <div class="file-selector-content" id="file-selector-content">
+            <img src="" alt="aikitoria" class="avatar">
+            <h2><a href="https://github.com/aikitoria/nanotrace" target="_blank">Nanotrace</a> Viewer</h2>
+            <div class="subtitle">by <a href="https://github.com/aikitoria" target="_blank">aikitoria</a></div>
+            <div class="file-select-area">
+                <input type="file" id="file-input" accept=".nanotrace">
+                <label for="file-input" class="btn-primary">Select .nanotrace</label>
+                <button id="load-sample-btn" class="btn-secondary">Load Sample File</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading-overlay" class="overlay-full hidden">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading trace data...</div>
+    </div>
+
+    <div id="sample-menu" class="overlay-full hidden">
+        <div class="sample-menu-content">
+            <h3>Select Sample</h3>
+            <button class="sample-option btn-primary" data-sample="sample1">
+                <div class="sample-title">Minimal</div>
+                <div class="sample-desc">1 block, 2 events</div>
+            </button>
+            <button class="sample-option btn-primary" data-sample="sample2">
+                <div class="sample-title">Small Random</div>
+                <div class="sample-desc">~48K events, 16 SMs</div>
+            </button>
+            <button class="sample-option btn-primary" data-sample="sample3">
+                <div class="sample-title">Large Random</div>
+                <div class="sample-desc">~10M events, 144 SMs</div>
+            </button>
+            <button class="sample-menu-cancel btn-secondary">Cancel</button>
+        </div>
+    </div>
+
+    <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

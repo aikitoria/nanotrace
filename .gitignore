@@ -1,0 +1,14 @@
+# Build outputs
+visualizer/dist/
+visualizer/node_modules/
+visualizer/*.js
+visualizer/*.js.map
+
+# Generated samples (created during build, deterministic)
+visualizer/public/*.nanotrace
+
+# Old/obsolete code
+old-warptrace-cuda/
+
+# IDE
+.vscode/
