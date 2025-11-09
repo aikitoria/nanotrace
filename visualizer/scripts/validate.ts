@@ -61,6 +61,19 @@ function validateNanotrace(filename: string): boolean {
     const kernelName = readString();
     console.log(`✓ Kernel name: ${kernelName}`);
 
+    // Read grid dimensions
+    const gridDimX = buffer.readUInt32LE(offset); offset += 4;
+    const gridDimY = buffer.readUInt32LE(offset); offset += 4;
+    const gridDimZ = buffer.readUInt32LE(offset); offset += 4;
+    console.log(`✓ Grid dimensions: (${gridDimX}, ${gridDimY}, ${gridDimZ})`);
+
+    // Read cluster dimensions
+    const clusterDimX = buffer.readUInt32LE(offset); offset += 4;
+    const clusterDimY = buffer.readUInt32LE(offset); offset += 4;
+    const clusterDimZ = buffer.readUInt32LE(offset); offset += 4;
+    const usingClusters = clusterDimX > 0 || clusterDimY > 0 || clusterDimZ > 0;
+    console.log(`✓ Cluster dimensions: (${clusterDimX}, ${clusterDimY}, ${clusterDimZ})${usingClusters ? ' [ENABLED]' : ''}`);
+
     // Read counts
     const formatDescCount = buffer.readUInt32LE(offset); offset += 4;
     const blockDescCount = buffer.readUInt32LE(offset); offset += 4;

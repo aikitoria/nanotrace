@@ -43,6 +43,12 @@ import {
 /** Raw data extracted from binary trace file. */
 export interface ParsedTraceData {
     kernelName: string;
+    gridDimX: number;
+    gridDimY: number;
+    gridDimZ: number;
+    clusterDimX: number;
+    clusterDimY: number;
+    clusterDimZ: number;
     formatDescriptors: FormatDescriptor[];
     blockDescriptors: BlockDescriptor[];
     tracks: WarpTrack[];
@@ -173,6 +179,16 @@ export async function parseTraceFile(
     const { str: kernelName, newOffset: o1 } = readString(view, offset);
     offset = o1;
 
+    // Read grid dimensions
+    const gridDimX = view.getUint32(offset, true); offset += 4;
+    const gridDimY = view.getUint32(offset, true); offset += 4;
+    const gridDimZ = view.getUint32(offset, true); offset += 4;
+
+    // Read cluster dimensions
+    const clusterDimX = view.getUint32(offset, true); offset += 4;
+    const clusterDimY = view.getUint32(offset, true); offset += 4;
+    const clusterDimZ = view.getUint32(offset, true); offset += 4;
+
     const formatDescCount = view.getUint32(offset, true); offset += 4;
     const blockDescCount = view.getUint32(offset, true); offset += 4;
     const trackCount = view.getUint32(offset, true); offset += 4;
@@ -180,6 +196,8 @@ export async function parseTraceFile(
 
     console.log(`Parsing ${file.name}:`);
     console.log(`  Kernel: ${kernelName}`);
+    console.log(`  Grid dimensions: (${gridDimX}, ${gridDimY}, ${gridDimZ})`);
+    console.log(`  Cluster dimensions: (${clusterDimX}, ${clusterDimY}, ${clusterDimZ})`);
     console.log(`  Compression: ${compressionMode === COMPRESSION_MODE_DEFLATE ? 'deflate' : 'none'}`);
     console.log(`  Format descriptors: ${formatDescCount}`);
     console.log(`  Blocks: ${blockDescCount}`);
@@ -243,7 +261,18 @@ export async function parseTraceFile(
     performance.mark('parseTraceFile:end');
     performance.measure('Parse Trace File (Total)', 'parseTraceFile:start', 'parseTraceFile:end');
 
-    return { kernelName, formatDescriptors, blockDescriptors, tracks };
+    return {
+        kernelName,
+        gridDimX,
+        gridDimY,
+        gridDimZ,
+        clusterDimX,
+        clusterDimY,
+        clusterDimZ,
+        formatDescriptors,
+        blockDescriptors,
+        tracks
+    };
 }
 
 /**

@@ -45,12 +45,18 @@ All multi-byte integers are stored in **little-endian** byte order.
 | Format Version           | `uint8`     | File format version number (current: 1)                       |
 | Compression Mode         | `uint8`     | Compression flag: 0 = uncompressed, 1 = deflate               |
 | Kernel Name              | `string`    | Name of the profiled kernel                                   |
+| Grid Dim X               | `uint32`    | Grid dimension X (number of blocks in X)                      |
+| Grid Dim Y               | `uint32`    | Grid dimension Y (number of blocks in Y)                      |
+| Grid Dim Z               | `uint32`    | Grid dimension Z (number of blocks in Z)                      |
+| Cluster Dim X            | `uint32`    | Cluster dimension X (0 if not using clusters)                 |
+| Cluster Dim Y            | `uint32`    | Cluster dimension Y (0 if not using clusters)                 |
+| Cluster Dim Z            | `uint32`    | Cluster dimension Z (0 if not using clusters)                 |
 | Format Descriptor Count  | `uint32`    | Number of format descriptors (N)                              |
 | Block Descriptor Count   | `uint32`    | Number of block descriptors (M)                               |
 | Track Count              | `uint32`    | Number of event tracks (K)                                    |
 | Total Event Count        | `uint64`    | Total number of events across all tracks (for pre-allocation) |
 
-**Size:** 10 + 1 + 1 + (2 + kernel_name_length) + 4 + 4 + 4 + 8 = 34 + kernel_name_length bytes
+**Size:** 10 + 1 + 1 + (2 + kernel_name_length) + 24 + 4 + 4 + 4 + 8 = 58 + kernel_name_length bytes
 
 **Compression:** When compression mode is 1 (deflate), all data after the Compression Mode field is compressed using deflate/zlib compression. This includes the kernel name, counts, format descriptors, block descriptors, and event tracks. The decompressed data should be parsed as if it were the uncompressed remainder of the file.
 
@@ -120,6 +126,8 @@ Followed by **Event Count** event descriptors:
 
 ### Scenario
 - Kernel: "MyKernel"
+- Grid dimensions: (1, 1, 1)
+- Cluster dimensions: (0, 0, 0) - not using clusters
 - 3 Format Descriptors:
   - FD[0]: "Block {0}" (1 placeholder)
   - FD[1]: "Warp {0}" (1 placeholder)
@@ -141,51 +149,57 @@ Offset  Hex                                         Description
 0x000B  00                                          Compression mode: 0 (uncompressed)
 0x000C  08 00                                       Kernel name length: 8
 0x000E  4D 79 4B 65 72 6E 65 6C                     Kernel name: "MyKernel"
-0x0016  03 00 00 00                                 Format descriptor count: 3
-0x001A  01 00 00 00                                 Block descriptor count: 1
-0x001E  01 00 00 00                                 Track count: 1
-0x0022  02 00 00 00 00 00 00 00                     Total event count: 2
+0x0016  01 00 00 00                                 Grid dim X: 1
+0x001A  01 00 00 00                                 Grid dim Y: 1
+0x001E  01 00 00 00                                 Grid dim Z: 1
+0x0022  00 00 00 00                                 Cluster dim X: 0
+0x0026  00 00 00 00                                 Cluster dim Y: 0
+0x002A  00 00 00 00                                 Cluster dim Z: 0
+0x002E  03 00 00 00                                 Format descriptor count: 3
+0x0032  01 00 00 00                                 Block descriptor count: 1
+0x0036  01 00 00 00                                 Track count: 1
+0x003A  02 00 00 00 00 00 00 00                     Total event count: 2
 
 # Format Descriptor 0
-0x002A  09 00                                       String length: 9
-0x002C  42 6C 6F 63 6B 20 7B 30 7D                  "Block {0}"
-0x0035  01                                          Placeholder count: 1
+0x0042  09 00                                       String length: 9
+0x0044  42 6C 6F 63 6B 20 7B 30 7D                  "Block {0}"
+0x004D  01                                          Placeholder count: 1
 
 # Format Descriptor 1
-0x0036  08 00                                       String length: 8
-0x0038  57 61 72 70 20 7B 30 7D                     "Warp {0}"
-0x0040  01                                          Placeholder count: 1
+0x004E  08 00                                       String length: 8
+0x0050  57 61 72 70 20 7B 30 7D                     "Warp {0}"
+0x0058  01                                          Placeholder count: 1
 
 # Format Descriptor 2
-0x0041  08 00                                       String length: 8
-0x0043  4C 6F 61 64 20 7B 30 7D                     "Load {0}"
-0x004B  01                                          Placeholder count: 1
+0x0059  08 00                                       String length: 8
+0x005B  4C 6F 61 64 20 7B 30 7D                     "Load {0}"
+0x0063  01                                          Placeholder count: 1
 
 # Block Descriptor 0
-0x004C  00 00                                       SM ID: 0
-0x004E  00 00                                       Format descriptor ID: 0
-0x0050  2A 00 00 00                                 Param[0]: 42
+0x0064  00 00                                       SM ID: 0
+0x0066  00 00                                       Format descriptor ID: 0
+0x0068  2A 00 00 00                                 Param[0]: 42
 
 # Event Track 0
-0x0054  00 00 00 00                                 Block descriptor ID: 0
-0x0058  01 00                                       Format descriptor ID: 1 (Warp {0})
-0x005A  07 00 00 00                                 Param[0]: 7
-0x005E  02 00 00 00                                 Event count: 2
+0x006C  00 00 00 00                                 Block descriptor ID: 0
+0x0070  01 00                                       Format descriptor ID: 1 (Warp {0})
+0x0072  07 00 00 00                                 Param[0]: 7
+0x0076  02 00 00 00                                 Event count: 2
 
 # Event 0
-0x0062  E8 03 00 00                                 Time: 1000ns
-0x0066  32 00 00 00                                 Duration: 50ns
-0x006A  02 00                                       Format descriptor ID: 2 (Load {0})
-0x006C  80 00 00 00                                 Param[0]: 128
+0x007A  E8 03 00 00                                 Time: 1000ns
+0x007E  32 00 00 00                                 Duration: 50ns
+0x0082  02 00                                       Format descriptor ID: 2 (Load {0})
+0x0084  80 00 00 00                                 Param[0]: 128
 
 # Event 1
-0x0070  4C 04 00 00                                 Time: 1100ns
-0x0074  4B 00 00 00                                 Duration: 75ns
-0x0078  02 00                                       Format descriptor ID: 2 (Load {0})
-0x007A  00 01 00 00                                 Param[0]: 256
+0x0088  4C 04 00 00                                 Time: 1100ns
+0x008C  4B 00 00 00                                 Duration: 75ns
+0x0090  02 00                                       Format descriptor ID: 2 (Load {0})
+0x0092  00 01 00 00                                 Param[0]: 256
 ```
 
-**Total file size:** 126 bytes (0x7E)
+**Total file size:** 150 bytes (0x96)
 
 ## Implementation Notes
 
@@ -206,6 +220,12 @@ void writeNanotrace(const char* filename, bool useCompression = false) {
     FILE* out = useCompression ? createMemoryFile(&dataBuffer) : f;
 
     writeString(out, kernelName);
+    writeUint32(out, gridDim.x);
+    writeUint32(out, gridDim.y);
+    writeUint32(out, gridDim.z);
+    writeUint32(out, clusterDim.x);
+    writeUint32(out, clusterDim.y);
+    writeUint32(out, clusterDim.z);
     writeUint32(out, formatDescriptors.size());
     writeUint32(out, blockDescriptors.size());
     writeUint32(out, eventTracks.size());
@@ -286,6 +306,13 @@ async function readNanotrace(file) {
 
     const kernelName = readString(view, offset);
     offset += 2 + kernelName.length;
+
+    const gridDimX = view.getUint32(offset, true); offset += 4;
+    const gridDimY = view.getUint32(offset, true); offset += 4;
+    const gridDimZ = view.getUint32(offset, true); offset += 4;
+    const clusterDimX = view.getUint32(offset, true); offset += 4;
+    const clusterDimY = view.getUint32(offset, true); offset += 4;
+    const clusterDimZ = view.getUint32(offset, true); offset += 4;
 
     const formatDescCount = view.getUint32(offset, true); offset += 4;
     const blockDescCount = view.getUint32(offset, true); offset += 4;

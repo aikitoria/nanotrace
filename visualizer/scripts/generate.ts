@@ -142,6 +142,14 @@ function generateMinimal() {
 
     // Kernel name
     writer.writeString('MinimalKernel');
+    // Grid dimensions
+    writer.writeUint32(1);  // grid X
+    writer.writeUint32(1);  // grid Y
+    writer.writeUint32(1);  // grid Z
+    // Cluster dimensions
+    writer.writeUint32(0);  // cluster X
+    writer.writeUint32(0);  // cluster Y
+    writer.writeUint32(0);  // cluster Z
     writer.writeUint32(3);  // format descriptor count
     writer.writeUint32(1);  // block descriptor count
     writer.writeUint32(1);  // track count
@@ -296,6 +304,14 @@ function generateRandom(small: boolean) {
 
     const data = new BinaryWriter(small ? 10 * 1024 * 1024 : 200 * 1024 * 1024);
     data.writeString(small ? 'SmallRandomKernel' : 'RandomKernel');
+    // Grid dimensions (must accommodate all block IDs)
+    data.writeUint32(blockDescriptors.length);  // grid X
+    data.writeUint32(1);  // grid Y
+    data.writeUint32(1);  // grid Z
+    // Cluster dimensions
+    data.writeUint32(0);  // cluster X
+    data.writeUint32(0);  // cluster Y
+    data.writeUint32(0);  // cluster Z
     data.writeUint32(7);
     data.writeUint32(blockDescriptors.length);
     data.writeUint32(tracks.length);

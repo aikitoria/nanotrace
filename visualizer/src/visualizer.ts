@@ -101,6 +101,12 @@ export class ZoneVisualizer {
     // Trace metadata
     private TIME_RANGE: number = BASE_TIME_RANGE;
     private kernelName: string = '';
+    private gridDimX: number = 0;
+    private gridDimY: number = 0;
+    private gridDimZ: number = 0;
+    private clusterDimX: number = 0;
+    private clusterDimY: number = 0;
+    private clusterDimZ: number = 0;
     private worldHeight: number = 0;
 
     // Rendering subsystems (null until initVisualization)
@@ -451,6 +457,12 @@ export class ZoneVisualizer {
         this.kernelName = parsedData.kernelName.length > MAX_KERNEL_NAME_LENGTH
             ? parsedData.kernelName.substring(0, MAX_KERNEL_NAME_LENGTH) + '...'
             : parsedData.kernelName;
+        this.gridDimX = parsedData.gridDimX;
+        this.gridDimY = parsedData.gridDimY;
+        this.gridDimZ = parsedData.gridDimZ;
+        this.clusterDimX = parsedData.clusterDimX;
+        this.clusterDimY = parsedData.clusterDimY;
+        this.clusterDimZ = parsedData.clusterDimZ;
         this.formatDescriptors = parsedData.formatDescriptors;
 
         // Create SM lane labels dynamically based on trace data
@@ -813,7 +825,7 @@ export class ZoneVisualizer {
         // Update only the dynamic content
         const dynamicStats = this.stats.querySelector('.stats-dynamic');
         if (dynamicStats) {
-            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>SMs: ${this.lanes.length.toLocaleString()} | Blocks: ${this.blocks.length.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
+            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>Grid: (${this.gridDimX}, ${this.gridDimY}, ${this.gridDimZ}) | Cluster: (${this.clusterDimX}, ${this.clusterDimY}, ${this.clusterDimZ})<br>SMs: ${this.lanes.length.toLocaleString()} | Blocks: ${this.blocks.length.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
         }
         this.lastTime = now;
 
