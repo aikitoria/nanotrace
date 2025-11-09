@@ -1,9 +1,5 @@
 # nanotrace
 
-Nanosecond-precision tracing for CUDA kernels with GPU-accelerated visualization.
-
-## Introduction
-
 Have you ever looked at nsys and wished you could zoom in much, much further?
 
 ![NSight Systems view](docs/img0.png)
