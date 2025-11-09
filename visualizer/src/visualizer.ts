@@ -93,6 +93,13 @@ export class ZoneVisualizer {
     private lastTime: number = 0;
     private numZones: number = 0;
 
+    // Preallocated buffers to avoid per-frame allocations (GC pressure reduction)
+    private uniformData = new ArrayBuffer(112);
+    private uniformFloatView = new Float32Array(this.uniformData);
+    private uniformIntView = new Int32Array(this.uniformData);
+    private backgroundUniformData = new ArrayBuffer(80);
+    private backgroundFloatView = new Float32Array(this.backgroundUniformData);
+
     /**
      * Initializes the visualizer by acquiring DOM element references and setting up
      * file loading UI event handlers. WebGPU and visualization setup happen later
@@ -247,6 +254,7 @@ export class ZoneVisualizer {
         // Create rendering subsystems with loaded trace data
         this.camera = new Camera(this.worldHeight, this.TIME_RANGE);
         this.labelRenderer = new LabelRenderer(this.labelCtx, this.canvas, this.camera);
+        this.labelRenderer.updateBlocksCache(this.lanes);  // Cache flattened blocks to avoid per-frame allocations
         this.timelineRenderer = new TimelineRenderer(this.timelineContainer, this.canvas, this.camera);
         this.interactionManager = new InteractionManager(
             this.camera,
@@ -799,9 +807,9 @@ export class ZoneVisualizer {
         const aspect = this.canvas.width / this.canvas.height;
         const viewProjMatrix = this.camera.getViewProjectionMatrix(aspect);
 
-        const uniformData = new ArrayBuffer(112);
-        const floatView = new Float32Array(uniformData);
-        const intView = new Int32Array(uniformData);
+        // Reuse preallocated uniform buffers to avoid GC pressure
+        const floatView = this.uniformFloatView;
+        const intView = this.uniformIntView;
 
         // Uniform layout: mat4x4 viewProj, int hoveredId, float zoomX, float zoomY,
         // float selectionStart, float selectionEnd, int hasSelection, int hoveredBlockId,
@@ -830,17 +838,16 @@ export class ZoneVisualizer {
         floatView[26] = scale_x;
         floatView[27] = scale_y;
 
-        this.device.queue.writeBuffer(this.gpuResources.uniformBuffer, 0, uniformData);
+        this.device.queue.writeBuffer(this.gpuResources.uniformBuffer, 0, this.uniformData);
 
         const topLane = this.lanes[0];
         const backgroundHeight = topLane.y + topLane.height;
 
-        const backgroundUniformData = new ArrayBuffer(80);
-        const backgroundFloatView = new Float32Array(backgroundUniformData);
-        backgroundFloatView.set(viewProjMatrix, 0);
-        backgroundFloatView[16] = this.TIME_RANGE;
-        backgroundFloatView[17] = backgroundHeight;
-        this.device.queue.writeBuffer(this.gpuResources.backgroundUniformBuffer, 0, backgroundUniformData);
+        // Reuse preallocated background uniform buffer to avoid GC pressure
+        this.backgroundFloatView.set(viewProjMatrix, 0);
+        this.backgroundFloatView[16] = this.TIME_RANGE;
+        this.backgroundFloatView[17] = backgroundHeight;
+        this.device.queue.writeBuffer(this.gpuResources.backgroundUniformBuffer, 0, this.backgroundUniformData);
 
         const commandEncoder = this.device.createCommandEncoder();
         const textureView = this.context.getCurrentTexture().createView();

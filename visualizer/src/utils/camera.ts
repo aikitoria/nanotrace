@@ -29,6 +29,9 @@ export class Camera {
     lastY: number;                   // Last mouse Y position during drag
     timeRange: number;               // Total time range of loaded trace (for reset)
 
+    // Preallocated buffer to avoid per-frame allocations (GC pressure reduction)
+    private viewProjMatrix = new Float32Array(16);
+
     /**
      * Creates camera centered on the trace with initial auto-zoom.
      *
@@ -90,13 +93,16 @@ export class Camera {
     getViewProjectionMatrix(aspect: number): Float32Array {
         const scaleX = this.zoomX / aspect;
         const scaleY = this.zoomY;
+
+        // Write into preallocated buffer to avoid per-frame allocations
         // Column-major 4x4 matrix: scale + translation
-        return new Float32Array([
-            scaleX, 0, 0, 0,                           // Column 0: X scale
-            0, scaleY, 0, 0,                           // Column 1: Y scale
-            0, 0, 1, 0,                                // Column 2: Z (unused, identity)
-            this.x * scaleX, this.y * scaleY, 0, 1     // Column 3: Translation
-        ]);
+        const m = this.viewProjMatrix;
+        m[0] = scaleX; m[1] = 0; m[2] = 0; m[3] = 0;                    // Column 0: X scale
+        m[4] = 0; m[5] = scaleY; m[6] = 0; m[7] = 0;                    // Column 1: Y scale
+        m[8] = 0; m[9] = 0; m[10] = 1; m[11] = 0;                       // Column 2: Z (unused, identity)
+        m[12] = this.x * scaleX; m[13] = this.y * scaleY; m[14] = 0; m[15] = 1;  // Column 3: Translation
+
+        return m;
     }
 
     /**

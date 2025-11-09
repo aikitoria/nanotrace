@@ -32,6 +32,12 @@ export class TimelineRenderer {
     private canvas: HTMLCanvasElement;
     private camera: Camera;
 
+    // DOM element pools to avoid per-frame allocations (GC pressure reduction)
+    private tickPool: HTMLElement[] = [];
+    private labelPool: HTMLElement[] = [];
+    private activeTickCount = 0;
+    private activeLabelCount = 0;
+
     /**
      * Creates timeline renderer with references to container, canvas, and camera.
      * Canvas is used for screen-to-world coordinate transformations.
@@ -45,6 +51,63 @@ export class TimelineRenderer {
     /** Updates camera reference when visualization is reinitialized. */
     updateCamera(camera: Camera): void {
         this.camera = camera;
+    }
+
+    /**
+     * Gets a tick element from the pool or creates a new one if pool is exhausted.
+     * Reuses existing DOM elements to avoid per-frame allocations.
+     */
+    private getTickElement(): HTMLElement {
+        let tick: HTMLElement;
+        if (this.activeTickCount < this.tickPool.length) {
+            // Reuse existing element from pool
+            tick = this.tickPool[this.activeTickCount];
+            tick.style.display = '';  // Make visible
+        } else {
+            // Pool exhausted, create new element and add to pool
+            tick = document.createElement('div');
+            tick.className = 'timeline-tick';
+            this.tickPool.push(tick);
+            this.timelineContainer.appendChild(tick);
+        }
+        this.activeTickCount++;
+        return tick;
+    }
+
+    /**
+     * Gets a label element from the pool or creates a new one if pool is exhausted.
+     * Reuses existing DOM elements to avoid per-frame allocations.
+     */
+    private getLabelElement(): HTMLElement {
+        let label: HTMLElement;
+        if (this.activeLabelCount < this.labelPool.length) {
+            // Reuse existing element from pool
+            label = this.labelPool[this.activeLabelCount];
+            label.style.display = '';  // Make visible
+        } else {
+            // Pool exhausted, create new element and add to pool
+            label = document.createElement('div');
+            label.className = 'timeline-label';
+            this.timelineContainer.appendChild(label);
+            this.labelPool.push(label);
+        }
+        this.activeLabelCount++;
+        return label;
+    }
+
+    /**
+     * Hides unused elements from the pools instead of destroying them.
+     * Called at the end of updateTimeline after all visible elements have been reused.
+     */
+    private hideUnusedElements(): void {
+        // Hide unused ticks
+        for (let i = this.activeTickCount; i < this.tickPool.length; i++) {
+            this.tickPool[i].style.display = 'none';
+        }
+        // Hide unused labels
+        for (let i = this.activeLabelCount; i < this.labelPool.length; i++) {
+            this.labelPool[i].style.display = 'none';
+        }
     }
 
     /**
@@ -163,7 +226,9 @@ export class TimelineRenderer {
 
         const intervals = this.calculateTimelineInterval();
 
-        this.timelineContainer.innerHTML = '';
+        // Reset active counts to reuse elements from the pool
+        this.activeTickCount = 0;
+        this.activeLabelCount = 0;
 
         const startTiny = Math.floor(worldLeft / intervals.tiny) * intervals.tiny;
         const endTiny = Math.ceil(worldRight / intervals.tiny) * intervals.tiny;
@@ -190,8 +255,8 @@ export class TimelineRenderer {
 
             if (screenX < -10 || screenX > rect.width + 10) continue;
 
-            const tick = document.createElement('div');
-            tick.className = 'timeline-tick';
+            // Get tick element from pool (reuse existing or create new)
+            const tick = this.getTickElement();
             tick.style.left = `${screenX}px`;
 
             const physicalPixelWidth1 = `${1 / devicePixelRatio}px`;
@@ -219,16 +284,16 @@ export class TimelineRenderer {
                 tick.style.opacity = '0.9';
             }
 
-            this.timelineContainer.appendChild(tick);
-
             if (isLabel) {
-                const label = document.createElement('div');
-                label.className = 'timeline-label';
+                // Get label element from pool (reuse existing or create new)
+                const label = this.getLabelElement();
                 label.textContent = this.formatTimeLabel(time, intervals.label);
                 label.style.left = `${screenX}px`;
                 label.style.transform = 'translateX(-50%)';
-                this.timelineContainer.appendChild(label);
             }
         }
+
+        // Hide all unused elements from the pools
+        this.hideUnusedElements();
     }
 }

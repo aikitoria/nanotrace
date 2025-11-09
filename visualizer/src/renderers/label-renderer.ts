@@ -36,6 +36,9 @@ export class LabelRenderer {
     private canvas: HTMLCanvasElement;
     private camera: Camera;
 
+    // Cached flattened blocks array to avoid per-frame allocations (GC pressure reduction)
+    private cachedBlocks: Block[] = [];
+
     /**
      * Creates label renderer with 2D canvas context, canvas, and camera.
      * Canvas is used for coordinate transformations and viewport queries.
@@ -49,6 +52,21 @@ export class LabelRenderer {
     /** Updates camera reference when visualization is reinitialized. */
     updateCamera(camera: Camera): void {
         this.camera = camera;
+    }
+
+    /**
+     * Updates cached blocks array when trace data changes.
+     * Call this after loading new trace data to rebuild the cache.
+     */
+    updateBlocksCache(lanes: Lane[]): void {
+        this.cachedBlocks = [];
+        for (const lane of lanes) {
+            for (const blockLane of lane.blockLanes) {
+                for (const block of blockLane.blocks) {
+                    this.cachedBlocks.push(block);
+                }
+            }
+        }
     }
 
     /**
@@ -189,7 +207,8 @@ export class LabelRenderer {
         this.labelCtx.save();
         this.labelCtx.scale(devicePixelRatio, devicePixelRatio);
 
-        this.renderBlockLabels(this.getBlocksFromLanes(lanes), blockLanes, formatDescriptors, formatString);
+        // Use cached blocks array to avoid per-frame allocations
+        this.renderBlockLabels(this.cachedBlocks, blockLanes, formatDescriptors, formatString);
 
         const minWidth = 100;
         const minHeight = 15;
@@ -310,17 +329,4 @@ export class LabelRenderer {
         this.labelCtx.restore();
     }
 
-    /**
-     * Flattens lane hierarchy to extract all blocks.
-     * Helper for renderBlockLabels() which expects flat block array.
-     */
-    private getBlocksFromLanes(lanes: Lane[]): Block[] {
-        const blocks: Block[] = [];
-        for (const lane of lanes) {
-            for (const blockLane of lane.blockLanes) {
-                blocks.push(...blockLane.blocks);
-            }
-        }
-        return blocks;
-    }
 }
