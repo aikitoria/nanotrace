@@ -12,6 +12,7 @@
  */
 
 import { WorldPosition } from './types.js';
+import { INITIAL_BASE_ZOOM, INITIAL_CAMERA_Y_OFFSET } from './constants.js';
 
 /**
  * Manages viewport transformations with independent X/Y zoom and pan.
@@ -39,10 +40,10 @@ export class Camera {
      * to show the top of the trace (world origin is at bottom).
      */
     constructor(worldHeight: number, timeRange: number) {
-        this.x = -timeRange / 2;             // Center horizontally on time range
-        this.y = -worldHeight + 0.5;         // Position to show top of trace
-        this.zoom = 2.0;                     // Base zoom (will be adjusted for fit)
-        this.xZoomMultiplier = 1.0;          // 1:1 initially (adjusted in initVisualization)
+        this.x = -timeRange / 2;                      // Center horizontally on time range
+        this.y = -worldHeight + INITIAL_CAMERA_Y_OFFSET;  // Position to show top of trace
+        this.zoom = INITIAL_BASE_ZOOM;                // Base zoom (will be adjusted for fit)
+        this.xZoomMultiplier = 1.0;                   // 1:1 initially (adjusted in initVisualization)
         this.isDragging = false;
         this.lastX = 0;
         this.lastY = 0;

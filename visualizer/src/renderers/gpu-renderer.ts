@@ -20,6 +20,49 @@
 
 import { Zone, Block, BlockLane, Lane } from '../utils/types.js';
 import { Camera } from '../utils/camera.js';
+import {
+    ZONE_FILL_BRIGHTNESS,
+    ZONE_HOVER_COLOR_R,
+    ZONE_HOVER_COLOR_G,
+    ZONE_HOVER_COLOR_B,
+    ZONE_HOVER_BRIGHTNESS,
+    SELECTION_BRIGHTNESS_BOOST,
+    ZONE_OUTLINE_BRIGHTNESS,
+    ZONE_HOVER_OUTLINE_COLOR_R,
+    ZONE_HOVER_OUTLINE_COLOR_G,
+    ZONE_HOVER_OUTLINE_COLOR_B,
+    ZONE_HOVER_OUTLINE_BRIGHTNESS,
+    OUTLINE_DISABLE_ZOOM_THRESHOLD,
+    OUTLINE_THICKNESS_MULTIPLIER,
+    BLOCK_BORDER_COLOR_R,
+    BLOCK_BORDER_COLOR_G,
+    BLOCK_BORDER_COLOR_B,
+    BLOCK_BORDER_HOVER_COLOR_R,
+    BLOCK_BORDER_HOVER_COLOR_G,
+    BLOCK_BORDER_HOVER_COLOR_B,
+    BLOCK_BORDER_HOVER_BRIGHTNESS,
+    BLOCK_BORDER_SELECTION_BOOST,
+    BLOCK_BORDER_OPACITY,
+    LANE_BG_COLOR_R,
+    LANE_BG_COLOR_G,
+    LANE_BG_COLOR_B,
+    BLOCK_LANE_BG_COLOR_R,
+    BLOCK_LANE_BG_COLOR_G,
+    BLOCK_LANE_BG_COLOR_B,
+    BLOCK_BG_COLOR_R,
+    BLOCK_BG_COLOR_G,
+    BLOCK_BG_COLOR_B,
+    CANVAS_BG_COLOR_R,
+    CANVAS_BG_COLOR_G,
+    CANVAS_BG_COLOR_B,
+    MIN_GPU_BUFFER_SIZE,
+    UNIFORM_BUFFER_SIZE,
+    BACKGROUND_UNIFORM_BUFFER_SIZE,
+    ZONE_BUFFER_FLOATS,
+    BLOCK_BUFFER_FLOATS,
+    LANE_BUFFER_FLOATS,
+    BLOCK_LANE_BUFFER_FLOATS
+} from '../utils/constants.js';
 
 /** Single render pass with pipeline and bind group. */
 export interface RenderPass {
@@ -183,18 +226,18 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    let baseFillColor = input.color * 0.55;
-    let hoverFillColor = vec3<f32>(0.22, 0.74, 0.97) * 0.95;
+    let baseFillColor = input.color * ${ZONE_FILL_BRIGHTNESS};
+    let hoverFillColor = vec3<f32>(${ZONE_HOVER_COLOR_R}, ${ZONE_HOVER_COLOR_G}, ${ZONE_HOVER_COLOR_B}) * ${ZONE_HOVER_BRIGHTNESS};
 
     // If both hovered and selected, use hover color (don't stack brightness)
     var fillColor: vec3<f32>;
-    if (input.isHovered > 0.5) {
+    if (input.isHovered > ${OUTLINE_DISABLE_ZOOM_THRESHOLD}) {
         fillColor = hoverFillColor;
     } else {
-        fillColor = mix(baseFillColor, baseFillColor * 1.55, input.isSelected);
+        fillColor = mix(baseFillColor, baseFillColor * ${SELECTION_BRIGHTNESS_BOOST}, input.isSelected);
     }
 
-    if (uniforms.zoomY < 0.5) {
+    if (uniforms.zoomY < ${OUTLINE_DISABLE_ZOOM_THRESHOLD}) {
         return vec4<f32>(fillColor, 1.0);
     }
 
@@ -203,23 +246,23 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
     let pixelSizeX = fwidth(coord.x);
     let pixelSizeY = fwidth(coord.y);
 
-    let edgeThicknessX = pixelSizeX * 1.0;
-    let edgeThicknessY = pixelSizeY * 1.0;
+    let edgeThicknessX = pixelSizeX * ${OUTLINE_THICKNESS_MULTIPLIER};
+    let edgeThicknessY = pixelSizeY * ${OUTLINE_THICKNESS_MULTIPLIER};
 
     let distFromEdgeX = 1.0 - abs(coord.x);
     let distFromEdgeY = 1.0 - abs(coord.y);
 
     let isEdge = distFromEdgeX < edgeThicknessX || distFromEdgeY < edgeThicknessY;
 
-    let baseOutlineColor = input.color * 0.98;
-    let hoverOutlineColor = vec3<f32>(0.38, 0.82, 1.0) * 1.15;
+    let baseOutlineColor = input.color * ${ZONE_OUTLINE_BRIGHTNESS};
+    let hoverOutlineColor = vec3<f32>(${ZONE_HOVER_OUTLINE_COLOR_R}, ${ZONE_HOVER_OUTLINE_COLOR_G}, ${ZONE_HOVER_OUTLINE_COLOR_B}) * ${ZONE_HOVER_OUTLINE_BRIGHTNESS};
 
     // Same logic for outlines - don't stack hover and selection
     var outlineColor: vec3<f32>;
-    if (input.isHovered > 0.5) {
+    if (input.isHovered > ${OUTLINE_DISABLE_ZOOM_THRESHOLD}) {
         outlineColor = hoverOutlineColor;
     } else {
-        outlineColor = mix(baseOutlineColor, baseOutlineColor * 1.55, input.isSelected);
+        outlineColor = mix(baseOutlineColor, baseOutlineColor * ${SELECTION_BRIGHTNESS_BOOST}, input.isSelected);
     }
 
     let color = select(fillColor, outlineColor, isEdge);
@@ -269,7 +312,7 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.071, 0.071, 0.078, 1.0);
+    return vec4<f32>(${LANE_BG_COLOR_R}, ${LANE_BG_COLOR_G}, ${LANE_BG_COLOR_B}, 1.0);
 }
 `;
 
@@ -314,7 +357,7 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.086, 0.086, 0.094, 1.0);
+    return vec4<f32>(${BLOCK_LANE_BG_COLOR_R}, ${BLOCK_LANE_BG_COLOR_G}, ${BLOCK_LANE_BG_COLOR_B}, 1.0);
 }
 `;
 
@@ -378,7 +421,7 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.055, 0.055, 0.063, 1.0);
+    return vec4<f32>(${BLOCK_BG_COLOR_R}, ${BLOCK_BG_COLOR_G}, ${BLOCK_BG_COLOR_B}, 1.0);
 }
 `;
 
@@ -461,15 +504,15 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    if (uniforms.zoomY < 0.5) {
+    if (uniforms.zoomY < ${OUTLINE_DISABLE_ZOOM_THRESHOLD}) {
         discard;
     }
 
     let coord = input.blockCoord;
     let pixelSizeX = fwidth(coord.x);
     let pixelSizeY = fwidth(coord.y);
-    let edgeThicknessX = pixelSizeX * 1.0;
-    let edgeThicknessY = pixelSizeY * 1.0;
+    let edgeThicknessX = pixelSizeX * ${OUTLINE_THICKNESS_MULTIPLIER};
+    let edgeThicknessY = pixelSizeY * ${OUTLINE_THICKNESS_MULTIPLIER};
     let distFromEdgeX = 1.0 - abs(coord.x);
     let distFromEdgeY = 1.0 - abs(coord.y);
     let isEdge = distFromEdgeX < edgeThicknessX || distFromEdgeY < edgeThicknessY;
@@ -478,14 +521,14 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let baseColor = vec3<f32>(0.45, 0.50, 0.62);
-    let hoverColor = vec3<f32>(0.22, 0.74, 0.97) * 1.3;
+    let baseColor = vec3<f32>(${BLOCK_BORDER_COLOR_R}, ${BLOCK_BORDER_COLOR_G}, ${BLOCK_BORDER_COLOR_B});
+    let hoverColor = vec3<f32>(${BLOCK_BORDER_HOVER_COLOR_R}, ${BLOCK_BORDER_HOVER_COLOR_G}, ${BLOCK_BORDER_HOVER_COLOR_B}) * ${BLOCK_BORDER_HOVER_BRIGHTNESS};
     var color = mix(baseColor, hoverColor, input.isHovered);
 
     // Brighten if within selection (match zone brightness boost)
-    color = color + vec3<f32>(0.55, 0.55, 0.55) * input.isSelected;
+    color = color + vec3<f32>(${BLOCK_BORDER_SELECTION_BOOST}, ${BLOCK_BORDER_SELECTION_BOOST}, ${BLOCK_BORDER_SELECTION_BOOST}) * input.isSelected;
 
-    return vec4<f32>(color, 0.7);
+    return vec4<f32>(color, ${BLOCK_BORDER_OPACITY});
 }
 `;
 
@@ -523,7 +566,7 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.039, 0.039, 0.047, 1.0);
+    return vec4<f32>(${CANVAS_BG_COLOR_R}, ${CANVAS_BG_COLOR_G}, ${CANVAS_BG_COLOR_B}, 1.0);
 }
 `;
 
@@ -712,25 +755,25 @@ export function createGPUBuffers(
     blockLanes: BlockLane[],
     lanes: Lane[]
 ): { positionBuffer: GPUBuffer; laneBuffer: GPUBuffer; blockLaneBuffer: GPUBuffer; blockBuffer: GPUBuffer; gpuMemoryUsage: number } {
-    const positions = new Float32Array(zones.length * 12);
+    const positions = new Float32Array(zones.length * ZONE_BUFFER_FLOATS);
     for (let i = 0; i < zones.length; i++) {
         const zone = zones[i];
         const [x_high, x_low] = Camera.splitDouble(zone.x);
         // vec4 #0: [x_high, x_low, y, width]
-        positions[i * 12 + 0] = x_high;
-        positions[i * 12 + 1] = x_low;
-        positions[i * 12 + 2] = zone.y;
-        positions[i * 12 + 3] = zone.width;
+        positions[i * ZONE_BUFFER_FLOATS + 0] = x_high;
+        positions[i * ZONE_BUFFER_FLOATS + 1] = x_low;
+        positions[i * ZONE_BUFFER_FLOATS + 2] = zone.y;
+        positions[i * ZONE_BUFFER_FLOATS + 3] = zone.width;
         // vec4 #1: [height, r, g, b]
-        positions[i * 12 + 4] = zone.height;
-        positions[i * 12 + 5] = zone.r;
-        positions[i * 12 + 6] = zone.g;
-        positions[i * 12 + 7] = zone.b;
+        positions[i * ZONE_BUFFER_FLOATS + 4] = zone.height;
+        positions[i * ZONE_BUFFER_FLOATS + 5] = zone.r;
+        positions[i * ZONE_BUFFER_FLOATS + 6] = zone.g;
+        positions[i * ZONE_BUFFER_FLOATS + 7] = zone.b;
         // vec4 #2: [id, pad, pad, pad]
-        positions[i * 12 + 8] = zone.id;
-        positions[i * 12 + 9] = 0;
-        positions[i * 12 + 10] = 0;
-        positions[i * 12 + 11] = 0;
+        positions[i * ZONE_BUFFER_FLOATS + 8] = zone.id;
+        positions[i * ZONE_BUFFER_FLOATS + 9] = 0;
+        positions[i * ZONE_BUFFER_FLOATS + 10] = 0;
+        positions[i * ZONE_BUFFER_FLOATS + 11] = 0;
     }
 
     const positionBuffer = device.createBuffer({
@@ -741,12 +784,12 @@ export function createGPUBuffers(
     new Float32Array(positionBuffer.getMappedRange()).set(positions);
     positionBuffer.unmap();
 
-    const laneData = new Float32Array(lanes.length * 4);
+    const laneData = new Float32Array(lanes.length * LANE_BUFFER_FLOATS);
     for (let i = 0; i < lanes.length; i++) {
-        laneData[i * 4 + 0] = lanes[i].y;
-        laneData[i * 4 + 1] = lanes[i].height;
-        laneData[i * 4 + 2] = lanes[i].width;
-        laneData[i * 4 + 3] = 0;
+        laneData[i * LANE_BUFFER_FLOATS + 0] = lanes[i].y;
+        laneData[i * LANE_BUFFER_FLOATS + 1] = lanes[i].height;
+        laneData[i * LANE_BUFFER_FLOATS + 2] = lanes[i].width;
+        laneData[i * LANE_BUFFER_FLOATS + 3] = 0;
     }
 
     const laneBuffer = device.createBuffer({
@@ -757,39 +800,39 @@ export function createGPUBuffers(
     new Float32Array(laneBuffer.getMappedRange()).set(laneData);
     laneBuffer.unmap();
 
-    const blockLaneData = new Float32Array(blockLanes.length * 4);
+    const blockLaneData = new Float32Array(blockLanes.length * BLOCK_LANE_BUFFER_FLOATS);
     for (let i = 0; i < blockLanes.length; i++) {
-        blockLaneData[i * 4 + 0] = blockLanes[i].y;
-        blockLaneData[i * 4 + 1] = blockLanes[i].height;
-        blockLaneData[i * 4 + 2] = blockLanes[i].width;
-        blockLaneData[i * 4 + 3] = 0;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 0] = blockLanes[i].y;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 1] = blockLanes[i].height;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] = blockLanes[i].width;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] = 0;
     }
 
     const blockLaneBuffer = device.createBuffer({
-        size: Math.max(16, blockLaneData.byteLength),
+        size: Math.max(MIN_GPU_BUFFER_SIZE, blockLaneData.byteLength),
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true
     });
     new Float32Array(blockLaneBuffer.getMappedRange()).set(blockLaneData);
     blockLaneBuffer.unmap();
 
-    const blockData = new Float32Array(blocks.length * 8);
+    const blockData = new Float32Array(blocks.length * BLOCK_BUFFER_FLOATS);
     for (let i = 0; i < blocks.length; i++) {
         const [startX_high, startX_low] = Camera.splitDouble(blocks[i].startX);
         // vec4 #0: [startX_high, startX_low, y, width]
-        blockData[i * 8 + 0] = startX_high;
-        blockData[i * 8 + 1] = startX_low;
-        blockData[i * 8 + 2] = blocks[i].y;
-        blockData[i * 8 + 3] = blocks[i].width;
+        blockData[i * BLOCK_BUFFER_FLOATS + 0] = startX_high;
+        blockData[i * BLOCK_BUFFER_FLOATS + 1] = startX_low;
+        blockData[i * BLOCK_BUFFER_FLOATS + 2] = blocks[i].y;
+        blockData[i * BLOCK_BUFFER_FLOATS + 3] = blocks[i].width;
         // vec4 #1: [height, pad, pad, pad]
-        blockData[i * 8 + 4] = blocks[i].height;
-        blockData[i * 8 + 5] = 0;
-        blockData[i * 8 + 6] = 0;
-        blockData[i * 8 + 7] = 0;
+        blockData[i * BLOCK_BUFFER_FLOATS + 4] = blocks[i].height;
+        blockData[i * BLOCK_BUFFER_FLOATS + 5] = 0;
+        blockData[i * BLOCK_BUFFER_FLOATS + 6] = 0;
+        blockData[i * BLOCK_BUFFER_FLOATS + 7] = 0;
     }
 
     const blockBuffer = device.createBuffer({
-        size: Math.max(16, blockData.byteLength),
+        size: Math.max(MIN_GPU_BUFFER_SIZE, blockData.byteLength),
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true
     });
@@ -797,7 +840,7 @@ export function createGPUBuffers(
     blockBuffer.unmap();
 
     const gpuMemoryUsage = positions.byteLength + laneData.byteLength +
-        Math.max(16, blockLaneData.byteLength) + Math.max(16, blockData.byteLength) +
+        Math.max(MIN_GPU_BUFFER_SIZE, blockLaneData.byteLength) + Math.max(MIN_GPU_BUFFER_SIZE, blockData.byteLength) +
         (64 + 32) + (64 + 16);
 
     return { positionBuffer, laneBuffer, blockLaneBuffer, blockBuffer, gpuMemoryUsage };
@@ -825,8 +868,8 @@ export function createPipelines(
     blockLaneBuffer: GPUBuffer,
     blockBuffer: GPUBuffer
 ): GPUResources {
-    const uniformBuffer = createUniformBuffer(device, 112);  // 64 (mat4x4) + 32 (7 ints/floats) + 20 (5 floats for double-single camera + scales)
-    const backgroundUniformBuffer = createUniformBuffer(device, 64 + 16);
+    const uniformBuffer = createUniformBuffer(device, UNIFORM_BUFFER_SIZE);  // 64 (mat4x4) + 32 (7 ints/floats) + 20 (5 floats for double-single camera + scales)
+    const backgroundUniformBuffer = createUniformBuffer(device, BACKGROUND_UNIFORM_BUFFER_SIZE);
 
     return {
         uniformBuffer,

@@ -24,9 +24,29 @@ import {
     Zone,
     Block,
     BlockLane,
-    Lane,
-    BASE_TIME_RANGE
+    Lane
 } from './utils/types.js';
+import {
+    BASE_TIME_RANGE,
+    ZOOM_FACTOR,
+    MIN_ZOOM_X,
+    MAX_ZOOM_X,
+    MIN_ZOOM_Y,
+    MAX_ZOOM_Y,
+    PAN_SPEED,
+    SELECTION_EPSILON,
+    SM_LABEL_WIDTH,
+    TIMELINE_HEIGHT,
+    INITIAL_ZOOM_PADDING,
+    MIN_SELECTION_DISTANCE,
+    LOADING_OVERLAY_DELAY,
+    MAX_KERNEL_NAME_LENGTH,
+    FPS_PADDING_WIDTH,
+    MS_TO_NS,
+    CLEAR_COLOR_R,
+    CLEAR_COLOR_G,
+    CLEAR_COLOR_B
+} from './utils/constants.js';
 
 // Git commit hash injected at build time by Vite
 declare const __GIT_HASH__: string;
@@ -313,7 +333,7 @@ export class ZoneVisualizer {
         this.loadingOverlay.classList.remove('hidden');
 
         // Yield to browser to show loading overlay before blocking on file parse
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, LOADING_OVERLAY_DELAY));
 
         try {
             await this.loadTraceFile(file);
@@ -350,7 +370,7 @@ export class ZoneVisualizer {
         this.fileSelector.classList.add('hidden');
         this.loadingOverlay.classList.remove('hidden');
 
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, LOADING_OVERLAY_DELAY));
 
         try {
             await this.loadTraceFile(file);
@@ -428,8 +448,8 @@ export class ZoneVisualizer {
             this.loadingText.textContent = message;
         });
         // Truncate long kernel names for stats display
-        this.kernelName = parsedData.kernelName.length > 30
-            ? parsedData.kernelName.substring(0, 30) + '...'
+        this.kernelName = parsedData.kernelName.length > MAX_KERNEL_NAME_LENGTH
+            ? parsedData.kernelName.substring(0, MAX_KERNEL_NAME_LENGTH) + '...'
             : parsedData.kernelName;
         this.formatDescriptors = parsedData.formatDescriptors;
 
@@ -517,7 +537,7 @@ export class ZoneVisualizer {
 
                 const rect = this.canvas.getBoundingClientRect();
                 const aspect = rect.width / rect.height;
-                const desiredZoomX = 2 * aspect * (rect.width - 100) / (this.TIME_RANGE * rect.width);
+                const desiredZoomX = 2 * aspect * (rect.width - INITIAL_ZOOM_PADDING) / (this.TIME_RANGE * rect.width);
                 this.camera.xZoomMultiplier = desiredZoomX / this.camera.zoom;
             }
         });
@@ -535,12 +555,12 @@ export class ZoneVisualizer {
             const aspect = rect.width / rect.height;
 
             if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-                const panSpeed = 0.002;
+                const panSpeed = PAN_SPEED;
                 this.camera.x -= e.deltaX * panSpeed / this.camera.zoomX * aspect;
                 return;
             }
 
-            const zoomFactor = 1.1;
+            const zoomFactor = ZOOM_FACTOR;
             const isCtrlPressed = e.ctrlKey || e.metaKey;
             const isShiftPressed = e.shiftKey;
 
@@ -553,7 +573,7 @@ export class ZoneVisualizer {
                 } else {
                     this.camera.zoom /= zoomFactor;
                 }
-                this.camera.zoom = Math.max(0.01, Math.min(2.0, this.camera.zoom));
+                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.max(MAX_ZOOM_Y, this.camera.zoom));
 
                 const newZoomX = this.camera.zoomX;
                 const newZoomY = this.camera.zoomY;
@@ -568,7 +588,7 @@ export class ZoneVisualizer {
                 } else {
                     this.camera.zoom /= zoomFactor;
                 }
-                this.camera.zoom = Math.max(0.01, Math.min(2.0, this.camera.zoom));
+                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.max(MAX_ZOOM_Y, this.camera.zoom));
 
                 this.camera.xZoomMultiplier *= (oldZoom / this.camera.zoom);
 
@@ -582,7 +602,7 @@ export class ZoneVisualizer {
                 } else {
                     this.camera.xZoomMultiplier /= zoomFactor;
                 }
-                this.camera.xZoomMultiplier = Math.max(0.001, Math.min(20000, this.camera.xZoomMultiplier));
+                this.camera.xZoomMultiplier = Math.max(MIN_ZOOM_X, Math.min(MAX_ZOOM_X, this.camera.xZoomMultiplier));
 
                 const newZoomX = this.camera.zoomX;
                 this.camera.x += ndcX * aspect * (1/newZoomX - 1/oldZoomX);
@@ -594,13 +614,13 @@ export class ZoneVisualizer {
                 const result = this.interactionManager.findZoneAtPosition(e.clientX, e.clientY, this.lanes, this.blocks);
 
                 if (result.zone) {
-                    const epsilon = 0.0000001;
+                    const epsilon = SELECTION_EPSILON;
                     this.interactionManager.startSelection(Math.max(0, result.zone.startX - epsilon));
                     this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, result.zone.endX + epsilon));
                     this.interactionManager.endSelection();
                     this.interactionManager.updateSelection();
                 } else if (result.block) {
-                    const epsilon = 0.0000001;
+                    const epsilon = SELECTION_EPSILON;
                     this.interactionManager.startSelection(Math.max(0, result.block.startX - epsilon));
                     this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, result.block.endX + epsilon));
                     this.interactionManager.endSelection();
@@ -633,7 +653,7 @@ export class ZoneVisualizer {
                 const worldDistance = Math.abs(bounds.end - bounds.start);
                 const rect = this.canvas.getBoundingClientRect();
                 const aspect = rect.width / rect.height;
-                const minWorldDistance = (3 / rect.width) * 2 / this.camera.zoomX * aspect;
+                const minWorldDistance = (MIN_SELECTION_DISTANCE / rect.width) * 2 / this.camera.zoomX * aspect;
 
                 if (worldDistance > minWorldDistance) {
                     this.interactionManager.endSelection();
@@ -671,7 +691,7 @@ export class ZoneVisualizer {
                 const worldPos = this.camera.screenToWorld(e.clientX, e.clientY, this.canvas);
                 const time = worldPos.x;
 
-                const timeInNs = time * 1000000;
+                const timeInNs = time * MS_TO_NS;
                 const formattedTime = Math.round(timeInNs).toLocaleString() + ' ns';
 
                 this.cursorTimestamp.textContent = formattedTime;
@@ -717,10 +737,10 @@ export class ZoneVisualizer {
         const ndcX = (worldX + this.camera.x) * this.camera.zoomX / aspect;
         const laneStartScreenX = (ndcX + 1) * rect.width / 2;
 
-        const labelWidth = 50;
+        const labelWidth = SM_LABEL_WIDTH;
         const labelX = Math.max(0, laneStartScreenX - labelWidth);
 
-        const timelineHeight = 30;
+        const timelineHeight = TIMELINE_HEIGHT;
 
         for (let i = 0; i < this.lanes.length; i++) {
             const lane = this.lanes[i];
@@ -781,9 +801,9 @@ export class ZoneVisualizer {
         const fps = deltaTime > 0 ? Math.round(1000 / deltaTime) : 60;
 
         // Update stats overlay with trace info and performance metrics
-        const durationNs = Math.round(this.TIME_RANGE * 1000000);
+        const durationNs = Math.round(this.TIME_RANGE * MS_TO_NS);
         const formattedDuration = durationNs.toLocaleString();
-        const fpsStr = String(fps).padStart(3, ' ');
+        const fpsStr = String(fps).padStart(FPS_PADDING_WIDTH, ' ');
 
         // Only update stats if they don't exist yet (avoid recreating links every frame)
         if (!this.stats.querySelector('.stats-links')) {
@@ -858,7 +878,7 @@ export class ZoneVisualizer {
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{
                 view: textureView,
-                clearValue: { r: 0.102, g: 0.102, b: 0.110, a: 1.0 },
+                clearValue: { r: CLEAR_COLOR_R, g: CLEAR_COLOR_G, b: CLEAR_COLOR_B, a: 1.0 },
                 loadOp: 'clear',
                 storeOp: 'store',
             }]

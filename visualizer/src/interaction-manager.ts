@@ -16,13 +16,21 @@ import {
     Block,
     BlockLane,
     FormatDescriptor,
-    FindZoneResult,
+    FindZoneResult
+} from './utils/types.js';
+import {
     LANE_EDGE_PADDING,
     SUBLANE_HEIGHT,
     SUBLANE_PADDING,
     BLOCK_EDGE_PADDING,
-    BLOCK_LANE_PADDING
-} from './utils/types.js';
+    BLOCK_LANE_PADDING,
+    TOOLTIP_OFFSET_X,
+    TOOLTIP_OFFSET_Y,
+    SELECTION_LABEL_OFFSET,
+    MS_TO_NS,
+    TIME_DECIMAL_THRESHOLD,
+    TIME_DECIMAL_PLACES
+} from './utils/constants.js';
 
 /**
  * Handles all mouse interaction logic for the trace visualizer.
@@ -239,8 +247,8 @@ export class InteractionManager {
             this.hoveredZoneId = result.zone.id;
 
             // Convert world coordinates (milliseconds) to nanoseconds for display
-            const startNs = Math.round(result.zone.startX * 1000000);
-            const endNs = Math.round(result.zone.endX * 1000000);
+            const startNs = Math.round(result.zone.startX * MS_TO_NS);
+            const endNs = Math.round(result.zone.endX * MS_TO_NS);
             const durNs = endNs - startNs;
 
             // Format names using format descriptors with parameter substitution
@@ -264,8 +272,8 @@ export class InteractionManager {
                 End: ${endNs.toLocaleString()} ns<br>
                 Len: ${durNs.toLocaleString()} ns
             `;
-            this.tooltip.style.left = `${screenX + 10}px`;
-            this.tooltip.style.top = `${screenY + 10}px`;
+            this.tooltip.style.left = `${screenX + TOOLTIP_OFFSET_X}px`;
+            this.tooltip.style.top = `${screenY + TOOLTIP_OFFSET_Y}px`;
             this.tooltip.classList.add('visible');
         } else {
             this.hoveredZoneId = -1;
@@ -315,14 +323,14 @@ export class InteractionManager {
             this.selectionLineEnd.style.left = `${screenRight}px`;
             this.selectionLineEnd.style.display = 'block';
 
-            const startNs = worldLeftX * 1000000;
-            const endNs = worldRightX * 1000000;
+            const startNs = worldLeftX * MS_TO_NS;
+            const endNs = worldRightX * MS_TO_NS;
             const durNs = endNs - startNs;
 
             let startText: string, endText: string, durText: string;
-            if (durNs < 10) {
-                startText = startNs.toFixed(2);
-                endText = endNs.toFixed(2);
+            if (durNs < TIME_DECIMAL_THRESHOLD) {
+                startText = startNs.toFixed(TIME_DECIMAL_PLACES);
+                endText = endNs.toFixed(TIME_DECIMAL_PLACES);
                 durText = durNs.toFixed(2);
             } else {
                 startText = Math.round(startNs).toLocaleString();
@@ -335,7 +343,7 @@ export class InteractionManager {
                 `End: ${endText} ns\n` +
                 `Len: ${durText} ns`;
 
-            this.selectionLabel.style.left = `${screenLeft + 4}px`;
+            this.selectionLabel.style.left = `${screenLeft + SELECTION_LABEL_OFFSET}px`;
             this.selectionLabel.style.display = 'block';
         } else {
             // Collapse to a single line when too narrow
@@ -348,14 +356,14 @@ export class InteractionManager {
             this.selectionLineStart.style.left = `${centerX}px`;
             this.selectionLineStart.style.display = 'block';
 
-            const startNs = worldLeftX * 1000000;
-            const endNs = worldRightX * 1000000;
+            const startNs = worldLeftX * MS_TO_NS;
+            const endNs = worldRightX * MS_TO_NS;
             const durNs = endNs - startNs;
 
             let startText: string, endText: string, durText: string;
-            if (durNs < 10) {
-                startText = startNs.toFixed(2);
-                endText = endNs.toFixed(2);
+            if (durNs < TIME_DECIMAL_THRESHOLD) {
+                startText = startNs.toFixed(TIME_DECIMAL_PLACES);
+                endText = endNs.toFixed(TIME_DECIMAL_PLACES);
                 durText = durNs.toFixed(2);
             } else {
                 startText = Math.round(startNs).toLocaleString();
@@ -368,7 +376,7 @@ export class InteractionManager {
                 `End: ${endText} ns\n` +
                 `Len: ${durText} ns`;
 
-            this.selectionLabel.style.left = `${centerX + 4}px`;
+            this.selectionLabel.style.left = `${centerX + SELECTION_LABEL_OFFSET}px`;
             this.selectionLabel.style.display = 'block';
         }
     }

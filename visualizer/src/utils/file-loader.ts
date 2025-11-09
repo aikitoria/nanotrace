@@ -25,14 +25,20 @@ import {
     Zone,
     Block,
     BlockLane,
-    Lane,
+    Lane
+} from './types.js';
+import {
     SUBLANE_HEIGHT,
     LANE_PADDING,
     SUBLANE_PADDING,
     LANE_EDGE_PADDING,
     BLOCK_LANE_PADDING,
-    BLOCK_EDGE_PADDING
-} from './types.js';
+    BLOCK_EDGE_PADDING,
+    MAGIC_NUMBER_LENGTH,
+    EXPECTED_FORMAT_VERSION,
+    COMPRESSION_MODE_DEFLATE,
+    NS_TO_MS
+} from './constants.js';
 
 /** Raw data extracted from binary trace file. */
 export interface ParsedTraceData {
@@ -135,11 +141,11 @@ export async function parseTraceFile(
     if (magic !== "nanotrace") {
         throw new Error(`Invalid magic number: ${magic}`);
     }
-    offset += 10;
+    offset += MAGIC_NUMBER_LENGTH;
 
     const formatVersion = view.getUint8(offset);
     offset += 1;
-    if (formatVersion !== 1) {
+    if (formatVersion !== EXPECTED_FORMAT_VERSION) {
         throw new Error(`Unsupported format version: ${formatVersion}`);
     }
 
@@ -151,7 +157,7 @@ export async function parseTraceFile(
 
     // Decompress the remaining data if compression is enabled
     // Compression includes kernel name and everything after
-    if (compressionMode === 1) {
+    if (compressionMode === COMPRESSION_MODE_DEFLATE) {
         performance.mark('parseTraceFile:decompress:start');
         if (onProgress) onProgress('Decompressing trace data...');
         console.log(`Decompressing trace data...`);
@@ -174,7 +180,7 @@ export async function parseTraceFile(
 
     console.log(`Parsing ${file.name}:`);
     console.log(`  Kernel: ${kernelName}`);
-    console.log(`  Compression: ${compressionMode === 1 ? 'deflate' : 'none'}`);
+    console.log(`  Compression: ${compressionMode === COMPRESSION_MODE_DEFLATE ? 'deflate' : 'none'}`);
     console.log(`  Format descriptors: ${formatDescCount}`);
     console.log(`  Blocks: ${blockDescCount}`);
     console.log(`  Tracks: ${trackCount}`);
@@ -315,13 +321,13 @@ export function buildHierarchy(
                 });
             });
 
-            const startX = minTime / 1_000_000;
-            const endX = maxTime / 1_000_000;
+            const startX = minTime * NS_TO_MS;
+            const endX = maxTime * NS_TO_MS;
 
             const sublanes: Zone[][] = blockTracksForBlock.map(track => {
                 return track.events.map(event => {
-                    const zoneStartX = event.timeOffset / 1_000_000;
-                    const zoneEndX = (event.timeOffset + event.duration) / 1_000_000;
+                    const zoneStartX = event.timeOffset * NS_TO_MS;
+                    const zoneEndX = (event.timeOffset + event.duration) * NS_TO_MS;
                     const baseColor = formatToColor.get(event.formatDescId)!;
 
                     const zone: Zone = {

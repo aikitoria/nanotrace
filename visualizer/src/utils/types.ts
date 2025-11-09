@@ -153,36 +153,3 @@ export interface TimelineIntervals {
     label: number;                   // Label interval (>= major, power of 10)
 }
 
-/**
- * Layout constants (all in world space units).
- *
- * These values control the visual spacing and sizing of the hierarchy.
- * Tuned for readability and label visibility at typical zoom levels.
- */
-
-/** Fixed height of each sublane (zone track) within a block. */
-export const SUBLANE_HEIGHT = 0.01;
-
-/** Vertical spacing between SM lanes. */
-export const LANE_PADDING = 0.015;
-
-/** Vertical spacing between sublanes within a block. */
-export const SUBLANE_PADDING = 0.002;
-
-/** Padding at top and bottom edges of each SM lane. */
-export const LANE_EDGE_PADDING = 0.003;
-
-/** Vertical spacing between block lanes within an SM lane. */
-export const BLOCK_LANE_PADDING = 0.01;
-
-/** Horizontal gap between adjacent blocks (currently unused in layout). */
-export const BLOCK_PADDING = 0.00005;
-
-/** Vertical padding above blocks (reserved for block labels). */
-export const BLOCK_EDGE_PADDING = 0.008;
-
-/** Horizontal gap between adjacent zones (currently unused in layout). */
-export const ZONE_GAP = 0.00001;
-
-/** Default time range in milliseconds (1ms) when no trace is loaded. */
-export const BASE_TIME_RANGE = 1.0;

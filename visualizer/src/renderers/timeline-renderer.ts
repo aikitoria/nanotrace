@@ -20,6 +20,26 @@
 
 import { Camera } from '../utils/camera.js';
 import { TimelineIntervals } from '../utils/types.js';
+import {
+    TIMELINE_TICK_SPACING,
+    TIMELINE_LABEL_SPACING,
+    MIN_TICK_INTERVAL,
+    TICK_INTERVAL_TOLERANCE,
+    TICK_BOUNDS_TOLERANCE,
+    TICK_VIEWPORT_MARGIN,
+    TICK_MAJOR_TOP,
+    TICK_MAJOR_HEIGHT,
+    TICK_MEDIUM_TOP,
+    TICK_MEDIUM_HEIGHT,
+    TICK_MINOR_TOP,
+    TICK_MINOR_HEIGHT,
+    TICK_TINY_TOP,
+    TICK_TINY_HEIGHT,
+    TICK_OPACITY,
+    TIME_UNIT_SECONDS_THRESHOLD,
+    TIME_UNIT_MILLISECONDS_THRESHOLD,
+    TIME_UNIT_MICROSECONDS_THRESHOLD
+} from '../utils/constants.js';
 
 /**
  * Manages timeline bar with adaptive tick marks and time labels.
@@ -127,7 +147,7 @@ export class TimelineRenderer {
         const worldWidth = (rect.width / rect.height) * 2 / this.camera.zoomX;
         const worldPerPixel = worldWidth / rect.width;
 
-        const tickTargetPixels = 120;
+        const tickTargetPixels = TIMELINE_TICK_SPACING;
         const tickTargetWorldInterval = tickTargetPixels * worldPerPixel;
         const tickOrderOfMagnitude = Math.pow(10, Math.floor(Math.log10(tickTargetWorldInterval)));
         let tickBaseInterval: number;
@@ -140,10 +160,10 @@ export class TimelineRenderer {
         }
         let tickInterval = Math.pow(10, Math.ceil(Math.log10(tickBaseInterval)));
 
-        const minTickInterval = 0.000001;
+        const minTickInterval = MIN_TICK_INTERVAL;
         tickInterval = Math.max(tickInterval, minTickInterval);
 
-        const labelTargetPixels = 180;
+        const labelTargetPixels = TIMELINE_LABEL_SPACING;
         const labelTargetWorldInterval = labelTargetPixels * worldPerPixel;
         const labelOrderOfMagnitude = Math.pow(10, Math.floor(Math.log10(labelTargetWorldInterval)));
         let labelInterval: number;
@@ -180,13 +200,13 @@ export class TimelineRenderer {
 
         const absInterval = Math.abs(interval);
 
-        if (absInterval >= 1000.0) {
+        if (absInterval >= TIME_UNIT_SECONDS_THRESHOLD) {
             value = time / 1000;
             unit = 's';
-        } else if (absInterval >= 1.0) {
+        } else if (absInterval >= TIME_UNIT_MILLISECONDS_THRESHOLD) {
             value = time;
             unit = 'ms';
-        } else if (absInterval >= 0.001) {
+        } else if (absInterval >= TIME_UNIT_MICROSECONDS_THRESHOLD) {
             value = time * 1000;
             unit = 'μs';
         } else {
@@ -238,7 +258,7 @@ export class TimelineRenderer {
         for (let i = 0; i <= numTicks; i++) {
             const time = startTiny + i * intervals.tiny;
 
-            const fudge = intervals.tiny * 0.1;
+            const fudge = intervals.tiny * TICK_BOUNDS_TOLERANCE;
             if (time < -fudge || time > TIME_RANGE + fudge || time < worldLeft - intervals.tiny || time > worldRight + intervals.tiny) continue;
 
             const majorIndex = Math.round(time / intervals.major);
@@ -246,14 +266,14 @@ export class TimelineRenderer {
             const minorIndex = Math.round(time / intervals.minor);
             const labelIndex = Math.round(time / intervals.label);
 
-            const isMajor = Math.abs(time - majorIndex * intervals.major) < intervals.tiny * 0.01;
-            const isMedium = Math.abs(time - mediumIndex * (intervals.major / 2)) < intervals.tiny * 0.01;
-            const isMinor = Math.abs(time - minorIndex * intervals.minor) < intervals.tiny * 0.01;
-            const isLabel = Math.abs(time - labelIndex * intervals.label) < intervals.tiny * 0.01;
+            const isMajor = Math.abs(time - majorIndex * intervals.major) < intervals.tiny * TICK_INTERVAL_TOLERANCE;
+            const isMedium = Math.abs(time - mediumIndex * (intervals.major / 2)) < intervals.tiny * TICK_INTERVAL_TOLERANCE;
+            const isMinor = Math.abs(time - minorIndex * intervals.minor) < intervals.tiny * TICK_INTERVAL_TOLERANCE;
+            const isLabel = Math.abs(time - labelIndex * intervals.label) < intervals.tiny * TICK_INTERVAL_TOLERANCE;
 
             const screenX = Math.round(((time + this.camera.x) * this.camera.zoomX / aspect + 1) * rect.width / 2);
 
-            if (screenX < -10 || screenX > rect.width + 10) continue;
+            if (screenX < -TICK_VIEWPORT_MARGIN || screenX > rect.width + TICK_VIEWPORT_MARGIN) continue;
 
             // Get tick element from pool (reuse existing or create new)
             const tick = this.getTickElement();
@@ -263,25 +283,25 @@ export class TimelineRenderer {
             const physicalPixelWidth2 = `${2 / devicePixelRatio}px`;
 
             if (isMajor) {
-                tick.style.top = '16px';
+                tick.style.top = `${TICK_MAJOR_TOP}px`;
                 tick.style.width = physicalPixelWidth2;
-                tick.style.height = '12px';
-                tick.style.opacity = '0.9';
+                tick.style.height = `${TICK_MAJOR_HEIGHT}px`;
+                tick.style.opacity = `${TICK_OPACITY}`;
             } else if (isMedium && !isMajor) {
-                tick.style.top = '19px';
+                tick.style.top = `${TICK_MEDIUM_TOP}px`;
                 tick.style.width = physicalPixelWidth1;
-                tick.style.height = '9px';
-                tick.style.opacity = '0.9';
+                tick.style.height = `${TICK_MEDIUM_HEIGHT}px`;
+                tick.style.opacity = `${TICK_OPACITY}`;
             } else if (isMinor) {
-                tick.style.top = '22px';
+                tick.style.top = `${TICK_MINOR_TOP}px`;
                 tick.style.width = physicalPixelWidth1;
-                tick.style.height = '6px';
-                tick.style.opacity = '0.9';
+                tick.style.height = `${TICK_MINOR_HEIGHT}px`;
+                tick.style.opacity = `${TICK_OPACITY}`;
             } else {
-                tick.style.top = '25px';
+                tick.style.top = `${TICK_TINY_TOP}px`;
                 tick.style.width = physicalPixelWidth1;
-                tick.style.height = '3px';
-                tick.style.opacity = '0.9';
+                tick.style.height = `${TICK_TINY_HEIGHT}px`;
+                tick.style.opacity = `${TICK_OPACITY}`;
             }
 
             if (isLabel) {

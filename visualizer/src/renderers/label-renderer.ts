@@ -20,10 +20,26 @@ import {
     Block,
     BlockLane,
     Lane,
-    FormatDescriptor,
-    SUBLANE_HEIGHT,
-    BLOCK_EDGE_PADDING
+    FormatDescriptor
 } from '../utils/types.js';
+import {
+    SUBLANE_HEIGHT,
+    BLOCK_EDGE_PADDING,
+    LABEL_COLOR,
+    SM_LABEL_WIDTH,
+    MIN_BLOCK_LABEL_WIDTH,
+    MIN_BLOCK_LABEL_PADDING_HEIGHT,
+    MIN_ZONE_LABEL_WIDTH,
+    MIN_ZONE_LABEL_HEIGHT,
+    BLOCK_LABEL_PADDING_X,
+    BLOCK_LABEL_PADDING_Y,
+    ZONE_LABEL_PADDING_X,
+    ZONE_LABEL_PADDING_Y,
+    LABEL_CLIP_MARGIN,
+    LABEL_FONT_SIZE,
+    LABEL_FONT_FAMILY,
+    MS_TO_NS
+} from '../utils/constants.js';
 
 /**
  * Renders text labels for blocks and zones using Canvas 2D API.
@@ -94,9 +110,9 @@ export class LabelRenderer {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
 
-        const minWidth = 100;
-        const minPaddingHeight = 12;
-        const smLabelWidth = 50;
+        const minWidth = MIN_BLOCK_LABEL_WIDTH;
+        const minPaddingHeight = MIN_BLOCK_LABEL_PADDING_HEIGHT;
+        const smLabelWidth = SM_LABEL_WIDTH;
 
         const minScreenPaddingHeight = BLOCK_EDGE_PADDING * this.camera.zoomY * (rect.height / 2);
         if (minScreenPaddingHeight < minPaddingHeight) {
@@ -124,10 +140,10 @@ export class LabelRenderer {
             }
         }
 
-        this.labelCtx.font = '10px Consolas, Monaco, monospace';
+        this.labelCtx.font = `${LABEL_FONT_SIZE}px ${LABEL_FONT_FAMILY}`;
         this.labelCtx.textAlign = 'left';
         this.labelCtx.textBaseline = 'top';
-        this.labelCtx.fillStyle = '#a8a8a8';
+        this.labelCtx.fillStyle = LABEL_COLOR;
 
         for (const block of blocks) {
             if (block.endX < worldLeft || block.startX > worldRight) {
@@ -160,16 +176,16 @@ export class LabelRenderer {
             const visibleWidth = screenRight - visibleLeft;
 
             if (visibleWidth >= minWidth && screenPaddingHeight >= minPaddingHeight) {
-                const labelX = visibleLeft + 3;
-                const labelY = screenTop + 2;
-                const durationNs = Math.round((block.endX - block.startX) * 1000000);
+                const labelX = visibleLeft + BLOCK_LABEL_PADDING_X;
+                const labelY = screenTop + BLOCK_LABEL_PADDING_Y;
+                const durationNs = Math.round((block.endX - block.startX) * MS_TO_NS);
 
                 const blockName = formatDescriptors.length > 0
                     ? formatString(block.formatDescId, block.params)
                     : `Block #${block.id}`;
 
                 // Use maxWidth parameter to clip long labels to fit available space
-                this.labelCtx.fillText(`${blockName} (${durationNs.toLocaleString()} ns)`, labelX, labelY, visibleWidth - 6);
+                this.labelCtx.fillText(`${blockName} (${durationNs.toLocaleString()} ns)`, labelX, labelY, visibleWidth - LABEL_CLIP_MARGIN);
             }
         }
     }
@@ -210,9 +226,9 @@ export class LabelRenderer {
         // Use cached blocks array to avoid per-frame allocations
         this.renderBlockLabels(this.cachedBlocks, blockLanes, formatDescriptors, formatString);
 
-        const minWidth = 100;
-        const minHeight = 15;
-        const smLabelWidth = 50;
+        const minWidth = MIN_ZONE_LABEL_WIDTH;
+        const minHeight = MIN_ZONE_LABEL_HEIGHT;
+        const smLabelWidth = SM_LABEL_WIDTH;
 
         const maxZoneHeight = SUBLANE_HEIGHT;
         const minScreenHeight = maxZoneHeight * this.camera.zoomY * (rect.height / 2);
@@ -241,10 +257,10 @@ export class LabelRenderer {
             }
         }
 
-        this.labelCtx.font = '10px Consolas, Monaco, monospace';
+        this.labelCtx.font = `${LABEL_FONT_SIZE}px ${LABEL_FONT_FAMILY}`;
         this.labelCtx.textAlign = 'left';
         this.labelCtx.textBaseline = 'middle';
-        this.labelCtx.fillStyle = '#d4d4d4';
+        this.labelCtx.fillStyle = LABEL_COLOR;
 
         const worldLeft = this.camera.screenToWorld(0, 0, this.canvas).x;
         const worldRight = this.camera.screenToWorld(rect.width, 0, this.canvas).x;
@@ -309,16 +325,16 @@ export class LabelRenderer {
                             const visibleWidth = screenRight - visibleLeft;
 
                             if (visibleWidth >= minWidth && screenHeight >= minHeight) {
-                                const labelX = visibleLeft + 3;
-                                const labelY = screenTop + 8;
-                                const durationNs = Math.round((zone.endX - zone.startX) * 1000000);
+                                const labelX = visibleLeft + ZONE_LABEL_PADDING_X;
+                                const labelY = screenTop + ZONE_LABEL_PADDING_Y;
+                                const durationNs = Math.round((zone.endX - zone.startX) * MS_TO_NS);
 
                                 const zoneName = formatDescriptors.length > 0
                                     ? formatString(zone.formatDescId, zone.params)
                                     : `#${zone.id}`;
 
                                 // Use maxWidth parameter to clip long labels to fit available space
-                                this.labelCtx.fillText(`${zoneName} (${durationNs.toLocaleString()} ns)`, labelX, labelY, visibleWidth - 6);
+                                this.labelCtx.fillText(`${zoneName} (${durationNs.toLocaleString()} ns)`, labelX, labelY, visibleWidth - LABEL_CLIP_MARGIN);
                             }
                         }
                     }
