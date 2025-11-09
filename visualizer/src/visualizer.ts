@@ -28,7 +28,10 @@ import {
     BASE_TIME_RANGE
 } from './utils/types.js';
 
-const VERSION = '0.1';
+// Git commit hash injected at build time by Vite
+declare const __GIT_HASH__: string;
+
+const VERSION = `0.1-${__GIT_HASH__}`;
 
 /**
  * Main application class that coordinates all visualization subsystems.
