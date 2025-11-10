@@ -36,6 +36,9 @@ NANOTRACE_DEFINE_TRACE_TYPE(TraceCompute, "Compute", "Compute iteration {0}", 1,
 
 // Block type (for block labels)
 NANOTRACE_DEFINE_BLOCK_TYPE(MyBlock, "Block {blockX}", "Block {blockX} on SM");
+
+// Track type (for lane/track labels)
+NANOTRACE_DEFINE_TRACK_TYPE(MyTrack, "Warp {lane}", "Warp {lane}", 0);
 ```
 
 ### 2. Create Trace Tensor
@@ -48,7 +51,7 @@ using TraceTensor = nanotrace::static_trace_builder<8,
 >;
 
 dim3 grid(16, 1, 1);  // Match kernel grid
-TraceTensor trace_tensor(1024, grid);  // 1024 events per lane
+TraceTensor trace_tensor(100, grid);  // 100 events per lane
 ```
 
 ### 3. Instrument Kernel
@@ -70,7 +73,7 @@ __global__ void my_kernel(
 
             // ... your work here ...
 
-            nanotrace::end(s, trace_handle, lane);
+            nanotrace::end(s, trace_handle, lane, TraceKernel{});
         }
 
         nanotrace::finish_lane(trace_handle, lane);
@@ -86,6 +89,7 @@ cudaDeviceSynchronize();
 
 nanotrace::trace_writer writer("my_kernel");
 writer.set_block_type<MyBlock>();
+writer.set_track_type<MyTrack>();
 writer.register_trace_type<TraceKernel>();
 writer.add_tensor(trace_tensor);
 writer.write("output.nanotrace");
@@ -129,24 +133,38 @@ Initializes lane context for dynamic tensor. Returns `lane_context_dynamic`.
 
 ```cpp
 // 0 parameters (v2 store, 8 bytes)
-void nanotrace::end(start_token, handle, lane)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{})
 
 // 1 parameter (v4 store, 16 bytes)
-void nanotrace::end(start_token, handle, lane, uint32_t p0)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0)
 
 // 2 parameters (v4 store, 16 bytes)
-void nanotrace::end(start_token, handle, lane, uint32_t p0, uint32_t p1)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0, uint32_t p1)
 
 // 3-6 parameters (v8 store, 32 bytes)
-void nanotrace::end(start_token, handle, lane, uint32_t p0, ..., uint32_t p5)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0, ..., uint32_t p5)
 ```
+
+**Note**: The `TraceType` parameter enables compile-time validation that the correct number of parameters are passed.
 
 #### End Event (Dynamic Lanes)
 
 ```cpp
-// 0-5 parameters (v8 store, 32 bytes, includes format ID)
-template<typename TraceType, typename... Params>
-void nanotrace::end(start_token, handle, lane, TraceType{}, Params... params)
+// 0 parameters (v4 store, 16 bytes, includes format ID)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{})
+
+// 1 parameter (v4 store, 16 bytes, includes format ID)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0)
+
+// 2-5 parameters (v8 store, 32 bytes, includes format ID)
+template<typename TraceType>
+void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0, ..., uint32_t p4)
 ```
 
 #### Finish Lane
@@ -193,6 +211,9 @@ public:
     template<typename BlockType>
     void set_block_type();
 
+    template<typename TrackType>
+    void set_track_type();
+
     template<typename TraceType>
     void register_trace_type();
 
@@ -208,23 +229,25 @@ public:
 ### Static Tensor (event_width = 2, 0 params)
 
 ```
-Lane: [Header: 8 uint32] [Event 0: 2 uint32] [Event 1: 2 uint32] ...
-       [sm_id, count, 0, 0, 0, 0, 0, 0] [start, end] [start, end]
+Lane: [Header: 2 uint32] [Event 0: 2 uint32] [Event 1: 2 uint32] ...
+       [sm_id, write_offset_bytes] [start, end] [start, end]
 ```
 
 ### Static Tensor (event_width = 4, 1-2 params)
 
 ```
-Lane: [Header: 8 uint32] [Event 0: 4 uint32] [Event 1: 4 uint32] ...
-       [sm_id, count, ...] [start, end, p0, p1] [start, end, p0, p1]
+Lane: [Header: 4 uint32] [Event 0: 4 uint32] [Event 1: 4 uint32] ...
+       [sm_id, write_offset_bytes, 0, 0] [start, end, p0, p1] [start, end, p0, p1]
 ```
 
 ### Dynamic Tensor (event_width = 8)
 
 ```
 Lane: [Header: 8 uint32] [Event 0: 8 uint32] [Event 1: 8 uint32] ...
-       [sm_id, count, ...] [start, end, fmt_id, p0-p4] [start, end, fmt_id, p0-p4]
+       [sm_id, write_offset_bytes, ...] [start, end, fmt_id, p0-p4] [start, end, fmt_id, p0-p4]
 ```
+
+**Note**: The header stores `write_offset_bytes` (the final write position in bytes) instead of event count. The host post-processor computes the event count from this value, which enables overflow detection when `write_offset_bytes` exceeds the allocated lane capacity.
 
 ## Building
 

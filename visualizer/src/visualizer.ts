@@ -479,7 +479,7 @@ export class ZoneVisualizer {
      * Loads bundled sample trace file from assets.
      * Sample 1: Minimal trace (1 block, 2 events)
      * Sample 2: Small random trace (~48K events, 16 SMs)
-     * Sample 3: Large random trace (~10M events, 144 SMs)
+     * Sample 3: Large random trace (~10M events, 148 SMs)
      * Simple B200: Simple trace from nanotrace-cuda example (16 blocks, 128 tracks, ~13K events)
      * Mixed B200: Mixed trace from nanotrace-cuda example (32 blocks, 384 tracks, ~2.5K events)
      * Grayscale B200: Grayscale trace from nanotrace-cuda example (419K blocks, 419K events, all 148 SMs)
@@ -494,10 +494,10 @@ export class ZoneVisualizer {
             'simple_b200': 'samples/simple_trace_b200.nanotrace',
             'mixed_b200': 'samples/mixed_trace_b200.nanotrace',
             'grayscale_b200': 'samples/grayscale_trace_b200.nanotrace',
-            'tma_static_144': 'samples/tma_bandwidth_static_144.nanotrace',
-            'tma_static_288': 'samples/tma_bandwidth_static_288.nanotrace',
-            'tma_atomic_144': 'samples/tma_bandwidth_atomic_144.nanotrace',
-            'tma_atomic_288': 'samples/tma_bandwidth_atomic_288.nanotrace',
+            'tma_static_148': 'samples/tma_bandwidth_static_148.nanotrace',
+            'tma_static_296': 'samples/tma_bandwidth_static_296.nanotrace',
+            'tma_atomic_148': 'samples/tma_bandwidth_atomic_148.nanotrace',
+            'tma_atomic_296': 'samples/tma_bandwidth_atomic_296.nanotrace',
         };
 
         const fileName = sampleFiles[sampleName];

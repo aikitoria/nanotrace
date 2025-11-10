@@ -71,7 +71,26 @@ std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
                                       lane_id * tensor.row_stride;
 
                 uint16_t sm_id = tensor.host_buffer[base_offset];
-                uint32_t event_count = tensor.host_buffer[base_offset + 1];
+                uint32_t write_offset_bytes = tensor.host_buffer[base_offset + 1];
+
+                // Compute event count from byte offset (device writes raw offset to avoid division)
+                uint32_t base_offset_bytes = base_offset * 4;
+                uint32_t event_width_bytes = tensor.event_width * 4;
+                uint32_t row_stride_bytes = tensor.row_stride * 4;
+                uint32_t max_offset_bytes = base_offset_bytes + row_stride_bytes;
+
+                // Check for overflow
+                if (write_offset_bytes > max_offset_bytes) {
+                    throw std::runtime_error(
+                        "Overflow detected in block " + std::to_string(block_id) +
+                        ", lane " + std::to_string(lane_id) + " (SM " + std::to_string(sm_id) + "): " +
+                        "write_offset=" + std::to_string(write_offset_bytes) + " bytes exceeds " +
+                        "allocated capacity=" + std::to_string(max_offset_bytes) + " bytes. " +
+                        "Allocated " + std::to_string((row_stride_bytes - event_width_bytes) / event_width_bytes) + " events, " +
+                        "attempted " + std::to_string((write_offset_bytes - base_offset_bytes - event_width_bytes) / event_width_bytes) + " events.");
+                }
+
+                uint32_t event_count = (write_offset_bytes - base_offset_bytes - event_width_bytes) / event_width_bytes;
 
                 if (event_count == 0) continue;
 

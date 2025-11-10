@@ -181,7 +181,7 @@ __global__ void tma_bandwidth_kernel(
             parity)) { }
 
         if (tid == 0) {
-            nanotrace::end(trace_start[stage], trace_handle, lanes[stage],
+            nanotrace::end(trace_start[stage], trace_handle, lanes[stage], TileTransfer{},
                           tile_coords_x[stage], tile_coords_y[stage]);
         }
 
@@ -288,7 +288,8 @@ int main(int argc, char** argv) {
     printf("\nSetting up nanotrace...\n");
     dim3 grid(num_blocks, 1, 1);
     uint32_t tiles_per_block = (total_tiles + num_blocks - 1) / num_blocks;
-    uint32_t max_events_per_lane = tiles_per_block + 50;  // Add extra buffer for load imbalance
+    // Atomic scheduling causes load imbalance, allocate 4x for worst case
+    uint32_t max_events_per_lane = tiles_per_block * 4;
 
     using TraceConfig = nanotrace::static_trace_builder<3, TileTransfer, TileTransfer, TileTransfer>;
     TraceConfig trace_tensor(max_events_per_lane, grid);

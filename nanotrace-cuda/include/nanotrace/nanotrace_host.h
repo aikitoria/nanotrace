@@ -43,7 +43,20 @@ public:
         this->grid_dims = grid_dims;
         this->cluster_dims = cluster_dims;
         total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
-        row_stride = max_event_width + max_events_per_lane * max_event_width;
+        // +1 for header slot
+        row_stride = (max_events_per_lane + 1) * max_event_width;
+
+        // Check for uint32 byte offset overflow
+        uint64_t row_stride_bytes = static_cast<uint64_t>(row_stride) * 4;
+        uint64_t max_offset_bytes = static_cast<uint64_t>(total_blocks) * NumLanes * row_stride_bytes;
+        if (max_offset_bytes > UINT32_MAX) {
+            throw std::runtime_error(
+                "Tensor configuration would overflow uint32 byte offsets: " +
+                std::to_string(total_blocks) + " blocks × " +
+                std::to_string(NumLanes) + " lanes × " +
+                std::to_string(row_stride_bytes) + " bytes/lane = " +
+                std::to_string(max_offset_bytes) + " bytes (max: 4294967295)");
+        }
 
         buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
         cudaMalloc(&d_buffer, buffer_size);
@@ -60,7 +73,7 @@ public:
     static_trace_builder& operator=(static_trace_builder&&) = delete;
 
     static_tensor_handle<NumLanes, max_event_width> get_handle() const {
-        return {d_buffer, row_stride};
+        return {reinterpret_cast<uint8_t*>(d_buffer), row_stride << 2};
     }
 
     template<uint32_t LaneIndex>
@@ -95,7 +108,20 @@ public:
         this->grid_dims = grid_dims;
         this->cluster_dims = cluster_dims;
         total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
-        row_stride = event_width + max_events_per_lane * event_width;
+        // +1 for header slot
+        row_stride = (max_events_per_lane + 1) * event_width;
+
+        // Check for uint32 byte offset overflow
+        uint64_t row_stride_bytes = static_cast<uint64_t>(row_stride) * 4;
+        uint64_t max_offset_bytes = static_cast<uint64_t>(total_blocks) * NumLanes * row_stride_bytes;
+        if (max_offset_bytes > UINT32_MAX) {
+            throw std::runtime_error(
+                "Tensor configuration would overflow uint32 byte offsets: " +
+                std::to_string(total_blocks) + " blocks × " +
+                std::to_string(NumLanes) + " lanes × " +
+                std::to_string(row_stride_bytes) + " bytes/lane = " +
+                std::to_string(max_offset_bytes) + " bytes (max: 4294967295)");
+        }
 
         buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
         cudaMalloc(&d_buffer, buffer_size);
@@ -112,7 +138,7 @@ public:
     dynamic_trace_builder& operator=(dynamic_trace_builder&&) = delete;
 
     dynamic_tensor_handle<NumLanes> get_handle() const {
-        return {d_buffer, row_stride};
+        return {reinterpret_cast<uint8_t*>(d_buffer), row_stride << 2};
     }
 
     void reset() {

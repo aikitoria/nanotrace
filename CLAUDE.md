@@ -84,8 +84,8 @@ Header-only implementation with zero overhead:
 - `start()` - Capture timestamp using `%%globaltimer_lo` (32-bit lower portion, 32ns resolution)
 - `start_zero()` - Returns a zero-initialized `start_token` (useful for array initialization)
 - `begin_lane(handle, block_id, lane_index, enabled=true)` - Initialize lane context (2 uint32s + 1 bool), returns `lane_context_static<MaxEventWidth>`
-- `end(start, handle, lane, [p0-p6])` - Record event (7 overloads for 0-6 params), no-op if `!lane.enabled()`
-- `finish_lane(handle, lane)` - Write header with SM ID (`%%smid`) and event count, no-op if `!lane.enabled()`
+- `end(start, handle, lane, TraceType{}, [p0-p6])` - Record event (7 overloads for 0-6 params), requires TraceType for compile-time validation, no-op if `!lane.enabled()`
+- `finish_lane(handle, lane)` - Write header with SM ID (`%%smid`) and write_offset_bytes (for overflow detection), no-op if `!lane.enabled()`
 
 **Conditional Tracing**: Pass `enabled` boolean to `begin_lane()` to control tracing per-thread/warp:
 ```cuda
@@ -93,7 +93,7 @@ bool should_trace = (threadIdx.x == 0);  // Only thread 0 traces
 auto lane = nanotrace::begin_lane(handle, blockIdx.x, 0, should_trace);
 auto s = nanotrace::start();
 // ... work ...
-nanotrace::end(s, handle, lane);  // No-op if !should_trace
+nanotrace::end(s, handle, lane, TraceType{});  // No-op if !should_trace
 nanotrace::finish_lane(handle, lane);  // No-op if !should_trace
 ```
 All operations are forceinlined and use predicated execution for zero overhead when disabled.
@@ -143,18 +143,33 @@ All operations are forceinlined and use predicated execution for zero overhead w
 
 ```
 Static lane (max_event_width=2, 0 params):
-  [Header: sm_id, event_count] [Event: start, end] [Event: start, end] ...
+  [Header: sm_id, write_offset_bytes] [Event: start, end] [Event: start, end] ...
 
 Static lane (max_event_width=4, 1-2 params):
-  [Header: sm_id, event_count, ?, ?] [Event: start, end, p0, p1] ...
+  [Header: sm_id, write_offset_bytes, ?, ?] [Event: start, end, p0, p1] ...
 
 Dynamic lane (max_event_width=8, 0-5 params):
-  [Header: sm_id, event_count, ?, ?, ?, ?, ?, ?] [Event: start, end, format_id, p0-p4] ...
+  [Header: sm_id, write_offset_bytes, ?, ?, ?, ?, ?, ?] [Event: start, end, format_id, p0-p4] ...
 ```
 
-- Header (first event slot): Occupies full `max_event_width` but only first 2 uint32s are written (sm_id, event_count)
+- Header (first event slot): Occupies full `max_event_width` but only first 2 uint32s are written (sm_id, write_offset_bytes)
+- **write_offset_bytes**: Final write position in bytes, used by host to compute event count and detect overflow
 - Each event slot: Occupies full `max_event_width` regardless of actual event size
 - Unused portions of slots (marked with `?`) contain uninitialized data
+
+### Overflow Detection
+
+**Constructor checks**: Both `static_trace_builder` and `dynamic_trace_builder` validate that the tensor configuration won't overflow uint32 byte offsets:
+```cpp
+// Throws std::runtime_error if total_blocks × num_lanes × row_stride_bytes > UINT32_MAX
+TraceConfig trace(max_events, grid_dims);
+```
+
+**Post-processor checks**: The host-side `parse_all_events()` detects lane overflow:
+```cpp
+// Throws std::runtime_error if write_offset_bytes > allocated capacity
+// Reports: block ID, lane ID, SM ID, allocated vs attempted event counts
+```
 
 ### Example Usage
 ```cuda
@@ -165,14 +180,14 @@ NANOTRACE_DEFINE_TRACK_TYPE(MyTrack, "Warp {lane}", "Warp {lane}", 0);
 
 // Create tensor (max_events first, then grid, then optional cluster)
 using Tensor = nanotrace::static_trace_builder<8, TraceKernel, ...>;
-Tensor trace(1024, dim3(16,1,1));  // 1024 events/lane, 16 blocks
+Tensor trace(100, dim3(16,1,1));  // 100 events/lane, 16 blocks
 
 // Kernel
 __global__ void kernel(nanotrace::static_tensor_handle<8,2> handle, dim3 grid) {
     auto lane = nanotrace::begin_lane(handle, blockIdx.x, warp_id);
     auto s = nanotrace::start();
     // ... work (should take >32ns for meaningful duration) ...
-    nanotrace::end(s, handle, lane);
+    nanotrace::end(s, handle, lane, TraceKernel{});
     nanotrace::finish_lane(handle, lane);
 }
 
@@ -262,7 +277,7 @@ Build: TypeScript → Vite bundling → minification (Terser/CSS/HTML) → WebP 
 ```bash
 npm run generate:minimal  # 1 block, 2 events, grid (1,1,1)
 npm run generate:small    # ~50K events, 16 SMs, grid (1043,1,1)
-npm run generate:large    # ~9M events, 144 SMs, grid (99071,1,1)
+npm run generate:large    # ~9M events, 148 SMs, grid (99071,1,1)
 ```
 
 Samples use seeded random (seed=42), sequential block placement, weighted event distribution.
@@ -287,10 +302,10 @@ Generated with the latest conditional tracing API improvements (clean `begin_lan
 - `simple_trace_b200.nanotrace` - 16 blocks, 128 tracks, ~12.8K events
 - `mixed_trace_b200.nanotrace` - 32 blocks, 384 tracks, ~2.5K events (mixed static/dynamic tensors)
 - `grayscale_trace_b200.nanotrace` - 419K blocks, 419K events (1 per block), all 148 SMs
-- `tma_bandwidth_static_144.nanotrace` - 144 blocks, 432 tracks (3 buffers/block), 6839 GB/s (85.5%)
-- `tma_bandwidth_static_288.nanotrace` - 288 blocks, 864 tracks (3 buffers/block), 6972 GB/s (87.2%)
-- `tma_bandwidth_atomic_144.nanotrace` - 144 blocks, 432 tracks (3 buffers/block), 6987 GB/s (87.3%)
-- `tma_bandwidth_atomic_288.nanotrace` - 288 blocks, 864 tracks (3 buffers/block), 7424 GB/s (92.8%)
+- `tma_bandwidth_static_148.nanotrace` - 148 blocks, 444 tracks (3 buffers/block), 6801 GB/s (85.0%)
+- `tma_bandwidth_static_296.nanotrace` - 296 blocks, 888 tracks (3 buffers/block), 6969 GB/s (87.1%)
+- `tma_bandwidth_atomic_148.nanotrace` - 148 blocks, 444 tracks (3 buffers/block), 7096 GB/s (88.7%)
+- `tma_bandwidth_atomic_296.nanotrace` - 296 blocks, 888 tracks (3 buffers/block), 7427 GB/s (92.8%)
 
 **Access**: Available via "Load Sample File" menu in visualizer
 

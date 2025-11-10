@@ -53,7 +53,7 @@ __global__ void simple_kernel(
             scratch[blockIdx.x * 256 + threadIdx.x] = result;
         }
 
-        nanotrace::end(s, trace_handle, lane);
+        nanotrace::end(s, trace_handle, lane, TraceKernelExec{});
     }
 
     // Finalize lane (write header with SM ID and event count)
@@ -72,8 +72,8 @@ int main() {
     cudaMalloc(&d_scratch, grid.x * block.x * sizeof(int));
 
     // Create trace tensor
-    // Each block has 8 lanes (one per warp), each lane can hold 1024 events
-    TraceConfig trace_tensor(1024, grid);
+    // Each block has 8 lanes (one per warp), 100 events per lane
+    TraceConfig trace_tensor(100, grid);
 
     printf("Launching kernel with grid (%u, %u, %u) and block (%u, %u, %u)\n",
            grid.x, grid.y, grid.z, block.x, block.y, block.z);

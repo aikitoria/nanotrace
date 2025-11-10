@@ -62,7 +62,7 @@ __global__ void mixed_kernel(
             }
             if (data) data[global_tid % 1024] = sum;
 
-            nanotrace::end(s, static_handle, lane);
+            nanotrace::end(s, static_handle, lane, TraceKernel{});
         }
 
         nanotrace::finish_lane(static_handle, lane);
@@ -86,7 +86,7 @@ __global__ void mixed_kernel(
                 }
             }
 
-            nanotrace::end(s, static_handle, lane, src_addr, dst_addr);
+            nanotrace::end(s, static_handle, lane, TraceLoad{}, src_addr, dst_addr);
         }
 
         nanotrace::finish_lane(static_handle, lane);
@@ -106,7 +106,7 @@ __global__ void mixed_kernel(
             }
             if (data) data[global_tid % 1024] = dummy;
 
-            nanotrace::end(s, static_handle, lane);
+            nanotrace::end(s, static_handle, lane, TraceKernel{});
         }
 
         nanotrace::finish_lane(static_handle, lane);
@@ -166,8 +166,10 @@ int main() {
     cudaMemset(d_data, 0, 1024 * sizeof(int));
 
     // Create trace tensors
-    TraceConfig1 static_tensor(1024, grid);
-    TraceConfig2 dynamic_tensor(512, grid);
+    // Static lanes: max 10 events (warps 0-1)
+    TraceConfig1 static_tensor(10, grid);
+    // Dynamic lanes: 6 events (warps 8-11)
+    TraceConfig2 dynamic_tensor(6, grid);
 
     printf("Launching kernel with grid (%u, %u, %u) and block (%u, %u, %u)\n",
            grid.x, grid.y, grid.z, block.x, block.y, block.z);

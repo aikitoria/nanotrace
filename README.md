@@ -54,7 +54,7 @@ NANOTRACE_DEFINE_TRACK_TYPE(Warp, "Warp {lane}", "Warp {lane}", 0);
 
 // Create trace tensor
 using TraceConfig = nanotrace::static_trace_builder<8, Work, Work, Work, Work, Work, Work, Work, Work>;
-TraceConfig trace(1024, dim3(16, 1, 1));
+TraceConfig trace(100, dim3(16, 1, 1));  // 100 events per lane
 
 __global__ void kernel(nanotrace::static_tensor_handle<8, 2> handle) {
     uint32_t warp_id = threadIdx.x / 32;
@@ -65,7 +65,7 @@ __global__ void kernel(nanotrace::static_tensor_handle<8, 2> handle) {
 
     // ... work ...
 
-    nanotrace::end(s, handle, lane);
+    nanotrace::end(s, handle, lane, Work{});
     nanotrace::finish_lane(handle, lane);
 }
 
@@ -119,7 +119,7 @@ Synthetic traces for testing (TypeScript generators):
 cd visualizer
 npm run generate:minimal   # 1 block, 2 events
 npm run generate:small     # ~50K events, 16 SMs
-npm run generate:large     # ~10M events, 144 SMs
+npm run generate:large     # ~10M events, 148 SMs
 npm run validate <file>    # Validate binary format
 ```
 

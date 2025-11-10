@@ -82,7 +82,7 @@ __global__ void rgb_to_grayscale_kernel(
     }
 
     // End timing (only thread 0)
-    nanotrace::end(s, trace_handle, lane);
+    nanotrace::end(s, trace_handle, lane, TraceWarp{});
     nanotrace::finish_lane(trace_handle, lane);
 }
 
@@ -129,7 +129,7 @@ int main() {
     // Create trace tensor (1 lane = only warp 0 per block)
     using TraceConfig = nanotrace::static_trace_builder<1, TraceWarp>;
 
-    TraceConfig trace_tensor(100, grid);  // 100 max events per lane
+    TraceConfig trace_tensor(1, grid);  // 1 event per lane
 
     // Allocate L2 flush buffer (128 MB should be enough to flush L2)
     float* d_flush_buffer;

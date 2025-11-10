@@ -46,8 +46,8 @@ enum class lane_type : uint8_t {
 
 template<uint32_t NumLanes, uint32_t MaxEventWidth>
 struct static_tensor_handle {
-    uint32_t* buffer;
-    uint32_t row_stride;
+    uint8_t* buffer;
+    uint32_t row_stride_bytes;
 
     static constexpr uint32_t num_lanes = NumLanes;
     static constexpr uint32_t max_event_width = MaxEventWidth;
@@ -55,8 +55,8 @@ struct static_tensor_handle {
 
 template<uint32_t NumLanes>
 struct dynamic_tensor_handle {
-    uint32_t* buffer;
-    uint32_t row_stride;
+    uint8_t* buffer;
+    uint32_t row_stride_bytes;
 
     static constexpr uint32_t num_lanes = NumLanes;
     static constexpr uint32_t event_width = 8;
@@ -78,26 +78,27 @@ struct start_token {
 template<uint32_t MaxEventWidth>
 class lane_context_static {
 private:
-    uint32_t base_offset_;
-    uint32_t write_offset_;
+    uint32_t base_offset_bytes_;
+    uint32_t write_offset_bytes_;
     bool enabled_;
 
 public:
     static constexpr uint32_t max_event_width = MaxEventWidth;
+    static constexpr uint32_t max_event_width_bytes = MaxEventWidth << 2;
 
     __device__ __forceinline__
-    lane_context_static(uint32_t base_offset, bool enabled = true)
-        : base_offset_(base_offset)
-        , write_offset_(base_offset + MaxEventWidth)  // Skip first event slot for header
+    lane_context_static(uint32_t base_offset_bytes, bool enabled = true)
+        : base_offset_bytes_(base_offset_bytes)
+        , write_offset_bytes_(base_offset_bytes + max_event_width_bytes)  // Skip first event slot for header
         , enabled_(enabled)
     {}
 
-    __device__ __forceinline__ uint32_t write_offset() const {
-        return write_offset_;
+    __device__ __forceinline__ uint32_t write_offset_bytes() const {
+        return write_offset_bytes_;
     }
 
-    __device__ __forceinline__ uint32_t base_offset() const {
-        return base_offset_;
+    __device__ __forceinline__ uint32_t base_offset_bytes() const {
+        return base_offset_bytes_;
     }
 
     __device__ __forceinline__ bool enabled() const {
@@ -105,32 +106,33 @@ public:
     }
 
     __device__ __forceinline__ void advance() {
-        write_offset_ += MaxEventWidth;
+        write_offset_bytes_ += max_event_width_bytes;
     }
 };
 
 class lane_context_dynamic {
 private:
-    uint32_t base_offset_;
-    uint32_t write_offset_;
+    uint32_t base_offset_bytes_;
+    uint32_t write_offset_bytes_;
     bool enabled_;
 
 public:
     static constexpr uint32_t event_width = 8;
+    static constexpr uint32_t event_width_bytes = 8 << 2;
 
     __device__ __forceinline__
-    lane_context_dynamic(uint32_t base_offset, bool enabled = true)
-        : base_offset_(base_offset)
-        , write_offset_(base_offset + 8)  // Skip first event slot for header
+    lane_context_dynamic(uint32_t base_offset_bytes, bool enabled = true)
+        : base_offset_bytes_(base_offset_bytes)
+        , write_offset_bytes_(base_offset_bytes + event_width_bytes)  // Skip first event slot for header
         , enabled_(enabled)
     {}
 
-    __device__ __forceinline__ uint32_t write_offset() const {
-        return write_offset_;
+    __device__ __forceinline__ uint32_t write_offset_bytes() const {
+        return write_offset_bytes_;
     }
 
-    __device__ __forceinline__ uint32_t base_offset() const {
-        return base_offset_;
+    __device__ __forceinline__ uint32_t base_offset_bytes() const {
+        return base_offset_bytes_;
     }
 
     __device__ __forceinline__ bool enabled() const {
@@ -138,7 +140,7 @@ public:
     }
 
     __device__ __forceinline__ void advance() {
-        write_offset_ += 8;
+        write_offset_bytes_ += event_width_bytes;
     }
 };
 
@@ -167,8 +169,8 @@ __device__ __forceinline__ auto begin_lane(
     uint32_t lane_index,
     bool enabled = true)
 {
-    uint32_t base_offset = block_id * NumLanes * handle.row_stride + lane_index * handle.row_stride;
-    return lane_context_static<MaxEventWidth>(base_offset, enabled);
+    uint32_t base_offset_bytes = block_id * NumLanes * handle.row_stride_bytes + lane_index * handle.row_stride_bytes;
+    return lane_context_static<MaxEventWidth>(base_offset_bytes, enabled);
 }
 
 template<uint32_t NumLanes>
@@ -178,8 +180,8 @@ __device__ __forceinline__ auto begin_lane_dynamic(
     uint32_t lane_index,
     bool enabled = true)
 {
-    uint32_t base_offset = block_id * NumLanes * handle.row_stride + lane_index * handle.row_stride;
-    return lane_context_dynamic(base_offset, enabled);
+    uint32_t base_offset_bytes = block_id * NumLanes * handle.row_stride_bytes + lane_index * handle.row_stride_bytes;
+    return lane_context_dynamic(base_offset_bytes, enabled);
 }
 
 // ============================================================================
@@ -187,13 +189,17 @@ __device__ __forceinline__ auto begin_lane_dynamic(
 // ============================================================================
 
 // 0 params → width 2
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
-    lane_context_static<MaxEventWidth>& lane)
+    lane_context_static<MaxEventWidth>& lane,
+    TraceType)
 {
     if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 0, "Parameter count mismatch");
 
     constexpr uint32_t event_width = 2;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
@@ -201,26 +207,29 @@ __device__ __forceinline__ void end(
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
         asm volatile("st.global.cs.v2.u32 [%0], {%1, %2};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time)
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // 1 param → width 4
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
     lane_context_static<MaxEventWidth>& lane,
+    TraceType,
     uint32_t p0)
 {
     if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 1, "Parameter count mismatch");
 
     constexpr uint32_t event_width = 4;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
@@ -228,58 +237,63 @@ __device__ __forceinline__ void end(
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
         asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
                         "r"(p0), "r"(0u)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // 2 params → width 4
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
     lane_context_static<MaxEventWidth>& lane,
+    TraceType,
     uint32_t p0,
     uint32_t p1)
 {
     if (!lane.enabled()) return;
 
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 2, "Parameter count mismatch");
+
     constexpr uint32_t event_width = 4;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
 
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
         asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
+                     :: "l"(handle.buffer + lane.write_offset_bytes()), "r"(start.time), "r"(end_time),
                         "r"(p0), "r"(p1)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // 3 params → width 8
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
     lane_context_static<MaxEventWidth>& lane,
+    TraceType,
     uint32_t p0,
     uint32_t p1,
     uint32_t p2)
 {
     if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 3, "Parameter count mismatch");
 
     constexpr uint32_t event_width = 8;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
@@ -287,25 +301,25 @@ __device__ __forceinline__ void end(
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
 
         asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
+                     :: "l"(handle.buffer + lane.write_offset_bytes()), "r"(start.time), "r"(end_time),
                         "r"(p0), "r"(p1), "r"(p2),
                         "r"(0u), "r"(0u), "r"(0u)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // 4 params → width 8
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
     lane_context_static<MaxEventWidth>& lane,
+    TraceType,
     uint32_t p0,
     uint32_t p1,
     uint32_t p2,
@@ -313,31 +327,33 @@ __device__ __forceinline__ void end(
 {
     if (!lane.enabled()) return;
 
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 4, "Parameter count mismatch");
+
     constexpr uint32_t event_width = 8;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
 
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
         asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
+                     :: "l"(handle.buffer + lane.write_offset_bytes()), "r"(start.time), "r"(end_time),
                         "r"(p0), "r"(p1), "r"(p2), "r"(p3),
                         "r"(0u), "r"(0u)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // 5 params → width 8
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
     lane_context_static<MaxEventWidth>& lane,
+    TraceType,
     uint32_t p0,
     uint32_t p1,
     uint32_t p2,
@@ -346,31 +362,33 @@ __device__ __forceinline__ void end(
 {
     if (!lane.enabled()) return;
 
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 5, "Parameter count mismatch");
+
     constexpr uint32_t event_width = 8;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
 
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
         asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
+                     :: "l"(handle.buffer + lane.write_offset_bytes()), "r"(start.time), "r"(end_time),
                         "r"(p0), "r"(p1), "r"(p2), "r"(p3), "r"(p4),
                         "r"(0u)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // 6 params → width 8
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
+template<uint32_t NumLanes, uint32_t MaxEventWidth, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     static_tensor_handle<NumLanes, MaxEventWidth> handle,
     lane_context_static<MaxEventWidth>& lane,
+    TraceType,
     uint32_t p0,
     uint32_t p1,
     uint32_t p2,
@@ -380,62 +398,204 @@ __device__ __forceinline__ void end(
 {
     if (!lane.enabled()) return;
 
+    static_assert(TraceType::usage == lane_type::STATIC, "Trace type must be STATIC");
+    static_assert(TraceType::param_count == 6, "Parameter count mismatch");
+
     constexpr uint32_t event_width = 8;
     static_assert(event_width <= MaxEventWidth, "Event width exceeds lane max event width");
 
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
         asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
+                     :: "l"(handle.buffer + lane.write_offset_bytes()), "r"(start.time), "r"(end_time),
                         "r"(p0), "r"(p1), "r"(p2), "r"(p3), "r"(p4), "r"(p5)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
 }
 
 // ============================================================================
 // End function (dynamic lanes) - variadic template
 // ============================================================================
 
-template<uint32_t NumLanes, typename TraceType, typename... Params>
+// Dynamic end - 0 params
+template<uint32_t NumLanes, typename TraceType>
+__device__ __forceinline__ void end(
+    start_token start,
+    dynamic_tensor_handle<NumLanes> handle,
+    lane_context_dynamic& lane,
+    TraceType)
+{
+    if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::DYNAMIC, "Trace type must be DYNAMIC");
+    static_assert(TraceType::param_count == 0, "Parameter count mismatch");
+
+    uint32_t end_time;
+    asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
+
+
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
+        asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
+                        "r"((uint32_t)TraceType::id), "r"(0u)
+                     : "memory");
+    }
+
+    lane.advance();
+}
+
+// Dynamic end - 1 param
+template<uint32_t NumLanes, typename TraceType>
 __device__ __forceinline__ void end(
     start_token start,
     dynamic_tensor_handle<NumLanes> handle,
     lane_context_dynamic& lane,
     TraceType,
-    Params... params)
+    uint32_t p0)
 {
     if (!lane.enabled()) return;
 
     static_assert(TraceType::usage == lane_type::DYNAMIC, "Trace type must be DYNAMIC");
-    static_assert(TraceType::param_count == sizeof...(Params), "Parameter count mismatch");
-    static_assert(sizeof...(Params) <= 5, "Maximum 5 parameters for dynamic events");
+    static_assert(TraceType::param_count == 1, "Parameter count mismatch");
 
     uint32_t end_time;
     asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
 
-    constexpr uint32_t event_width = 8;
-    if (lane.write_offset() + event_width <= lane.base_offset() + handle.row_stride) {
-        uint32_t* addr = handle.buffer + lane.write_offset();
-        uint32_t p[5] = {0, 0, 0, 0, 0};
 
-        // Copy parameters into array
-        uint32_t idx = 0;
-        ((p[idx++] = params), ...);
-
-        asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                     :: "l"(addr), "r"(start.time), "r"(end_time),
-                        "r"((uint32_t)TraceType::id),
-                        "r"(p[0]), "r"(p[1]), "r"(p[2]), "r"(p[3]), "r"(p[4])
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
+        asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
+                        "r"((uint32_t)TraceType::id), "r"(p0)
                      : "memory");
-
-        lane.advance();
     }
+
+    lane.advance();
+}
+
+// Dynamic end - 2 params
+template<uint32_t NumLanes, typename TraceType>
+__device__ __forceinline__ void end(
+    start_token start,
+    dynamic_tensor_handle<NumLanes> handle,
+    lane_context_dynamic& lane,
+    TraceType,
+    uint32_t p0, uint32_t p1)
+{
+    if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::DYNAMIC, "Trace type must be DYNAMIC");
+    static_assert(TraceType::param_count == 2, "Parameter count mismatch");
+
+    uint32_t end_time;
+    asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
+
+
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
+        asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
+                        "r"((uint32_t)TraceType::id),
+                        "r"(p0), "r"(p1), "r"(0u), "r"(0u), "r"(0u)
+                     : "memory");
+    }
+
+    lane.advance();
+}
+
+// Dynamic end - 3 params
+template<uint32_t NumLanes, typename TraceType>
+__device__ __forceinline__ void end(
+    start_token start,
+    dynamic_tensor_handle<NumLanes> handle,
+    lane_context_dynamic& lane,
+    TraceType,
+    uint32_t p0, uint32_t p1, uint32_t p2)
+{
+    if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::DYNAMIC, "Trace type must be DYNAMIC");
+    static_assert(TraceType::param_count == 3, "Parameter count mismatch");
+
+    uint32_t end_time;
+    asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
+
+
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
+        asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
+                        "r"((uint32_t)TraceType::id),
+                        "r"(p0), "r"(p1), "r"(p2), "r"(0u), "r"(0u)
+                     : "memory");
+    }
+
+    lane.advance();
+}
+
+// Dynamic end - 4 params
+template<uint32_t NumLanes, typename TraceType>
+__device__ __forceinline__ void end(
+    start_token start,
+    dynamic_tensor_handle<NumLanes> handle,
+    lane_context_dynamic& lane,
+    TraceType,
+    uint32_t p0, uint32_t p1, uint32_t p2, uint32_t p3)
+{
+    if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::DYNAMIC, "Trace type must be DYNAMIC");
+    static_assert(TraceType::param_count == 4, "Parameter count mismatch");
+
+    uint32_t end_time;
+    asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
+
+
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
+        asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
+                        "r"((uint32_t)TraceType::id),
+                        "r"(p0), "r"(p1), "r"(p2), "r"(p3), "r"(0u)
+                     : "memory");
+    }
+
+    lane.advance();
+}
+
+// Dynamic end - 5 params
+template<uint32_t NumLanes, typename TraceType>
+__device__ __forceinline__ void end(
+    start_token start,
+    dynamic_tensor_handle<NumLanes> handle,
+    lane_context_dynamic& lane,
+    TraceType,
+    uint32_t p0, uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4)
+{
+    if (!lane.enabled()) return;
+
+    static_assert(TraceType::usage == lane_type::DYNAMIC, "Trace type must be DYNAMIC");
+    static_assert(TraceType::param_count == 5, "Parameter count mismatch");
+
+    uint32_t end_time;
+    asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(end_time));
+
+
+    if (lane.write_offset_bytes() < lane.base_offset_bytes() + handle.row_stride_bytes) {
+        asm volatile("st.global.cs.v8.u32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                     :: "l"(handle.buffer + lane.write_offset_bytes()),
+                        "r"(start.time), "r"(end_time),
+                        "r"((uint32_t)TraceType::id),
+                        "r"(p0), "r"(p1), "r"(p2), "r"(p3), "r"(p4)
+                     : "memory");
+    }
+
+    lane.advance();
 }
 
 // ============================================================================
@@ -452,16 +612,13 @@ __device__ __forceinline__ void finish_lane(
     uint32_t sm_id;
     asm volatile("mov.u32 %0, %%smid;" : "=r"(sm_id));
 
-    // Compute event count from write_offset
-    constexpr uint32_t max_event_width = MaxEventWidth;
-    uint32_t event_count = (lane.write_offset() - lane.base_offset() - max_event_width) / max_event_width;
+    // Write raw byte offset - host will calculate event count later
+    uint32_t write_offset_bytes = lane.write_offset_bytes();
 
-    uint32_t* header = handle.buffer + lane.base_offset();
-
-    // Header: [sm_id, event_count]
+    // Header: [sm_id, write_offset_bytes]
     asm volatile("st.global.cs.v2.u32 [%0], {%1, %2};"
-                 :: "l"(header),
-                    "r"(sm_id), "r"(event_count)
+                 :: "l"(handle.buffer + lane.base_offset_bytes()),
+                    "r"(sm_id), "r"(write_offset_bytes)
                  : "memory");
 }
 
@@ -475,15 +632,13 @@ __device__ __forceinline__ void finish_lane(
     uint32_t sm_id;
     asm volatile("mov.u32 %0, %%smid;" : "=r"(sm_id));
 
-    constexpr uint32_t event_width = 8;
-    uint32_t event_count = (lane.write_offset() - lane.base_offset() - event_width) / event_width;
+    // Write raw byte offset - host will calculate event count later
+    uint32_t write_offset_bytes = lane.write_offset_bytes();
 
-    uint32_t* header = handle.buffer + lane.base_offset();
-
-    // Header: [sm_id, event_count]
+    // Header: [sm_id, write_offset_bytes]
     asm volatile("st.global.cs.v2.u32 [%0], {%1, %2};"
-                 :: "l"(header),
-                    "r"(sm_id), "r"(event_count)
+                 :: "l"(handle.buffer + lane.base_offset_bytes()),
+                    "r"(sm_id), "r"(write_offset_bytes)
                  : "memory");
 }
 

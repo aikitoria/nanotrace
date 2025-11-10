@@ -210,7 +210,7 @@ function generateRandom(small: boolean) {
         eventsPerTrackMin: 8,
         eventsPerTrackMax: 15,
     } : {
-        numLanes: 144,
+        numLanes: 148,
         blockLanesPerLaneMin: 1,
         blockLanesPerLaneMax: 4,
         blocksPerBlockLaneMin: 100,
