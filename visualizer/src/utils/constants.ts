@@ -511,10 +511,10 @@ export const UNIFORM_BUFFER_SIZE = 112;
 
 /**
  * Uniform buffer size in bytes for background uniforms.
- * Contains view-projection matrix, time range, and world height.
- * Layout: 64 (mat4x4) + 16 (2 float + padding) = 80 bytes
+ * Contains camera double-single, scales, time range dual float, and world height.
+ * Layout: 32 (8 floats: camera_x_high, camera_x_low, camera_y, scale_x, scale_y, timeRange_high, timeRange_low, worldHeight)
  */
-export const BACKGROUND_UNIFORM_BUFFER_SIZE = 80;
+export const BACKGROUND_UNIFORM_BUFFER_SIZE = 32;
 
 /**
  * Number of floats per zone in GPU storage buffer.
@@ -530,15 +530,15 @@ export const BLOCK_BUFFER_FLOATS = 8;
 
 /**
  * Number of floats per lane in GPU storage buffer.
- * Layout: 1 vec4 = 4 floats (y, height, width, pad)
+ * Layout: 2 vec4s = 8 floats (y, height, width_high, width_low, pad, pad, pad, pad)
  */
-export const LANE_BUFFER_FLOATS = 4;
+export const LANE_BUFFER_FLOATS = 8;
 
 /**
  * Number of floats per block lane in GPU storage buffer.
- * Layout: 1 vec4 = 4 floats (y, height, width, pad)
+ * Layout: 2 vec4s = 8 floats (y, height, width_high, width_low, pad, pad, pad, pad)
  */
-export const BLOCK_LANE_BUFFER_FLOATS = 4;
+export const BLOCK_LANE_BUFFER_FLOATS = 8;
 
 /**
  * Number of vertices per quad (two triangles).

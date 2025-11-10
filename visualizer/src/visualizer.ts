@@ -128,7 +128,7 @@ export class ZoneVisualizer {
     private uniformData = new ArrayBuffer(112);
     private uniformFloatView = new Float32Array(this.uniformData);
     private uniformIntView = new Int32Array(this.uniformData);
-    private backgroundUniformData = new ArrayBuffer(80);
+    private backgroundUniformData = new ArrayBuffer(32);
     private backgroundFloatView = new Float32Array(this.backgroundUniformData);
 
     /**
@@ -1047,10 +1047,19 @@ export class ZoneVisualizer {
         const topLane = this.lanes[0];
         const backgroundHeight = topLane.y + topLane.height;
 
+        // Split TIME_RANGE into dual float for high precision
+        const [timeRange_high, timeRange_low] = Camera.splitDouble(this.TIME_RANGE);
+
         // Reuse preallocated background uniform buffer to avoid GC pressure
-        this.backgroundFloatView.set(viewProjMatrix, 0);
-        this.backgroundFloatView[16] = this.TIME_RANGE;
-        this.backgroundFloatView[17] = backgroundHeight;
+        // Layout: camera_x_high, camera_x_low, camera_y, scale_x, scale_y, timeRange_high, timeRange_low, worldHeight
+        this.backgroundFloatView[0] = camera_x_high;
+        this.backgroundFloatView[1] = camera_x_low;
+        this.backgroundFloatView[2] = this.camera.y;
+        this.backgroundFloatView[3] = scale_x;
+        this.backgroundFloatView[4] = scale_y;
+        this.backgroundFloatView[5] = timeRange_high;
+        this.backgroundFloatView[6] = timeRange_low;
+        this.backgroundFloatView[7] = backgroundHeight;
         this.device.queue.writeBuffer(this.gpuResources.backgroundUniformBuffer, 0, this.backgroundUniformData);
 
         const commandEncoder = this.device.createCommandEncoder();

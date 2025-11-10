@@ -272,9 +272,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 `;
 
 const LANE_SHADER = `
-struct Uniforms {
-    viewProj: mat4x4<f32>,
-}
+${WGSL_FULL_UNIFORMS}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> lanes: array<vec4<f32>>;
@@ -283,15 +281,21 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
 }
 
+${WGSL_DOUBLE_PRECISION_FUNCTIONS}
+
 @vertex
 fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    let lane = lanes[instanceIndex];
-    let laneY = lane.x;
-    let laneHeight = lane.y;
-    let laneWidth = lane.z;
+    // Read lane data from 2 vec4s (8 floats, aligned)
+    let lane0 = lanes[instanceIndex * 2u];      // [y, height, width_high, width_low]
+    let lane1 = lanes[instanceIndex * 2u + 1u]; // [pad, pad, pad, pad]
+
+    let laneY = lane0.x;
+    let laneHeight = lane0.y;
+    let width_high = lane0.z;
+    let width_low = lane0.w;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -303,10 +307,25 @@ fn vertexMain(
     );
 
     let vertex = vertices[vertexIndex];
-    let worldPos = vec2<f32>(vertex.x * laneWidth, laneY + vertex.y * laneHeight);
+
+    // Lane starts at X=0 and extends to width
+    // Left edge (vertex.x=0): X = 0.0
+    // Right edge (vertex.x=1): X = width
+    let worldX_high = select(0.0, width_high, vertex.x > 0.5);
+    let worldX_low = select(0.0, width_low, vertex.x > 0.5);
+
+    // Apply camera transformation using double-precision
+    let viewX = ds_add(worldX_high, worldX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+
+    // Y doesn't need double precision
+    let worldY = laneY + vertex.y * laneHeight;
+    let viewY = worldY + uniforms.camera_y;
+
+    // Apply scale to get NDC
+    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = uniforms.viewProj * vec4<f32>(worldPos, 0.0, 1.0);
+    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     return output;
 }
 
@@ -317,9 +336,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 `;
 
 const BLOCK_LANE_SHADER = `
-struct Uniforms {
-    viewProj: mat4x4<f32>,
-}
+${WGSL_FULL_UNIFORMS}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> blockLanes: array<vec4<f32>>;
@@ -328,15 +345,21 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
 }
 
+${WGSL_DOUBLE_PRECISION_FUNCTIONS}
+
 @vertex
 fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    let blockLane = blockLanes[instanceIndex];
-    let y = blockLane.x;
-    let height = blockLane.y;
-    let width = blockLane.z;
+    // Read block lane data from 2 vec4s (8 floats, aligned)
+    let blockLane0 = blockLanes[instanceIndex * 2u];      // [y, height, width_high, width_low]
+    let blockLane1 = blockLanes[instanceIndex * 2u + 1u]; // [pad, pad, pad, pad]
+
+    let y = blockLane0.x;
+    let height = blockLane0.y;
+    let width_high = blockLane0.z;
+    let width_low = blockLane0.w;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -348,10 +371,25 @@ fn vertexMain(
     );
 
     let vertex = vertices[vertexIndex];
-    let worldPos = vec2<f32>(vertex.x * width, y + vertex.y * height);
+
+    // Block lane starts at X=0 and extends to width
+    // Left edge (vertex.x=0): X = 0.0
+    // Right edge (vertex.x=1): X = width
+    let worldX_high = select(0.0, width_high, vertex.x > 0.5);
+    let worldX_low = select(0.0, width_low, vertex.x > 0.5);
+
+    // Apply camera transformation using double-precision
+    let viewX = ds_add(worldX_high, worldX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+
+    // Y doesn't need double precision
+    let worldY = y + vertex.y * height;
+    let viewY = worldY + uniforms.camera_y;
+
+    // Apply scale to get NDC
+    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = uniforms.viewProj * vec4<f32>(worldPos, 0.0, 1.0);
+    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     return output;
 }
 
@@ -534,8 +572,13 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const BACKGROUND_SHADER = `
 struct Uniforms {
-    viewProj: mat4x4<f32>,
-    timeRange: f32,
+    camera_x_high: f32,
+    camera_x_low: f32,
+    camera_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    timeRange_high: f32,
+    timeRange_low: f32,
     worldHeight: f32,
 }
 
@@ -544,6 +587,8 @@ struct Uniforms {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
 }
+
+${WGSL_DOUBLE_PRECISION_FUNCTIONS}
 
 @vertex
 fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
@@ -557,10 +602,25 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
     );
 
     let vertex = vertices[vertexIndex];
-    let worldPos = vec2<f32>(vertex.x * uniforms.timeRange, vertex.y * uniforms.worldHeight);
+
+    // Background spans from X=0 to timeRange
+    // Left edge (vertex.x=0): X = 0.0
+    // Right edge (vertex.x=1): X = timeRange
+    let worldX_high = select(0.0, uniforms.timeRange_high, vertex.x > 0.5);
+    let worldX_low = select(0.0, uniforms.timeRange_low, vertex.x > 0.5);
+
+    // Apply camera transformation using double-precision
+    let viewX = ds_add(worldX_high, worldX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+
+    // Y doesn't need double precision
+    let worldY = vertex.y * uniforms.worldHeight;
+    let viewY = worldY + uniforms.camera_y;
+
+    // Apply scale to get NDC
+    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = uniforms.viewProj * vec4<f32>(worldPos, 0.0, 1.0);
+    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     return output;
 }
 
@@ -737,8 +797,14 @@ function createBackgroundPipeline(
  *   vec4 #1: [height, r, g, b]
  *   vec4 #2: [id, pad, pad, pad]
  *   Zone X uses double-single precision to avoid Float32 precision loss at extreme zoom
- * - laneBuffer: Lane geometry (4 floats per lane: y, height, width, padding)
- * - blockLaneBuffer: Block lane geometry (4 floats per block lane)
+ * - laneBuffer: Lane geometry (8 floats per lane, aligned to 2 vec4s):
+ *   vec4 #0: [y, height, width_high, width_low]
+ *   vec4 #1: [pad, pad, pad, pad]
+ *   Lane width uses double-single precision for high-precision rendering at extreme zoom
+ * - blockLaneBuffer: Block lane geometry (8 floats per block lane, aligned to 2 vec4s):
+ *   vec4 #0: [y, height, width_high, width_low]
+ *   vec4 #1: [pad, pad, pad, pad]
+ *   Block lane width uses double-single precision for high-precision rendering at extreme zoom
  * - blockBuffer: Block geometry (8 floats per block, aligned to 2 vec4s):
  *   vec4 #0: [startX_high, startX_low, y, width]
  *   vec4 #1: [height, pad, pad, pad]
@@ -786,10 +852,17 @@ export function createGPUBuffers(
 
     const laneData = new Float32Array(lanes.length * LANE_BUFFER_FLOATS);
     for (let i = 0; i < lanes.length; i++) {
+        const [width_high, width_low] = Camera.splitDouble(lanes[i].width);
+        // vec4 #0: [y, height, width_high, width_low]
         laneData[i * LANE_BUFFER_FLOATS + 0] = lanes[i].y;
         laneData[i * LANE_BUFFER_FLOATS + 1] = lanes[i].height;
-        laneData[i * LANE_BUFFER_FLOATS + 2] = lanes[i].width;
-        laneData[i * LANE_BUFFER_FLOATS + 3] = 0;
+        laneData[i * LANE_BUFFER_FLOATS + 2] = width_high;
+        laneData[i * LANE_BUFFER_FLOATS + 3] = width_low;
+        // vec4 #1: [pad, pad, pad, pad]
+        laneData[i * LANE_BUFFER_FLOATS + 4] = 0;
+        laneData[i * LANE_BUFFER_FLOATS + 5] = 0;
+        laneData[i * LANE_BUFFER_FLOATS + 6] = 0;
+        laneData[i * LANE_BUFFER_FLOATS + 7] = 0;
     }
 
     const laneBuffer = device.createBuffer({
@@ -802,10 +875,17 @@ export function createGPUBuffers(
 
     const blockLaneData = new Float32Array(blockLanes.length * BLOCK_LANE_BUFFER_FLOATS);
     for (let i = 0; i < blockLanes.length; i++) {
+        const [width_high, width_low] = Camera.splitDouble(blockLanes[i].width);
+        // vec4 #0: [y, height, width_high, width_low]
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 0] = blockLanes[i].y;
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 1] = blockLanes[i].height;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] = blockLanes[i].width;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] = 0;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] = width_high;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] = width_low;
+        // vec4 #1: [pad, pad, pad, pad]
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 4] = 0;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 5] = 0;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 6] = 0;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 7] = 0;
     }
 
     const blockLaneBuffer = device.createBuffer({
