@@ -288,14 +288,13 @@ fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    // Read lane data from 2 vec4s (8 floats, aligned)
-    let lane0 = lanes[instanceIndex * 2u];      // [y, height, width_high, width_low]
-    let lane1 = lanes[instanceIndex * 2u + 1u]; // [pad, pad, pad, pad]
+    // Read lane data from single vec4
+    let lane = lanes[instanceIndex];  // [y, height, width_high, width_low]
 
-    let laneY = lane0.x;
-    let laneHeight = lane0.y;
-    let width_high = lane0.z;
-    let width_low = lane0.w;
+    let laneY = lane.x;
+    let laneHeight = lane.y;
+    let width_high = lane.z;
+    let width_low = lane.w;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -352,14 +351,13 @@ fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    // Read block lane data from 2 vec4s (8 floats, aligned)
-    let blockLane0 = blockLanes[instanceIndex * 2u];      // [y, height, width_high, width_low]
-    let blockLane1 = blockLanes[instanceIndex * 2u + 1u]; // [pad, pad, pad, pad]
+    // Read block lane data from single vec4
+    let blockLane = blockLanes[instanceIndex];  // [y, height, width_high, width_low]
 
-    let y = blockLane0.x;
-    let height = blockLane0.y;
-    let width_high = blockLane0.z;
-    let width_low = blockLane0.w;
+    let y = blockLane.x;
+    let height = blockLane.y;
+    let width_high = blockLane.z;
+    let width_low = blockLane.w;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -797,13 +795,11 @@ function createBackgroundPipeline(
  *   vec4 #1: [height, r, g, b]
  *   vec4 #2: [id, pad, pad, pad]
  *   Zone X uses double-single precision to avoid Float32 precision loss at extreme zoom
- * - laneBuffer: Lane geometry (8 floats per lane, aligned to 2 vec4s):
- *   vec4 #0: [y, height, width_high, width_low]
- *   vec4 #1: [pad, pad, pad, pad]
+ * - laneBuffer: Lane geometry (4 floats per lane, 1 vec4):
+ *   vec4: [y, height, width_high, width_low]
  *   Lane width uses double-single precision for high-precision rendering at extreme zoom
- * - blockLaneBuffer: Block lane geometry (8 floats per block lane, aligned to 2 vec4s):
- *   vec4 #0: [y, height, width_high, width_low]
- *   vec4 #1: [pad, pad, pad, pad]
+ * - blockLaneBuffer: Block lane geometry (4 floats per block lane, 1 vec4):
+ *   vec4: [y, height, width_high, width_low]
  *   Block lane width uses double-single precision for high-precision rendering at extreme zoom
  * - blockBuffer: Block geometry (8 floats per block, aligned to 2 vec4s):
  *   vec4 #0: [startX_high, startX_low, y, width]
@@ -835,11 +831,8 @@ export function createGPUBuffers(
         positions[i * ZONE_BUFFER_FLOATS + 5] = zone.r;
         positions[i * ZONE_BUFFER_FLOATS + 6] = zone.g;
         positions[i * ZONE_BUFFER_FLOATS + 7] = zone.b;
-        // vec4 #2: [id, pad, pad, pad]
+        // vec4 #2: [id, pad, pad, pad] - padding already zero-initialized
         positions[i * ZONE_BUFFER_FLOATS + 8] = zone.id;
-        positions[i * ZONE_BUFFER_FLOATS + 9] = 0;
-        positions[i * ZONE_BUFFER_FLOATS + 10] = 0;
-        positions[i * ZONE_BUFFER_FLOATS + 11] = 0;
     }
 
     const positionBuffer = device.createBuffer({
@@ -853,16 +846,11 @@ export function createGPUBuffers(
     const laneData = new Float32Array(lanes.length * LANE_BUFFER_FLOATS);
     for (let i = 0; i < lanes.length; i++) {
         const [width_high, width_low] = Camera.splitDouble(lanes[i].width);
-        // vec4 #0: [y, height, width_high, width_low]
+        // Single vec4: [y, height, width_high, width_low]
         laneData[i * LANE_BUFFER_FLOATS + 0] = lanes[i].y;
         laneData[i * LANE_BUFFER_FLOATS + 1] = lanes[i].height;
         laneData[i * LANE_BUFFER_FLOATS + 2] = width_high;
         laneData[i * LANE_BUFFER_FLOATS + 3] = width_low;
-        // vec4 #1: [pad, pad, pad, pad]
-        laneData[i * LANE_BUFFER_FLOATS + 4] = 0;
-        laneData[i * LANE_BUFFER_FLOATS + 5] = 0;
-        laneData[i * LANE_BUFFER_FLOATS + 6] = 0;
-        laneData[i * LANE_BUFFER_FLOATS + 7] = 0;
     }
 
     const laneBuffer = device.createBuffer({
@@ -876,16 +864,11 @@ export function createGPUBuffers(
     const blockLaneData = new Float32Array(blockLanes.length * BLOCK_LANE_BUFFER_FLOATS);
     for (let i = 0; i < blockLanes.length; i++) {
         const [width_high, width_low] = Camera.splitDouble(blockLanes[i].width);
-        // vec4 #0: [y, height, width_high, width_low]
+        // Single vec4: [y, height, width_high, width_low]
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 0] = blockLanes[i].y;
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 1] = blockLanes[i].height;
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] = width_high;
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] = width_low;
-        // vec4 #1: [pad, pad, pad, pad]
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 4] = 0;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 5] = 0;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 6] = 0;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 7] = 0;
     }
 
     const blockLaneBuffer = device.createBuffer({
@@ -904,11 +887,8 @@ export function createGPUBuffers(
         blockData[i * BLOCK_BUFFER_FLOATS + 1] = startX_low;
         blockData[i * BLOCK_BUFFER_FLOATS + 2] = blocks[i].y;
         blockData[i * BLOCK_BUFFER_FLOATS + 3] = blocks[i].width;
-        // vec4 #1: [height, pad, pad, pad]
+        // vec4 #1: [height, pad, pad, pad] - padding already zero-initialized
         blockData[i * BLOCK_BUFFER_FLOATS + 4] = blocks[i].height;
-        blockData[i * BLOCK_BUFFER_FLOATS + 5] = 0;
-        blockData[i * BLOCK_BUFFER_FLOATS + 6] = 0;
-        blockData[i * BLOCK_BUFFER_FLOATS + 7] = 0;
     }
 
     const blockBuffer = device.createBuffer({

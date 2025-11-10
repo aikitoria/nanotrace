@@ -530,15 +530,15 @@ export const BLOCK_BUFFER_FLOATS = 8;
 
 /**
  * Number of floats per lane in GPU storage buffer.
- * Layout: 2 vec4s = 8 floats (y, height, width_high, width_low, pad, pad, pad, pad)
+ * Layout: 1 vec4 = 4 floats (y, height, width_high, width_low)
  */
-export const LANE_BUFFER_FLOATS = 8;
+export const LANE_BUFFER_FLOATS = 4;
 
 /**
  * Number of floats per block lane in GPU storage buffer.
- * Layout: 2 vec4s = 8 floats (y, height, width_high, width_low, pad, pad, pad, pad)
+ * Layout: 1 vec4 = 4 floats (y, height, width_high, width_low)
  */
-export const BLOCK_LANE_BUFFER_FLOATS = 8;
+export const BLOCK_LANE_BUFFER_FLOATS = 4;
 
 /**
  * Number of vertices per quad (two triangles).
