@@ -18,9 +18,11 @@
  * Performance: Handles 10M+ zones at 60 FPS via GPU instancing.
  */
 
-import { Zone, Block, BlockLane, Lane } from '../utils/types.js';
+import { ZonesSoA, BlocksSoA, BlockLanesSoA, LanesSoA } from '../utils/types.js';
+import { NS_TO_MS } from '../utils/soa-helpers.js';
 import { Camera } from '../utils/camera.js';
 import {
+    SUBLANE_HEIGHT,
     ZONE_FILL_BRIGHTNESS,
     ZONE_HOVER_COLOR_R,
     ZONE_HOVER_COLOR_G,
@@ -787,7 +789,7 @@ function createBackgroundPipeline(
 }
 
 /**
- * Uploads trace data to GPU storage buffers for instanced rendering.
+ * Uploads trace data to GPU storage buffers for instanced rendering (SoA version).
  *
  * Creates 4 storage buffers:
  * - positionBuffer: Zone data (12 floats per zone, aligned to 3 vec4s):
@@ -806,33 +808,46 @@ function createBackgroundPipeline(
  *   vec4 #1: [height, pad, pad, pad]
  *   Block X uses double-single precision to avoid Float32 precision loss at extreme zoom
  *
+ * Converts nanoseconds (SoA storage) to milliseconds (GPU rendering).
  * Uses mappedAtCreation for efficient one-time upload (no COPY_DST needed).
  * Buffers are read-only after creation, enabling optimal GPU caching.
  * Returns total GPU memory usage for stats display.
  */
 export function createGPUBuffers(
     device: GPUDevice,
-    zones: Zone[],
-    blocks: Block[],
-    blockLanes: BlockLane[],
-    lanes: Lane[]
+    zones: ZonesSoA,
+    blocks: BlocksSoA,
+    blockLanes: BlockLanesSoA,
+    lanes: LanesSoA
 ): { positionBuffer: GPUBuffer; laneBuffer: GPUBuffer; blockLaneBuffer: GPUBuffer; blockBuffer: GPUBuffer; gpuMemoryUsage: number } {
-    const positions = new Float32Array(zones.length * ZONE_BUFFER_FLOATS);
-    for (let i = 0; i < zones.length; i++) {
-        const zone = zones[i];
-        const [x_high, x_low] = Camera.splitDouble(zone.x);
+    const positions = new Float32Array(zones.count * ZONE_BUFFER_FLOATS);
+    for (let i = 0; i < zones.count; i++) {
+        // Compute zone center X in nanoseconds, then convert to milliseconds
+        const centerXNs = (zones.startsX[i] + zones.endsX[i]) / 2;
+        const centerXMs = centerXNs * NS_TO_MS;
+        const [x_high, x_low] = Camera.splitDouble(centerXMs);
+
+        // Compute zone width in nanoseconds, then convert to milliseconds
+        const widthNs = zones.endsX[i] - zones.startsX[i];
+        const widthMs = widthNs * NS_TO_MS;
+
+        // Unpack colors from Uint8Array (0-255 range) to float (0-1 range)
+        const r = zones.colors[i * 3 + 0] / 255;
+        const g = zones.colors[i * 3 + 1] / 255;
+        const b = zones.colors[i * 3 + 2] / 255;
+
         // vec4 #0: [x_high, x_low, y, width]
         positions[i * ZONE_BUFFER_FLOATS + 0] = x_high;
         positions[i * ZONE_BUFFER_FLOATS + 1] = x_low;
-        positions[i * ZONE_BUFFER_FLOATS + 2] = zone.y;
-        positions[i * ZONE_BUFFER_FLOATS + 3] = zone.width;
+        positions[i * ZONE_BUFFER_FLOATS + 2] = zones.ys[i];
+        positions[i * ZONE_BUFFER_FLOATS + 3] = widthMs;
         // vec4 #1: [height, r, g, b]
-        positions[i * ZONE_BUFFER_FLOATS + 4] = zone.height;
-        positions[i * ZONE_BUFFER_FLOATS + 5] = zone.r;
-        positions[i * ZONE_BUFFER_FLOATS + 6] = zone.g;
-        positions[i * ZONE_BUFFER_FLOATS + 7] = zone.b;
+        positions[i * ZONE_BUFFER_FLOATS + 4] = SUBLANE_HEIGHT;  // Constant height
+        positions[i * ZONE_BUFFER_FLOATS + 5] = r;
+        positions[i * ZONE_BUFFER_FLOATS + 6] = g;
+        positions[i * ZONE_BUFFER_FLOATS + 7] = b;
         // vec4 #2: [id, pad, pad, pad] - padding already zero-initialized
-        positions[i * ZONE_BUFFER_FLOATS + 8] = zone.id;
+        positions[i * ZONE_BUFFER_FLOATS + 8] = i;  // Array index is the ID
     }
 
     const positionBuffer = device.createBuffer({
@@ -843,12 +858,14 @@ export function createGPUBuffers(
     new Float32Array(positionBuffer.getMappedRange()).set(positions);
     positionBuffer.unmap();
 
-    const laneData = new Float32Array(lanes.length * LANE_BUFFER_FLOATS);
-    for (let i = 0; i < lanes.length; i++) {
-        const [width_high, width_low] = Camera.splitDouble(lanes[i].width);
+    const laneData = new Float32Array(lanes.count * LANE_BUFFER_FLOATS);
+    for (let i = 0; i < lanes.count; i++) {
+        // Convert lane width from nanoseconds to milliseconds
+        const widthMs = lanes.widths[i] * NS_TO_MS;
+        const [width_high, width_low] = Camera.splitDouble(widthMs);
         // Single vec4: [y, height, width_high, width_low]
-        laneData[i * LANE_BUFFER_FLOATS + 0] = lanes[i].y;
-        laneData[i * LANE_BUFFER_FLOATS + 1] = lanes[i].height;
+        laneData[i * LANE_BUFFER_FLOATS + 0] = lanes.ys[i];
+        laneData[i * LANE_BUFFER_FLOATS + 1] = lanes.heights[i];
         laneData[i * LANE_BUFFER_FLOATS + 2] = width_high;
         laneData[i * LANE_BUFFER_FLOATS + 3] = width_low;
     }
@@ -861,12 +878,14 @@ export function createGPUBuffers(
     new Float32Array(laneBuffer.getMappedRange()).set(laneData);
     laneBuffer.unmap();
 
-    const blockLaneData = new Float32Array(blockLanes.length * BLOCK_LANE_BUFFER_FLOATS);
-    for (let i = 0; i < blockLanes.length; i++) {
-        const [width_high, width_low] = Camera.splitDouble(blockLanes[i].width);
+    const blockLaneData = new Float32Array(blockLanes.count * BLOCK_LANE_BUFFER_FLOATS);
+    for (let i = 0; i < blockLanes.count; i++) {
+        // Convert block lane width from nanoseconds to milliseconds
+        const widthMs = blockLanes.widths[i] * NS_TO_MS;
+        const [width_high, width_low] = Camera.splitDouble(widthMs);
         // Single vec4: [y, height, width_high, width_low]
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 0] = blockLanes[i].y;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 1] = blockLanes[i].height;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 0] = blockLanes.ys[i];
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 1] = blockLanes.heights[i];
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] = width_high;
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] = width_low;
     }
@@ -879,16 +898,23 @@ export function createGPUBuffers(
     new Float32Array(blockLaneBuffer.getMappedRange()).set(blockLaneData);
     blockLaneBuffer.unmap();
 
-    const blockData = new Float32Array(blocks.length * BLOCK_BUFFER_FLOATS);
-    for (let i = 0; i < blocks.length; i++) {
-        const [startX_high, startX_low] = Camera.splitDouble(blocks[i].startX);
+    const blockData = new Float32Array(blocks.count * BLOCK_BUFFER_FLOATS);
+    for (let i = 0; i < blocks.count; i++) {
+        // Convert block startX from nanoseconds to milliseconds
+        const startXMs = blocks.startsX[i] * NS_TO_MS;
+        const [startX_high, startX_low] = Camera.splitDouble(startXMs);
+
+        // Convert block width from nanoseconds to milliseconds
+        const widthNs = blocks.endsX[i] - blocks.startsX[i];
+        const widthMs = widthNs * NS_TO_MS;
+
         // vec4 #0: [startX_high, startX_low, y, width]
         blockData[i * BLOCK_BUFFER_FLOATS + 0] = startX_high;
         blockData[i * BLOCK_BUFFER_FLOATS + 1] = startX_low;
-        blockData[i * BLOCK_BUFFER_FLOATS + 2] = blocks[i].y;
-        blockData[i * BLOCK_BUFFER_FLOATS + 3] = blocks[i].width;
+        blockData[i * BLOCK_BUFFER_FLOATS + 2] = blocks.ys[i];
+        blockData[i * BLOCK_BUFFER_FLOATS + 3] = widthMs;
         // vec4 #1: [height, pad, pad, pad] - padding already zero-initialized
-        blockData[i * BLOCK_BUFFER_FLOATS + 4] = blocks[i].height;
+        blockData[i * BLOCK_BUFFER_FLOATS + 4] = blocks.heights[i];
     }
 
     const blockBuffer = device.createBuffer({

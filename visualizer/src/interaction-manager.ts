@@ -12,12 +12,13 @@
 
 import { Camera } from './utils/camera.js';
 import {
-    Lane,
-    Block,
-    BlockLane,
-    FormatDescriptor,
+    HierarchyData,
     FindZoneResult
 } from './utils/types.js';
+import {
+    binarySearchBlocksIndirect,
+    binarySearchZones
+} from './utils/soa-helpers.js';
 import {
     LANE_EDGE_PADDING,
     SUBLANE_HEIGHT,
@@ -140,87 +141,89 @@ export class InteractionManager {
     }
 
     /**
-     * Performs hierarchical hit detection to find zone under cursor.
+     * Performs hierarchical hit detection to find zone under cursor (SoA version).
      *
      * Search hierarchy with optimizations:
      * 1. Lane: Linear search (typically <150 lanes, sorted by Y)
      * 2. Block Lane: Linear search within lane (typically 1-4 block lanes)
-     * 3. Block: Binary search by X coordinate (sorted by startX)
+     * 3. Block: Binary search by X coordinate using indirection (sorted by startX)
      * 4. Sublane: Direct index calculation from Y coordinate
-     * 5. Zone: Binary search by X coordinate (sorted by startX)
+     * 5. Zone: Binary search by X coordinate (sorted by blockIdx, sublaneIdx, startX)
      *
-     * Returns the deepest match (zone if found, else block, else null).
+     * Returns zone and block indices (-1 if not found).
      * Overall complexity: O(log n) where n is zones per block lane.
      */
-    findZoneAtPosition(screenX: number, screenY: number, lanes: Lane[], blocks: Block[]): FindZoneResult {
+    findZoneAtPosition(screenX: number, screenY: number, hierarchy: HierarchyData): FindZoneResult {
         const worldPos = this.camera.screenToWorld(screenX, screenY, this.canvas);
+        const { lanes, blockLanes, blocks, zones } = hierarchy;
 
-        let foundLane: Lane | null = null;
-        for (const lane of lanes) {
-            if (worldPos.y >= lane.y && worldPos.y <= lane.y + lane.height) {
-                foundLane = lane;
+        // Convert world X from milliseconds to nanoseconds for comparison with SoA data
+        const worldXNs = worldPos.x * MS_TO_NS;
+
+        // 1. Find lane (linear search)
+        let foundLaneIdx = -1;
+        for (let i = 0; i < lanes.count; i++) {
+            if (worldPos.y >= lanes.ys[i] && worldPos.y <= lanes.ys[i] + lanes.heights[i]) {
+                foundLaneIdx = i;
                 break;
             }
         }
-        if (!foundLane) return { zone: null, block: null, blockIndex: -1 };
+        if (foundLaneIdx === -1) return { zoneIdx: -1, blockIdx: -1 };
 
-        let foundBlockLane: BlockLane | null = null;
-        let blockLaneY = foundLane.y + LANE_EDGE_PADDING;
-        for (const blockLane of foundLane.blockLanes) {
-            if (worldPos.y >= blockLaneY && worldPos.y < blockLaneY + blockLane.height) {
-                foundBlockLane = blockLane;
+        // 2. Find block lane (linear search within lane's block lanes)
+        const blockLaneStart = lanes.blockLanesStartIndices[foundLaneIdx];
+        const blockLaneEnd = lanes.blockLanesEndIndices[foundLaneIdx];
+        let foundBlockLaneIdx = -1;
+        let blockLaneY = lanes.ys[foundLaneIdx] + LANE_EDGE_PADDING;
+
+        for (let blIdx = blockLaneStart; blIdx < blockLaneEnd; blIdx++) {
+            if (worldPos.y >= blockLaneY && worldPos.y < blockLaneY + blockLanes.heights[blIdx]) {
+                foundBlockLaneIdx = blIdx;
                 break;
             }
-            blockLaneY += blockLane.height + BLOCK_LANE_PADDING;
-        }
-        if (!foundBlockLane) return { zone: null, block: null, blockIndex: -1 };
-
-        let foundBlock: Block | null = null;
-        let foundBlockIndex = -1;
-        let left = 0;
-        let right = foundBlockLane.blocks.length - 1;
-        while (left <= right) {
-            const mid = Math.floor((left + right) / 2);
-            const block = foundBlockLane.blocks[mid];
-            if (worldPos.x >= block.startX && worldPos.x < block.endX &&
-                worldPos.y >= block.y && worldPos.y < block.y + block.height) {
-                foundBlock = block;
-                foundBlockIndex = blocks.indexOf(block);
-                break;
-            } else if (worldPos.x < block.startX) {
-                right = mid - 1;
-            } else {
-                left = mid + 1;
+            blockLaneY += blockLanes.heights[blIdx];
+            if (blIdx < blockLaneEnd - 1) {
+                blockLaneY += BLOCK_LANE_PADDING;
             }
         }
-        if (!foundBlock) return { zone: null, block: null, blockIndex: -1 };
+        if (foundBlockLaneIdx === -1) return { zoneIdx: -1, blockIdx: -1 };
 
-        const relativeY = (foundBlock.y + foundBlock.height - BLOCK_EDGE_PADDING) - worldPos.y;
+        // 3. Find block (binary search using indirection)
+        const offset = blockLanes.blockIndicesOffsets[foundBlockLaneIdx];
+        const count = blockLanes.blockIndicesCounts[foundBlockLaneIdx];
+        const blockIdx = binarySearchBlocksIndirect(
+            blocks,
+            blockLanes.blockIndices,
+            offset,
+            count,
+            worldXNs,
+            worldPos.y
+        );
+        if (blockIdx === -1) return { zoneIdx: -1, blockIdx: -1 };
+
+        // 4. Calculate sublane index from Y position
+        const relativeY = (blocks.ys[blockIdx] + blocks.heights[blockIdx] - BLOCK_EDGE_PADDING) - worldPos.y;
         const sublaneIdx = Math.floor(relativeY / (SUBLANE_HEIGHT + SUBLANE_PADDING));
-        if (sublaneIdx < 0 || sublaneIdx >= foundBlock.sublanes.length) {
-            return { zone: null, block: foundBlock, blockIndex: foundBlockIndex };
+        if (sublaneIdx < 0 || sublaneIdx >= blocks.sublanesCounts[blockIdx]) {
+            return { zoneIdx: -1, blockIdx };
         }
 
-        const zones = foundBlock.sublanes[sublaneIdx];
-        left = 0;
-        right = zones.length - 1;
-        while (left <= right) {
-            const mid = Math.floor((left + right) / 2);
-            const zone = zones[mid];
-            if (worldPos.x >= zone.startX && worldPos.x < zone.endX) {
-                return { zone, block: foundBlock, blockIndex: foundBlockIndex };
-            } else if (worldPos.x < zone.startX) {
-                right = mid - 1;
-            } else {
-                left = mid + 1;
-            }
-        }
+        // 5. Find zone (binary search within block's zone range, filtered by sublane)
+        const zoneStart = blocks.zonesStartIndices[blockIdx];
+        const zoneEnd = blocks.zonesEndIndices[blockIdx];
+        const zoneIdx = binarySearchZones(
+            zones,
+            zoneStart,
+            zoneEnd,
+            worldXNs,
+            sublaneIdx
+        );
 
-        return { zone: null, block: foundBlock, blockIndex: foundBlockIndex };
+        return { zoneIdx, blockIdx };
     }
 
     /**
-     * Updates hover state and tooltip display based on cursor position.
+     * Updates hover state and tooltip display based on cursor position (SoA version).
      *
      * Performs hit detection, updates hover IDs (passed to shaders for highlighting),
      * and displays tooltip with formatted zone information:
@@ -233,38 +236,63 @@ export class InteractionManager {
     updateHover(
         screenX: number,
         screenY: number,
-        lanes: Lane[],
-        blocks: Block[],
-        formatDescriptors: FormatDescriptor[],
+        hierarchy: HierarchyData,
         formatString: (formatDescId: number, params: number[]) => string,
         formatTrackString: (formatDescId: number, laneId: number, params: number[]) => string,
         formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
     ): void {
-        const result = this.findZoneAtPosition(screenX, screenY, lanes, blocks);
+        const result = this.findZoneAtPosition(screenX, screenY, hierarchy);
+        const { zones, blocks, tracks, formatDescriptors } = hierarchy;
 
         // Update hover state for shader highlighting
-        this.hoveredBlockId = result.blockIndex;
+        this.hoveredBlockId = result.blockIdx;
 
-        if (result.zone) {
-            this.hoveredZoneId = result.zone.id;
+        if (result.zoneIdx !== -1) {
+            this.hoveredZoneId = result.zoneIdx;
 
-            // Convert world coordinates (milliseconds) to nanoseconds for display
-            const startNs = Math.round(result.zone.startX * MS_TO_NS);
-            const endNs = Math.round(result.zone.endX * MS_TO_NS);
+            // Zone times are already in nanoseconds (SoA storage)
+            const startNs = zones.startsX[result.zoneIdx];
+            const endNs = zones.endsX[result.zoneIdx];
             const durNs = endNs - startNs;
 
-            // Format names using format descriptors with parameter substitution
+            // Get zone params from pool (NO allocation!)
+            const zoneParamsOffset = zones.paramsOffsets[result.zoneIdx];
+            const zoneParamsCount = zones.paramsCounts[result.zoneIdx];
+            const zoneParams: number[] = [];
+            for (let i = 0; i < zoneParamsCount; i++) {
+                zoneParams.push(zones.paramsPool[zoneParamsOffset + i]);
+            }
+
+            // Format zone name
             const zoneName = formatDescriptors.length > 0
-                ? formatString(result.zone.formatDescId, result.zone.params)
-                : `Zone #${result.zone.id}`;
+                ? formatString(zones.formatDescIds[result.zoneIdx], zoneParams)
+                : `Zone #${result.zoneIdx}`;
 
-            const blockName = (formatDescriptors.length > 0 && result.block)
-                ? formatBlockString(result.block.formatDescId, result.block.blockId, result.block.clusterId)
-                : `Block ${result.zone.blockIdx}`;
+            // Format block name
+            const blockName = (formatDescriptors.length > 0 && result.blockIdx !== -1)
+                ? formatBlockString(
+                    blocks.formatDescIds[result.blockIdx],
+                    blocks.gridIds[result.blockIdx],
+                    blocks.clusterIds[result.blockIdx]
+                  )
+                : `Block ${result.blockIdx}`;
 
-            const warpName = (formatDescriptors.length > 0 && result.zone.warpFormatDescId !== undefined)
-                ? formatTrackString(result.zone.warpFormatDescId, result.zone.warpLaneId, result.zone.warpParams)
-                : `Sublane ${result.zone.sublaneIdx}`;
+            // Get track info for warp name
+            const trackIdx = zones.trackIndices[result.zoneIdx];
+            const trackParamsOffset = tracks.paramsOffsets[trackIdx];
+            const trackParamsCount = tracks.paramsCounts[trackIdx];
+            const trackParams: number[] = [];
+            for (let i = 0; i < trackParamsCount; i++) {
+                trackParams.push(tracks.paramsPool[trackParamsOffset + i]);
+            }
+
+            const warpName = formatDescriptors.length > 0
+                ? formatTrackString(
+                    tracks.formatDescIds[trackIdx],
+                    tracks.sublaneIndices[trackIdx],
+                    trackParams
+                  )
+                : `Sublane ${zones.sublaneIndices[result.zoneIdx]}`;
 
             // Display hierarchical tooltip: Zone / Warp / Block / Timing
             this.tooltip.innerHTML = `

@@ -1,9 +1,9 @@
 /**
- * Binary trace file parser and visualization hierarchy builder.
+ * Binary trace file parser and visualization hierarchy builder (SoA version).
  *
  * Key functions:
- * - parseTraceFile(): Parses binary .nanotrace format
- * - buildHierarchy(): Transforms flat trace data into nested rendering hierarchy
+ * - parseTraceFile(): Parses binary .nanotrace format (unchanged)
+ * - buildHierarchy(): Transforms flat trace data into SoA hierarchy (complete rewrite)
  * - formatString(): Substitutes parameters into format descriptor templates
  *
  * Binary format (.nanotrace):
@@ -14,18 +14,18 @@
  * - Block descriptors (SM assignment + parameters)
  * - Warp tracks (per-warp event sequences)
  * - All integers are little-endian
- * - Times are in nanoseconds, converted to milliseconds for rendering
+ * - Times are in nanoseconds (NO conversion to milliseconds!)
  */
 
 import {
     FormatDescriptor,
-    BlockDescriptor,
-    EventData,
-    WarpTrack,
-    Zone,
-    Block,
-    BlockLane,
-    Lane
+    HierarchyData,
+    TracksSoA,
+    ZonesSoA,
+    BlocksSoA,
+    BlockLanesSoA,
+    LanesSoA,
+    SMAccelerator
 } from './types.js';
 import {
     SUBLANE_HEIGHT,
@@ -36,11 +36,10 @@ import {
     BLOCK_EDGE_PADDING,
     MAGIC_NUMBER_LENGTH,
     EXPECTED_FORMAT_VERSION,
-    COMPRESSION_MODE_DEFLATE,
-    NS_TO_MS
+    COMPRESSION_MODE_DEFLATE
 } from './constants.js';
 
-/** Raw data extracted from binary trace file. */
+/** Raw data extracted from binary trace file (SoA version). */
 export interface ParsedTraceData {
     kernelName: string;
     gridDimX: number;
@@ -50,46 +49,39 @@ export interface ParsedTraceData {
     clusterDimY: number;
     clusterDimZ: number;
     formatDescriptors: FormatDescriptor[];
-    blockDescriptors: BlockDescriptor[];
-    tracks: WarpTrack[];
-}
 
-/** Visualization hierarchy built from parsed trace data. */
-export interface HierarchyData {
-    zones: Zone[];                   // Flattened array of all zones (for GPU upload)
-    blocks: Block[];                 // Flattened array of all blocks
-    blockLanes: BlockLane[];         // Flattened array of all block lanes
-    lanes: Lane[];                   // Top-level SM lanes
-    worldHeight: number;             // Total vertical extent of visualization
-    timeRange: number;               // Maximum end time across all events (milliseconds)
+    // SoA structures (pre-populated)
+    tracks: TracksSoA;
+    zones: ZonesSoA;
+    blocks: BlocksSoA;
 }
 
 /**
  * 20-color palette for zone rendering.
  * Colors are mapped by format descriptor ID (modulo 20).
- * RGB values in [0-1] range, optimized for dark theme with good contrast.
+ * RGB values in [0-255] range for packed byte storage.
  */
 const COLOR_PALETTE: [number, number, number][] = [
-    [0.30, 0.58, 0.90],
-    [0.90, 0.35, 0.35],
-    [0.40, 0.85, 0.50],
-    [0.95, 0.65, 0.25],
-    [0.70, 0.45, 0.90],
-    [0.30, 0.78, 0.78],
-    [0.95, 0.85, 0.30],
-    [0.90, 0.50, 0.70],
-    [0.50, 0.75, 0.40],
-    [0.85, 0.40, 0.55],
-    [0.45, 0.70, 0.90],
-    [0.75, 0.55, 0.35],
-    [0.55, 0.45, 0.85],
-    [0.35, 0.82, 0.65],
-    [0.92, 0.60, 0.35],
-    [0.60, 0.82, 0.70],
-    [0.80, 0.45, 0.80],
-    [0.55, 0.88, 0.55],
-    [0.88, 0.70, 0.45],
-    [0.45, 0.60, 0.82],
+    [77, 148, 230],   // [0.30, 0.58, 0.90] * 255
+    [230, 89, 89],    // [0.90, 0.35, 0.35] * 255
+    [102, 217, 128],  // [0.40, 0.85, 0.50] * 255
+    [242, 166, 64],   // [0.95, 0.65, 0.25] * 255
+    [179, 115, 230],  // [0.70, 0.45, 0.90] * 255
+    [77, 199, 199],   // [0.30, 0.78, 0.78] * 255
+    [242, 217, 77],   // [0.95, 0.85, 0.30] * 255
+    [230, 128, 179],  // [0.90, 0.50, 0.70] * 255
+    [128, 191, 102],  // [0.50, 0.75, 0.40] * 255
+    [217, 102, 140],  // [0.85, 0.40, 0.55] * 255
+    [115, 179, 230],  // [0.45, 0.70, 0.90] * 255
+    [191, 140, 89],   // [0.75, 0.55, 0.35] * 255
+    [140, 115, 217],  // [0.55, 0.45, 0.85] * 255
+    [89, 209, 166],   // [0.35, 0.82, 0.65] * 255
+    [235, 153, 89],   // [0.92, 0.60, 0.35] * 255
+    [153, 209, 179],  // [0.60, 0.82, 0.70] * 255
+    [204, 115, 204],  // [0.80, 0.45, 0.80] * 255
+    [140, 224, 140],  // [0.55, 0.88, 0.55] * 255
+    [224, 179, 115],  // [0.88, 0.70, 0.45] * 255
+    [115, 153, 209],  // [0.45, 0.60, 0.82] * 255
 ];
 
 /**
@@ -104,7 +96,7 @@ async function decompressData(compressedData: Uint8Array): Promise<ArrayBuffer> 
 }
 
 /**
- * Parses binary .nanotrace file into structured trace data.
+ * Parses binary .nanotrace file directly into SoA structures.
  *
  * Format structure:
  * - Header: Magic "nanotrace\0" + version (uint8) + compression (uint8)
@@ -116,7 +108,7 @@ async function decompressData(compressedData: Uint8Array): Promise<ArrayBuffer> 
  *
  * All multi-byte integers are little-endian.
  * Times are stored in nanoseconds.
- * If compression mode is 1, data after compression mode is deflate-compressed (includes kernel name).
+ * Parses directly into TypedArrays - NO intermediate JavaScript objects!
  */
 export async function parseTraceFile(
     file: File,
@@ -162,7 +154,6 @@ export async function parseTraceFile(
     }
 
     // Decompress the remaining data if compression is enabled
-    // Compression includes kernel name and everything after
     if (compressionMode === COMPRESSION_MODE_DEFLATE) {
         performance.mark('parseTraceFile:decompress:start');
         if (onProgress) onProgress('Decompressing trace data...');
@@ -204,6 +195,7 @@ export async function parseTraceFile(
     console.log(`  Tracks: ${trackCount}`);
     console.log(`  Total events: ${totalEventCount}`);
 
+    // Parse format descriptors (small count, OK to use objects)
     performance.mark('parseTraceFile:formatDesc:start');
     const formatDescriptors: FormatDescriptor[] = [];
     for (let i = 0; i < formatDescCount; i++) {
@@ -217,50 +209,235 @@ export async function parseTraceFile(
     performance.mark('parseTraceFile:formatDesc:end');
     performance.measure('Parse Format Descriptors', 'parseTraceFile:formatDesc:start', 'parseTraceFile:formatDesc:end');
 
-    performance.mark('parseTraceFile:blockDesc:start');
-    const blockDescriptors: BlockDescriptor[] = [];
-    for (let i = 0; i < blockDescCount; i++) {
-        const blockId = view.getUint32(offset, true); offset += 4;
-        const clusterId = view.getUint32(offset, true); offset += 4;
-        const smId = view.getUint16(offset, true); offset += 2;
-        const formatDescId = view.getUint16(offset, true); offset += 2;
-        // No parameters - special placeholders computed from blockId and grid dimensions
-        blockDescriptors.push({ blockId, clusterId, smId, formatDescId });
-    }
-    performance.mark('parseTraceFile:blockDesc:end');
-    performance.measure('Parse Block Descriptors', 'parseTraceFile:blockDesc:start', 'parseTraceFile:blockDesc:end');
+    // Map format descriptor IDs to colors
+    const formatToColor = new Map<number, [number, number, number]>();
+    formatDescriptors.forEach((_desc, idx) => {
+        const color = COLOR_PALETTE[idx % COLOR_PALETTE.length];
+        formatToColor.set(idx, color);
+    });
 
+    // PRE-SCAN: Count params to allocate exact sizes
+    performance.mark('parseTraceFile:prescan:start');
+    const prescanOffset = offset;  // Save current position
+    let zoneCount = 0;
+    let trackParamsCount = 0;
+    let zoneParamsCount = 0;
+
+    // Skip blocks (no params)
+    offset += blockDescCount * 12;  // 4+4+2+2 bytes per block
+
+    // Count track and zone params
+    for (let i = 0; i < trackCount; i++) {
+        offset += 4;  // blockDescId
+        const formatDescId = view.getUint16(offset, true); offset += 2;
+        offset += 4;  // laneId
+        const trackParamCount = formatDescriptors[formatDescId].placeholderCount;
+        trackParamsCount += trackParamCount;
+        offset += trackParamCount * 4;
+
+        const eventCount = view.getUint32(offset, true); offset += 4;
+        zoneCount += eventCount;
+
+        for (let j = 0; j < eventCount; j++) {
+            offset += 8;  // timeOffset + duration
+            const eventFormatDescId = view.getUint16(offset, true); offset += 2;
+            const eventParamCount = formatDescriptors[eventFormatDescId].placeholderCount;
+            zoneParamsCount += eventParamCount;
+            offset += eventParamCount * 4;
+        }
+    }
+
+    performance.mark('parseTraceFile:prescan:end');
+    performance.measure('Pre-scan', 'parseTraceFile:prescan:start', 'parseTraceFile:prescan:end');
+
+    console.log(`  Zones (events): ${zoneCount}`);
+    console.log(`  Track params: ${trackParamsCount}`);
+    console.log(`  Zone params: ${zoneParamsCount}`);
+
+    // Allocate all SoA structures
+    performance.mark('parseTraceFile:allocate:start');
+
+    const tracksSoA = new TracksSoA();
+    tracksSoA.count = trackCount;
+    tracksSoA.formatDescIds = new Uint16Array(trackCount);
+    tracksSoA.sublaneIndices = new Uint8Array(trackCount);
+    tracksSoA.paramsOffsets = new Uint32Array(trackCount);
+    tracksSoA.paramsCounts = new Uint8Array(trackCount);
+    tracksSoA.blockIndices = new Uint32Array(trackCount);
+    tracksSoA.paramsPool = new Uint32Array(trackParamsCount);
+
+    const zonesSoA = new ZonesSoA();
+    zonesSoA.count = zoneCount;
+    zonesSoA.startsX = new Uint32Array(zoneCount);
+    zonesSoA.endsX = new Uint32Array(zoneCount);
+    zonesSoA.ys = new Float32Array(zoneCount);  // Filled later by buildHierarchy
+    zonesSoA.colors = new Uint8Array(zoneCount * 3);
+    zonesSoA.formatDescIds = new Uint16Array(zoneCount);
+    zonesSoA.paramsOffsets = new Uint32Array(zoneCount);
+    zonesSoA.paramsCounts = new Uint8Array(zoneCount);
+    zonesSoA.trackIndices = new Uint32Array(zoneCount);
+    zonesSoA.smIndices = new Uint8Array(zoneCount);
+    zonesSoA.blockIndices = new Uint32Array(zoneCount);
+    zonesSoA.sublaneIndices = new Uint8Array(zoneCount);
+    zonesSoA.paramsPool = new Uint32Array(zoneParamsCount);
+
+    const blocksSoA = new BlocksSoA();
+    blocksSoA.count = blockDescCount;
+    blocksSoA.startsX = new Uint32Array(blockDescCount);
+    blocksSoA.endsX = new Uint32Array(blockDescCount);
+    blocksSoA.ys = new Float32Array(blockDescCount);  // Filled later by buildHierarchy
+    blocksSoA.heights = new Float32Array(blockDescCount);
+    blocksSoA.sublanesCounts = new Uint8Array(blockDescCount);
+    blocksSoA.sublanesMaxWidths = new Uint32Array(blockDescCount);
+    blocksSoA.formatDescIds = new Uint16Array(blockDescCount);
+    blocksSoA.gridIds = new Uint32Array(blockDescCount);
+    blocksSoA.clusterIds = new Uint32Array(blockDescCount);
+    blocksSoA.smIndices = new Uint8Array(blockDescCount);
+    blocksSoA.blockLaneIndices = new Uint16Array(blockDescCount);  // Filled later by buildHierarchy
+    blocksSoA.zonesStartIndices = new Uint32Array(blockDescCount);
+    blocksSoA.zonesEndIndices = new Uint32Array(blockDescCount);
+    blocksSoA.tracksStartIndices = new Uint32Array(blockDescCount);
+    blocksSoA.tracksEndIndices = new Uint32Array(blockDescCount);
+
+    performance.mark('parseTraceFile:allocate:end');
+    performance.measure('Allocate SoA', 'parseTraceFile:allocate:start', 'parseTraceFile:allocate:end');
+
+    // Reset offset to start of block descriptors
+    offset = prescanOffset;
+
+    // Parse blocks directly into SoA
+    performance.mark('parseTraceFile:blocks:start');
+    for (let i = 0; i < blockDescCount; i++) {
+        blocksSoA.gridIds[i] = view.getUint32(offset, true); offset += 4;
+        blocksSoA.clusterIds[i] = view.getUint32(offset, true); offset += 4;
+        blocksSoA.smIndices[i] = view.getUint8(offset); offset += 2;  // uint16, only use lower byte
+        blocksSoA.formatDescIds[i] = view.getUint16(offset, true); offset += 2;
+
+        // Initialize bounds (will be computed from zones)
+        blocksSoA.startsX[i] = 0xFFFFFFFF;  // Infinity
+        blocksSoA.endsX[i] = 0;
+        blocksSoA.sublanesMaxWidths[i] = 0;
+    }
+    performance.mark('parseTraceFile:blocks:end');
+    performance.measure('Parse Blocks', 'parseTraceFile:blocks:start', 'parseTraceFile:blocks:end');
+
+    // Parse tracks and zones directly into SoA
     performance.mark('parseTraceFile:tracks:start');
-    const tracks: WarpTrack[] = [];
+    let trackIdx = 0;
+    let zoneIdx = 0;
+    let trackParamsPoolIdx = 0;
+    let zoneParamsPoolIdx = 0;
+
     for (let i = 0; i < trackCount; i++) {
         const blockDescId = view.getUint32(offset, true); offset += 4;
         const formatDescId = view.getUint16(offset, true); offset += 2;
-        const laneId = view.getUint32(offset, true); offset += 4;
-        const warpParamCount = formatDescriptors[formatDescId].placeholderCount;
-        const params: number[] = [];
-        for (let j = 0; j < warpParamCount; j++) {
-            params.push(view.getUint32(offset, true)); offset += 4;
+        const sublaneIdx = view.getUint32(offset, true); offset += 4;
+
+        // Store track data
+        tracksSoA.formatDescIds[trackIdx] = formatDescId;
+        tracksSoA.sublaneIndices[trackIdx] = sublaneIdx;
+        tracksSoA.blockIndices[trackIdx] = blockDescId;
+        tracksSoA.paramsOffsets[trackIdx] = trackParamsPoolIdx;
+
+        const trackParamCount = formatDescriptors[formatDescId].placeholderCount;
+        tracksSoA.paramsCounts[trackIdx] = trackParamCount;
+        for (let j = 0; j < trackParamCount; j++) {
+            tracksSoA.paramsPool[trackParamsPoolIdx++] = view.getUint32(offset, true);
+            offset += 4;
         }
+
+        // Update block's track range
+        if (blocksSoA.tracksStartIndices[blockDescId] === 0 && i !== 0) {
+            blocksSoA.tracksStartIndices[blockDescId] = trackIdx;
+        }
+        if (i === 0 || blocksSoA.tracksStartIndices[blockDescId] === 0) {
+            blocksSoA.tracksStartIndices[blockDescId] = trackIdx;
+        }
+
+        const zoneStartForTrack = zoneIdx;
         const eventCount = view.getUint32(offset, true); offset += 4;
-        const events: EventData[] = [];
+
         for (let j = 0; j < eventCount; j++) {
             const timeOffset = view.getUint32(offset, true); offset += 4;
             const duration = view.getUint32(offset, true); offset += 4;
             const eventFormatDescId = view.getUint16(offset, true); offset += 2;
+
+            const color = formatToColor.get(eventFormatDescId)!;
+
+            // Store zone data
+            zonesSoA.startsX[zoneIdx] = timeOffset;
+            zonesSoA.endsX[zoneIdx] = timeOffset + duration;
+            zonesSoA.colors[zoneIdx * 3 + 0] = color[0];
+            zonesSoA.colors[zoneIdx * 3 + 1] = color[1];
+            zonesSoA.colors[zoneIdx * 3 + 2] = color[2];
+            zonesSoA.formatDescIds[zoneIdx] = eventFormatDescId;
+            zonesSoA.paramsOffsets[zoneIdx] = zoneParamsPoolIdx;
+            zonesSoA.trackIndices[zoneIdx] = trackIdx;
+            zonesSoA.smIndices[zoneIdx] = blocksSoA.smIndices[blockDescId];
+            zonesSoA.blockIndices[zoneIdx] = blockDescId;
+            zonesSoA.sublaneIndices[zoneIdx] = sublaneIdx;
+
             const eventParamCount = formatDescriptors[eventFormatDescId].placeholderCount;
-            const eventParams: number[] = [];
+            zonesSoA.paramsCounts[zoneIdx] = eventParamCount;
             for (let k = 0; k < eventParamCount; k++) {
-                eventParams.push(view.getUint32(offset, true)); offset += 4;
+                zonesSoA.paramsPool[zoneParamsPoolIdx++] = view.getUint32(offset, true);
+                offset += 4;
             }
-            events.push({ timeOffset, duration, formatDescId: eventFormatDescId, params: eventParams });
+
+            // Update block bounds
+            if (timeOffset < blocksSoA.startsX[blockDescId]) {
+                blocksSoA.startsX[blockDescId] = timeOffset;
+            }
+            if (timeOffset + duration > blocksSoA.endsX[blockDescId]) {
+                blocksSoA.endsX[blockDescId] = timeOffset + duration;
+            }
+            if (duration > blocksSoA.sublanesMaxWidths[blockDescId]) {
+                blocksSoA.sublanesMaxWidths[blockDescId] = duration;
+            }
+
+            zoneIdx++;
         }
-        tracks.push({ blockDescId, formatDescId, laneId, params, events });
+
+        // Update block's zone range and sublane count
+        if (zoneIdx > zoneStartForTrack) {
+            if (blocksSoA.zonesStartIndices[blockDescId] === 0 && blockDescId !== 0) {
+                blocksSoA.zonesStartIndices[blockDescId] = zoneStartForTrack;
+            }
+            if (blockDescId === 0 || blocksSoA.zonesStartIndices[blockDescId] === 0) {
+                blocksSoA.zonesStartIndices[blockDescId] = zoneStartForTrack;
+            }
+            blocksSoA.zonesEndIndices[blockDescId] = zoneIdx;
+        }
+
+        blocksSoA.tracksEndIndices[blockDescId] = trackIdx + 1;
+        blocksSoA.sublanesCounts[blockDescId]++;
+
+        trackIdx++;
     }
+
+    // Calculate block heights
+    for (let i = 0; i < blockDescCount; i++) {
+        const numSublanes = blocksSoA.sublanesCounts[i];
+        blocksSoA.heights[i] = BLOCK_EDGE_PADDING +
+                              numSublanes * SUBLANE_HEIGHT +
+                              Math.max(0, numSublanes - 1) * SUBLANE_PADDING;
+
+        // Handle blocks with no zones
+        if (blocksSoA.startsX[i] === 0xFFFFFFFF) {
+            blocksSoA.startsX[i] = 0;
+        }
+    }
+
     performance.mark('parseTraceFile:tracks:end');
-    performance.measure('Parse Event Tracks', 'parseTraceFile:tracks:start', 'parseTraceFile:tracks:end');
+    performance.measure('Parse Tracks & Zones', 'parseTraceFile:tracks:start', 'parseTraceFile:tracks:end');
 
     performance.mark('parseTraceFile:end');
     performance.measure('Parse Trace File (Total)', 'parseTraceFile:start', 'parseTraceFile:end');
+
+    console.log(`Parsed into SoA:`);
+    console.log(`  Tracks: ${tracksSoA.count}`);
+    console.log(`  Zones: ${zonesSoA.count}`);
+    console.log(`  Blocks: ${blocksSoA.count}`);
 
     return {
         kernelName,
@@ -271,250 +448,284 @@ export async function parseTraceFile(
         clusterDimY,
         clusterDimZ,
         formatDescriptors,
-        blockDescriptors,
-        tracks
+        tracks: tracksSoA,
+        zones: zonesSoA,
+        blocks: blocksSoA
     };
 }
 
+
 /**
- * Builds visualization hierarchy from parsed trace data.
+ * Groups blocks into non-overlapping lanes for a single SM.
+ * Returns array of block index arrays (each inner array is one block lane).
+ */
+function groupIntoNonOverlappingLanes(
+    blockIndices: number[],
+    blocks: BlocksSoA
+): number[][] {
+    // Sort blocks by startX (COPY indices, don't modify original!)
+    const sorted = blockIndices.slice().sort((a, b) =>
+        blocks.startsX[a] - blocks.startsX[b]
+    );
+
+    const lanes: Array<{blockIndices: number[], endTime: number}> = [];
+
+    for (const blockIdx of sorted) {
+        const startX = blocks.startsX[blockIdx];
+        const endX = blocks.endsX[blockIdx];
+
+        // Find lane where this block doesn't overlap
+        let assignedLane = lanes.find(lane => startX >= lane.endTime);
+
+        if (!assignedLane) {
+            assignedLane = {blockIndices: [], endTime: 0};
+            lanes.push(assignedLane);
+        }
+
+        assignedLane.blockIndices.push(blockIdx);
+        assignedLane.endTime = endX;
+    }
+
+    return lanes.map(lane => lane.blockIndices);
+}
+
+/**
+ * Builds hierarchical acceleration structures from already-populated SoA data.
  *
  * Process:
- * 1. Assign colors to format descriptors (modulo 20-color palette)
- * 2. Group blocks by SM, create zones from warp track events
- * 3. Assign blocks to block lanes (non-overlapping horizontal grouping)
- * 4. Calculate Y positions bottom-up (world origin at bottom)
- * 5. Convert times from nanoseconds to milliseconds
+ * 1. Group blocks by SM
+ * 2. Build block lanes with indirection arrays (non-overlapping blocks)
+ * 3. Build lanes
+ * 4. Calculate Y positions bottom-up
  *
- * Hierarchy: Lane (SM) → BlockLane → Block → Sublane → Zone
- * All zones are flattened into a single array for GPU upload.
+ * Input SoA structures are already populated by parseTraceFile().
+ * This function only builds the hierarchy on top of them.
  */
 export function buildHierarchy(
+    kernelName: string,
+    gridDims: [number, number, number],
+    clusterDims: [number, number, number],
     formatDescriptors: FormatDescriptor[],
-    blockDescriptors: BlockDescriptor[],
-    tracks: WarpTrack[]
+    tracks: TracksSoA,
+    zones: ZonesSoA,
+    blocks: BlocksSoA
 ): HierarchyData {
     performance.mark('buildHierarchy:start');
 
-    // Map format descriptor IDs to colors from the 20-color palette
-    const formatToColor = new Map<number, [number, number, number]>();
-    formatDescriptors.forEach((_desc, idx) => {
-        const color = COLOR_PALETTE[idx % COLOR_PALETTE.length];
-        formatToColor.set(idx, color);
-    });
+    console.log(`Building hierarchy from SoA:`);
+    console.log(`  Blocks: ${blocks.count}`);
+    console.log(`  Tracks: ${tracks.count}`);
+    console.log(`  Zones: ${zones.count}`);
 
-    const maxSmId = blockDescriptors.reduce((max, desc) => Math.max(max, desc.smId), -1);
-    const numLanes = maxSmId + 1;
-
-    const lanes: Lane[] = [];
-    for (let i = 0; i < numLanes; i++) {
-        lanes.push({ index: i, blockLanes: [], height: 0, width: 0, y: 0 });
+    // Group blocks by SM
+    performance.mark('buildHierarchy:groupSM:start');
+    const blocksBySM = new Map<number, number[]>();
+    for (let i = 0; i < blocks.count; i++) {
+        const smId = blocks.smIndices[i];
+        if (!blocksBySM.has(smId)) {
+            blocksBySM.set(smId, []);
+        }
+        blocksBySM.get(smId)!.push(i);
     }
+    performance.mark('buildHierarchy:groupSM:end');
+    performance.measure('Group Blocks by SM', 'buildHierarchy:groupSM:start', 'buildHierarchy:groupSM:end');
 
-    const blocksBySM = new Map<number, Array<{ descIndex: number; desc: BlockDescriptor }>>();
-    blockDescriptors.forEach((desc, idx) => {
-        if (!blocksBySM.has(desc.smId)) {
-            blocksBySM.set(desc.smId, []);
-        }
-        blocksBySM.get(desc.smId)!.push({ descIndex: idx, desc });
+    // Build block lanes with indirection
+    performance.mark('buildHierarchy:blockLanes:start');
+
+    const uniqueSMs = Array.from(blocksBySM.keys()).sort((a, b) => a - b);
+    const numLanes = uniqueSMs.length;
+
+    // Temporary structure to collect block lane groups
+    const blockLaneGroups: Array<{smId: number, blockIndices: number[]}> = [];
+
+    uniqueSMs.forEach(smId => {
+        const blockIndicesForSM = blocksBySM.get(smId)!;
+        const groups = groupIntoNonOverlappingLanes(blockIndicesForSM, blocks);
+
+        groups.forEach(blockIndices => {
+            blockLaneGroups.push({smId, blockIndices});
+        });
     });
 
-    let globalBlockIdx = 0;
-    let globalBlockLaneIdx = 0;
-    let globalZoneIdx = 0;
+    // Allocate BlockLanesSoA
+    const blockLanesSoA = new BlockLanesSoA();
+    blockLanesSoA.count = blockLaneGroups.length;
+    blockLanesSoA.ys = new Float32Array(blockLaneGroups.length);
+    blockLanesSoA.heights = new Float32Array(blockLaneGroups.length);
+    blockLanesSoA.widths = new Uint32Array(blockLaneGroups.length);
+    blockLanesSoA.maxBlockWidths = new Uint32Array(blockLaneGroups.length);
+    blockLanesSoA.maxZoneWidths = new Uint32Array(blockLaneGroups.length);
+    blockLanesSoA.smIndices = new Uint8Array(blockLaneGroups.length);
 
-    const blocks: Block[] = [];
-    const blockLanes: BlockLane[] = [];
-    const zones: Zone[] = [];
-
-    const tracksByBlock = new Map<number, WarpTrack[]>();
-    tracks.forEach(track => {
-        if (!tracksByBlock.has(track.blockDescId)) {
-            tracksByBlock.set(track.blockDescId, []);
-        }
-        tracksByBlock.get(track.blockDescId)!.push(track);
+    // Count total block references for indirection array
+    let totalBlockRefs = 0;
+    blockLaneGroups.forEach(group => {
+        totalBlockRefs += group.blockIndices.length;
     });
 
-    blocksBySM.forEach((smBlocks, smId) => {
-        const lane = lanes[smId];
+    blockLanesSoA.blockIndices = new Uint32Array(totalBlockRefs);
+    blockLanesSoA.blockIndicesOffsets = new Uint32Array(blockLaneGroups.length);
+    blockLanesSoA.blockIndicesCounts = new Uint16Array(blockLaneGroups.length);
 
-        const blockObjects: Block[] = [];
-        smBlocks.forEach(({ descIndex, desc }) => {
-            const blockTracksForBlock = tracksByBlock.get(descIndex) || [];
+    // Populate block lanes and indirection
+    let blockIndicesOffset = 0;
+    blockLaneGroups.forEach((group, blIdx) => {
+        blockLanesSoA.smIndices[blIdx] = group.smId;
+        blockLanesSoA.blockIndicesOffsets[blIdx] = blockIndicesOffset;
+        blockLanesSoA.blockIndicesCounts[blIdx] = group.blockIndices.length;
 
-            let minTime = Infinity;
-            let maxTime = 0;
-            blockTracksForBlock.forEach(track => {
-                track.events.forEach(event => {
-                    minTime = Math.min(minTime, event.timeOffset);
-                    maxTime = Math.max(maxTime, event.timeOffset + event.duration);
-                });
-            });
+        let maxBlockHeight = 0;
+        let maxBlockWidth = 0;
+        let maxZoneWidth = 0;
+        let rightmostTime = 0;
 
-            const startX = minTime * NS_TO_MS;
-            const endX = maxTime * NS_TO_MS;
+        for (const blockIdx of group.blockIndices) {
+            blockLanesSoA.blockIndices[blockIndicesOffset++] = blockIdx;
 
-            const sublanes: Zone[][] = blockTracksForBlock.map(track => {
-                return track.events.map(event => {
-                    const zoneStartX = event.timeOffset * NS_TO_MS;
-                    const zoneEndX = (event.timeOffset + event.duration) * NS_TO_MS;
-                    const baseColor = formatToColor.get(event.formatDescId)!;
+            // Update block's block lane index
+            blocks.blockLaneIndices[blockIdx] = blIdx;
 
-                    const zone: Zone = {
-                        id: globalZoneIdx++,
-                        startX: zoneStartX,
-                        endX: zoneEndX,
-                        width: zoneEndX - zoneStartX,
-                        height: SUBLANE_HEIGHT,
-                        r: baseColor[0],
-                        g: baseColor[1],
-                        b: baseColor[2],
-                        formatDescId: event.formatDescId,
-                        params: event.params,
-                        warpFormatDescId: track.formatDescId,
-                        warpLaneId: track.laneId,
-                        warpParams: track.params,
-                        laneIdx: smId,
-                        blockLaneIdx: -1,
-                        blockIdx: -1,
-                        sublaneIdx: -1,
-                        x: 0,
-                        y: 0,
-                    };
-                    zones.push(zone);
-                    return zone;
-                });
-            });
+            // Calculate stats
+            maxBlockHeight = Math.max(maxBlockHeight, blocks.heights[blockIdx]);
+            maxBlockWidth = Math.max(maxBlockWidth, blocks.endsX[blockIdx] - blocks.startsX[blockIdx]);
+            maxZoneWidth = Math.max(maxZoneWidth, blocks.sublanesMaxWidths[blockIdx]);
+            rightmostTime = Math.max(rightmostTime, blocks.endsX[blockIdx]);
+        }
 
-            const maxZoneWidth = Math.max(...sublanes.flat().map(z => z.width), 0);
+        blockLanesSoA.heights[blIdx] = maxBlockHeight;
+        blockLanesSoA.maxBlockWidths[blIdx] = maxBlockWidth;
+        blockLanesSoA.maxZoneWidths[blIdx] = maxZoneWidth;
+        blockLanesSoA.widths[blIdx] = rightmostTime;
+    });
 
-            const block: Block = {
-                id: globalBlockIdx++,
-                startX,
-                endX,
-                width: endX - startX,
-                height: BLOCK_EDGE_PADDING + sublanes.length * SUBLANE_HEIGHT + (sublanes.length - 1) * SUBLANE_PADDING,
-                sublanes,
-                numSublanes: sublanes.length,
-                maxZoneWidth,
-                formatDescId: desc.formatDescId,
-                blockId: desc.blockId,
-                clusterId: desc.clusterId,
-                laneIdx: smId,
-                blockLaneIdx: -1,
-                x: 0,
-                y: 0,
-            };
-            blocks.push(block);
-            blockObjects.push(block);
-        });
+    performance.mark('buildHierarchy:blockLanes:end');
+    performance.measure('Build Block Lanes', 'buildHierarchy:blockLanes:start', 'buildHierarchy:blockLanes:end');
 
-        const blockLanesForSM: BlockLane[] = [];
-        blockObjects.forEach(block => {
-            let placed = false;
-            for (const blockLane of blockLanesForSM) {
-                const overlaps = blockLane.blocks.some(b =>
-                    !(block.endX <= b.startX || block.startX >= b.endX)
-                );
-                if (!overlaps) {
-                    blockLane.blocks.push(block);
-                    placed = true;
-                    break;
-                }
-            }
-            if (!placed) {
-                blockLanesForSM.push({
-                    id: globalBlockLaneIdx++,
-                    blocks: [block],
-                    height: 0,
-                    width: 0,
-                    maxBlockWidth: 0,
-                    maxZoneWidth: 0,
-                    laneIdx: smId,
-                    y: 0,
-                });
-            }
-        });
+    // Build lanes
+    performance.mark('buildHierarchy:lanes:start');
 
-        blockLanesForSM.forEach((blockLane, _blIdx) => {
-            blockLane.blocks.forEach(block => {
-                block.blockLaneIdx = blockLane.id;
-                block.sublanes.forEach((sublane, slIdx) => {
-                    sublane.forEach(zone => {
-                        zone.blockLaneIdx = blockLane.id;
-                        zone.blockIdx = block.id;
-                        zone.sublaneIdx = slIdx;
-                    });
-                });
-            });
+    const lanesSoA = new LanesSoA();
+    lanesSoA.count = numLanes;
+    lanesSoA.smIndices = new Uint8Array(numLanes);
+    lanesSoA.ys = new Float32Array(numLanes);
+    lanesSoA.heights = new Float32Array(numLanes);
+    lanesSoA.widths = new Uint32Array(numLanes);
+    lanesSoA.blockLanesStartIndices = new Uint32Array(numLanes);
+    lanesSoA.blockLanesEndIndices = new Uint32Array(numLanes);
 
-            const maxBlockHeight = Math.max(...blockLane.blocks.map(b => b.height), 0);
-            blockLane.height = maxBlockHeight;
-            blockLane.width = Math.max(...blockLane.blocks.map(b => b.endX), 0);
-            blockLane.maxBlockWidth = Math.max(...blockLane.blocks.map(b => b.width), 0);
-            blockLane.maxZoneWidth = Math.max(...blockLane.blocks.map(b => b.maxZoneWidth), 0);
+    // Map SM to block lanes
+    const blockLanesBySM = new Map<number, number[]>();
+    blockLaneGroups.forEach((group, blIdx) => {
+        if (!blockLanesBySM.has(group.smId)) {
+            blockLanesBySM.set(group.smId, []);
+        }
+        blockLanesBySM.get(group.smId)!.push(blIdx);
+    });
 
-            blockLanes.push(blockLane);
-            lane.blockLanes.push(blockLane);
-        });
+    uniqueSMs.forEach((smId, laneIdx) => {
+        lanesSoA.smIndices[laneIdx] = smId;
 
+        const blockLaneIndices = blockLanesBySM.get(smId)!;
+        lanesSoA.blockLanesStartIndices[laneIdx] = blockLaneIndices[0];
+        lanesSoA.blockLanesEndIndices[laneIdx] = blockLaneIndices[blockLaneIndices.length - 1] + 1;
+
+        // Calculate lane dimensions
         let laneHeight = 2 * LANE_EDGE_PADDING;
-        for (let i = 0; i < lane.blockLanes.length; i++) {
-            laneHeight += lane.blockLanes[i].height;
-            if (i < lane.blockLanes.length - 1) {
+        let maxWidth = 0;
+
+        blockLaneIndices.forEach((blIdx, i) => {
+            laneHeight += blockLanesSoA.heights[blIdx];
+            if (i < blockLaneIndices.length - 1) {
                 laneHeight += BLOCK_LANE_PADDING;
             }
-        }
-        lane.height = laneHeight;
-        lane.width = Math.max(...lane.blockLanes.map(bl => bl.width), 0);
+            maxWidth = Math.max(maxWidth, blockLanesSoA.widths[blIdx]);
+        });
+
+        lanesSoA.heights[laneIdx] = laneHeight;
+        lanesSoA.widths[laneIdx] = maxWidth;
     });
 
-    const maxLaneWidth = Math.max(...lanes.map(l => l.width), 0);
-    const timeRange = maxLaneWidth > 0 ? maxLaneWidth : 1.0;
+    performance.mark('buildHierarchy:lanes:end');
+    performance.measure('Build Lanes', 'buildHierarchy:lanes:start', 'buildHierarchy:lanes:end');
+
+    // Calculate Y positions (bottom-up)
+    performance.mark('buildHierarchy:ypositions:start');
 
     let currentY = 0;
-    for (let i = lanes.length - 1; i >= 0; i--) {
-        const lane = lanes[i];
+    for (let i = lanesSoA.count - 1; i >= 0; i--) {
+        lanesSoA.ys[i] = currentY;
 
-        if (lane.blockLanes.length === 0) {
-            lane.y = 0;
-            lane.height = 0;
-            continue;
-        }
+        const blockLaneStart = lanesSoA.blockLanesStartIndices[i];
+        const blockLaneEnd = lanesSoA.blockLanesEndIndices[i];
 
-        lane.y = currentY;
         let blockLaneY = currentY + LANE_EDGE_PADDING;
-        lane.blockLanes.forEach((blockLane, blIdx) => {
-            blockLane.y = blockLaneY;
 
-            blockLane.blocks.forEach(block => {
-                block.y = blockLaneY + (blockLane.height - block.height);
-                block.x = block.startX + block.width / 2;
+        for (let blIdx = blockLaneStart; blIdx < blockLaneEnd; blIdx++) {
+            blockLanesSoA.ys[blIdx] = blockLaneY;
 
-                block.sublanes.forEach((sublane, slIdx) => {
-                    const sublaneY = block.y + block.height - BLOCK_EDGE_PADDING - slIdx * (SUBLANE_HEIGHT + SUBLANE_PADDING) - SUBLANE_HEIGHT / 2;
-                    sublane.forEach(zone => {
-                        zone.y = sublaneY;
-                        zone.x = zone.startX + zone.width / 2;
-                    });
-                });
-            });
+            // Position blocks in this block lane
+            const offset = blockLanesSoA.blockIndicesOffsets[blIdx];
+            const count = blockLanesSoA.blockIndicesCounts[blIdx];
 
-            blockLaneY += blockLane.height;
-            if (blIdx < lane.blockLanes.length - 1) {
+            for (let j = 0; j < count; j++) {
+                const blockIdx = blockLanesSoA.blockIndices[offset + j];
+                blocks.ys[blockIdx] = blockLaneY + (blockLanesSoA.heights[blIdx] - blocks.heights[blockIdx]);
+
+                // Position zones in this block
+                const zoneStart = blocks.zonesStartIndices[blockIdx];
+                const zoneEnd = blocks.zonesEndIndices[blockIdx];
+
+                for (let zIdx = zoneStart; zIdx < zoneEnd; zIdx++) {
+                    const sublaneIdx = zones.sublaneIndices[zIdx];
+                    const sublaneY = blocks.ys[blockIdx] + blocks.heights[blockIdx] -
+                                    BLOCK_EDGE_PADDING - sublaneIdx * (SUBLANE_HEIGHT + SUBLANE_PADDING) -
+                                    SUBLANE_HEIGHT / 2;
+                    zones.ys[zIdx] = sublaneY;
+                }
+            }
+
+            blockLaneY += blockLanesSoA.heights[blIdx];
+            if (blIdx < blockLaneEnd - 1) {
                 blockLaneY += BLOCK_LANE_PADDING;
             }
-        });
+        }
 
         currentY = blockLaneY + LANE_EDGE_PADDING + LANE_PADDING;
     }
 
     const worldHeight = currentY;
+    const totalDurationNs = Math.max(...Array.from(lanesSoA.widths), 0);
+
+    performance.mark('buildHierarchy:ypositions:end');
+    performance.measure('Calculate Y Positions', 'buildHierarchy:ypositions:start', 'buildHierarchy:ypositions:end');
+
+    // Create SM accelerator
+    const smAccelerator = new SMAccelerator(lanesSoA);
 
     performance.mark('buildHierarchy:end');
-    performance.measure('Build Hierarchy', 'buildHierarchy:start', 'buildHierarchy:end');
+    performance.measure('Build Hierarchy (Total)', 'buildHierarchy:start', 'buildHierarchy:end');
 
-    return { zones, blocks, blockLanes, lanes, worldHeight, timeRange };
+    console.log(`Hierarchy built:`);
+    console.log(`  Lanes: ${lanesSoA.count}`);
+    console.log(`  Block lanes: ${blockLanesSoA.count}`);
+    console.log(`  World height: ${worldHeight.toFixed(2)}`);
+    console.log(`  Total duration: ${totalDurationNs} ns`);
+
+    return {
+        tracks,
+        zones,
+        blocks,
+        blockLanes: blockLanesSoA,
+        lanes: lanesSoA,
+        smAccelerator,
+        worldHeight,
+        totalDurationNs,
+        formatDescriptors,
+        kernelName,
+        gridDims,
+        clusterDims
+    };
 }
 
 /**
@@ -549,16 +760,16 @@ export function formatTooltipString(formatDescriptors: FormatDescriptor[], forma
 
 /**
  * Substitutes track parameters and {lane} placeholder into format descriptor label string.
- * Replaces {lane} with laneId and {0}, {1}, etc. with parameter values.
- * Example: "Warp {lane}" with laneId=5 → "Warp 5"
+ * Replaces {lane} with sublaneIndex and {0}, {1}, etc. with parameter values.
+ * Example: "Warp {lane}" with sublaneIndex=5 → "Warp 5"
  * Uses the short label string (not tooltip).
  */
-export function formatTrackString(formatDescriptors: FormatDescriptor[], formatDescId: number, laneId: number, params: number[]): string {
+export function formatTrackString(formatDescriptors: FormatDescriptor[], formatDescId: number, sublaneIndex: number, params: number[]): string {
     const desc = formatDescriptors[formatDescId];
     let result = desc.labelString;
 
-    // Replace {lane} placeholder
-    result = result.replace('{lane}', laneId.toString());
+    // Replace {lane} placeholder with sublaneIndex
+    result = result.replace('{lane}', sublaneIndex.toString());
 
     // Replace numbered placeholders
     for (let i = 0; i < params.length; i++) {
@@ -569,16 +780,16 @@ export function formatTrackString(formatDescriptors: FormatDescriptor[], formatD
 
 /**
  * Substitutes track parameters and {lane} placeholder into format descriptor tooltip string.
- * Replaces {lane} with laneId and {0}, {1}, etc. with parameter values.
- * Example: "Warp {lane} on SM" with laneId=5 → "Warp 5 on SM"
+ * Replaces {lane} with sublaneIndex and {0}, {1}, etc. with parameter values.
+ * Example: "Warp {lane} on SM" with sublaneIndex=5 → "Warp 5 on SM"
  * Uses the full tooltip string.
  */
-export function formatTrackTooltipString(formatDescriptors: FormatDescriptor[], formatDescId: number, laneId: number, params: number[]): string {
+export function formatTrackTooltipString(formatDescriptors: FormatDescriptor[], formatDescId: number, sublaneIndex: number, params: number[]): string {
     const desc = formatDescriptors[formatDescId];
     let result = desc.tooltipString;
 
-    // Replace {lane} placeholder
-    result = result.replace('{lane}', laneId.toString());
+    // Replace {lane} placeholder with sublaneIndex
+    result = result.replace('{lane}', sublaneIndex.toString());
 
     // Replace numbered placeholders
     for (let i = 0; i < params.length; i++) {
@@ -602,7 +813,7 @@ export function formatBlockString(
     clusterId: number,
     gridDimX: number,
     gridDimY: number,
-    gridDimZ: number,
+    _gridDimZ: number,
     clusterDimX: number,
     clusterDimY: number,
     clusterDimZ: number
@@ -615,20 +826,10 @@ export function formatBlockString(
     const blockY = Math.floor(blockId / gridDimX) % gridDimY;
     const blockZ = Math.floor(blockId / (gridDimX * gridDimY));
 
-    // Validate block coordinates
-    if (blockZ >= gridDimZ) {
-        console.warn(`Invalid block ID ${blockId}: blockZ=${blockZ} >= gridDimZ=${gridDimZ}`);
-    }
-
     // Compute cluster coordinates (row-major, if using clusters)
     const clusterX = clusterDimX > 0 ? (clusterId % clusterDimX) : 0;
     const clusterY = clusterDimY > 0 ? (Math.floor(clusterId / clusterDimX) % clusterDimY) : 0;
     const clusterZ = clusterDimZ > 0 ? Math.floor(clusterId / (clusterDimX * clusterDimY)) : 0;
-
-    // Validate cluster coordinates
-    if (clusterDimZ > 0 && clusterZ >= clusterDimZ) {
-        console.warn(`Invalid cluster ID ${clusterId}: clusterZ=${clusterZ} >= clusterDimZ=${clusterDimZ}`);
-    }
 
     // Replace special placeholders
     result = result.replace('{blockLinear}', blockId.toString());
@@ -658,7 +859,7 @@ export function formatBlockTooltipString(
     clusterId: number,
     gridDimX: number,
     gridDimY: number,
-    gridDimZ: number,
+    _gridDimZ: number,
     clusterDimX: number,
     clusterDimY: number,
     clusterDimZ: number
@@ -671,20 +872,10 @@ export function formatBlockTooltipString(
     const blockY = Math.floor(blockId / gridDimX) % gridDimY;
     const blockZ = Math.floor(blockId / (gridDimX * gridDimY));
 
-    // Validate block coordinates
-    if (blockZ >= gridDimZ) {
-        console.warn(`Invalid block ID ${blockId}: blockZ=${blockZ} >= gridDimZ=${gridDimZ}`);
-    }
-
     // Compute cluster coordinates (row-major, if using clusters)
     const clusterX = clusterDimX > 0 ? (clusterId % clusterDimX) : 0;
     const clusterY = clusterDimY > 0 ? (Math.floor(clusterId / clusterDimX) % clusterDimY) : 0;
     const clusterZ = clusterDimZ > 0 ? Math.floor(clusterId / (clusterDimX * clusterDimY)) : 0;
-
-    // Validate cluster coordinates
-    if (clusterDimZ > 0 && clusterZ >= clusterDimZ) {
-        console.warn(`Invalid cluster ID ${clusterId}: clusterZ=${clusterZ} >= clusterDimZ=${clusterDimZ}`);
-    }
 
     // Replace special placeholders
     result = result.replace('{blockLinear}', blockId.toString());

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <stdexcept>
 
@@ -276,18 +277,29 @@ void trace_writer::write(const char* filename, bool compress) {
         tracks[{evt.block_id, evt.lane_id}].push_back(&evt);
     }
 
-    // Step 8: Build unique block descriptors (block_id, cluster_id, sm_id tuples)
-    std::map<std::tuple<uint32_t, uint32_t, uint16_t>, uint32_t> block_id_map;
+    // Step 8: Collect unique block descriptors (block_id, cluster_id, sm_id tuples)
     struct block_desc { uint32_t block_id; uint32_t cluster_id; uint16_t sm_id; };
     std::vector<block_desc> block_descriptors;
+    std::set<std::tuple<uint32_t, uint32_t, uint16_t>> seen_blocks;
 
     for (const auto& evt : events) {
         auto key = std::make_tuple(evt.block_id, evt.cluster_id, evt.sm_id);
-        if (block_id_map.find(key) == block_id_map.end()) {
-            uint32_t descriptor_id = static_cast<uint32_t>(block_descriptors.size());
-            block_id_map[key] = descriptor_id;
+        if (seen_blocks.insert(key).second) {
             block_descriptors.push_back({evt.block_id, evt.cluster_id, evt.sm_id});
         }
+    }
+
+    // Sort block descriptors by grid ID (required by visualizer parser)
+    std::sort(block_descriptors.begin(), block_descriptors.end(),
+        [](const block_desc& a, const block_desc& b) {
+            return a.block_id < b.block_id;
+        });
+
+    // Build block descriptor ID map after sorting
+    std::map<std::tuple<uint32_t, uint32_t, uint16_t>, uint32_t> block_id_map;
+    for (size_t i = 0; i < block_descriptors.size(); ++i) {
+        const auto& desc = block_descriptors[i];
+        block_id_map[{desc.block_id, desc.cluster_id, desc.sm_id}] = static_cast<uint32_t>(i);
     }
 
     // Step 7: Write binary file

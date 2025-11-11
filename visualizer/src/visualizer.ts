@@ -20,11 +20,7 @@ import { LabelRenderer } from './renderers/label-renderer.js';
 import { TimelineRenderer } from './renderers/timeline-renderer.js';
 import { InteractionManager } from './interaction-manager.js';
 import {
-    FormatDescriptor,
-    Zone,
-    Block,
-    BlockLane,
-    Lane
+    HierarchyData
 } from './utils/types.js';
 import {
     BASE_TIME_RANGE,
@@ -92,13 +88,9 @@ export class ZoneVisualizer {
     private format!: GPUTextureFormat;
     private gpuResources?: GPUResources;
 
-    // Trace data hierarchy (populated from file)
-    private zones: Zone[] = [];
-    private blocks: Block[] = [];
-    private blockLanes: BlockLane[] = [];
-    private lanes: Lane[] = [];
+    // Trace data hierarchy (populated from file, SoA structures)
+    private hierarchy: HierarchyData | null = null;
     private laneLabels: HTMLElement[] = [];
-    private formatDescriptors: FormatDescriptor[] = [];
 
     // Trace metadata
     private TIME_RANGE: number = BASE_TIME_RANGE;
@@ -304,10 +296,13 @@ export class ZoneVisualizer {
 
         this.resizeCanvas();
 
+        if (!this.hierarchy) {
+            throw new Error('Hierarchy data not loaded');
+        }
+
         // Create rendering subsystems with loaded trace data
         this.camera = new Camera(this.worldHeight, this.TIME_RANGE);
         this.labelRenderer = new LabelRenderer(this.labelCtx, this.canvas, this.camera);
-        this.labelRenderer.updateBlocksCache(this.lanes);  // Cache flattened blocks to avoid per-frame allocations
         this.timelineRenderer = new TimelineRenderer(this.timelineContainer, this.canvas, this.camera);
         this.interactionManager = new InteractionManager(
             this.camera,
@@ -328,7 +323,13 @@ export class ZoneVisualizer {
         // Upload trace data to GPU storage buffers and create render pipelines
         this.loadingText.textContent = 'Uploading to GPU...';
         await new Promise(resolve => setTimeout(resolve, 0));
-        const buffers = createGPUBuffers(this.device, this.zones, this.blocks, this.blockLanes, this.lanes);
+        const buffers = createGPUBuffers(
+            this.device,
+            this.hierarchy.zones,
+            this.hierarchy.blocks,
+            this.hierarchy.blockLanes,
+            this.hierarchy.lanes
+        );
         this.gpuResources = createPipelines(
             this.device,
             this.format,
@@ -479,10 +480,11 @@ export class ZoneVisualizer {
      * Loads bundled sample trace file from assets.
      * Sample 1: Minimal trace (1 block, 2 events)
      * Sample 2: Small random trace (~48K events, 16 SMs)
-     * Sample 3: Large random trace (~10M events, 148 SMs)
+     * Sample 3: Large random trace (~10M events)
      * Simple B200: Simple trace from nanotrace-cuda example (16 blocks, 128 tracks, ~13K events)
      * Mixed B200: Mixed trace from nanotrace-cuda example (32 blocks, 384 tracks, ~2.5K events)
-     * Grayscale B200: Grayscale trace from nanotrace-cuda example (419K blocks, 419K events, all 148 SMs)
+     * Grayscale B200: Grayscale trace from nanotrace-cuda example (419K blocks, 419K events)
+     * TMA Static/Atomic: TMA bandwidth benchmarks from nanotrace-cuda (296 blocks, 2.1M tiles)
      * Uses Vite's import.meta.url for proper bundled path resolution.
      */
     async loadSampleFile(sampleName: string): Promise<void> {
@@ -494,9 +496,7 @@ export class ZoneVisualizer {
             'simple_b200': 'samples/simple_trace_b200.nanotrace',
             'mixed_b200': 'samples/mixed_trace_b200.nanotrace',
             'grayscale_b200': 'samples/grayscale_trace_b200.nanotrace',
-            'tma_static_148': 'samples/tma_bandwidth_static_148.nanotrace',
             'tma_static_296': 'samples/tma_bandwidth_static_296.nanotrace',
-            'tma_atomic_148': 'samples/tma_bandwidth_atomic_148.nanotrace',
             'tma_atomic_296': 'samples/tma_bandwidth_atomic_296.nanotrace',
         };
 
@@ -537,10 +537,10 @@ export class ZoneVisualizer {
     }
 
     /**
-     * Parses binary trace file and builds visualization hierarchy.
+     * Parses binary trace file and builds visualization hierarchy (SoA version).
      *
      * This method:
-     * 1. Parses the binary .nanotrace format
+     * 1. Parses the binary .nanotrace format directly into SoA structures
      * 2. Creates SM lane labels (one per streaming multiprocessor)
      * 3. Builds the hierarchical data structure (lanes → block lanes → blocks → zones)
      * 4. Stores data in instance variables for GPU upload and rendering
@@ -562,12 +562,14 @@ export class ZoneVisualizer {
         this.clusterDimX = parsedData.clusterDimX;
         this.clusterDimY = parsedData.clusterDimY;
         this.clusterDimZ = parsedData.clusterDimZ;
-        this.formatDescriptors = parsedData.formatDescriptors;
 
-        // Create SM lane labels dynamically based on trace data
+        // Create SM lane labels dynamically based on trace data (from blocks SoA)
         this.laneLabelsContainer.innerHTML = '';
         this.laneLabels = [];
-        const maxSmId = parsedData.blockDescriptors.reduce((max, desc) => Math.max(max, desc.smId), -1);
+        let maxSmId = -1;
+        for (let i = 0; i < parsedData.blocks.count; i++) {
+            maxSmId = Math.max(maxSmId, parsedData.blocks.smIndices[i]);
+        }
         const numLanes = maxSmId + 1;
         for (let i = 0; i < numLanes; i++) {
             const label = document.createElement('div');
@@ -579,20 +581,20 @@ export class ZoneVisualizer {
 
         this.loadingText.textContent = 'Building hierarchy...';
         await new Promise(resolve => setTimeout(resolve, 0));
-        const hierarchy = buildHierarchy(
+        this.hierarchy = buildHierarchy(
+            parsedData.kernelName,
+            [parsedData.gridDimX, parsedData.gridDimY, parsedData.gridDimZ],
+            [parsedData.clusterDimX, parsedData.clusterDimY, parsedData.clusterDimZ],
             parsedData.formatDescriptors,
-            parsedData.blockDescriptors,
-            parsedData.tracks
+            parsedData.tracks,
+            parsedData.zones,
+            parsedData.blocks
         );
 
-        // Store hierarchy data for GPU upload and rendering
-        this.zones = hierarchy.zones;
-        this.blocks = hierarchy.blocks;
-        this.blockLanes = hierarchy.blockLanes;
-        this.lanes = hierarchy.lanes;
-        this.worldHeight = hierarchy.worldHeight;
-        this.TIME_RANGE = hierarchy.timeRange;
-        this.numZones = this.zones.length;
+        // Store metadata for rendering
+        this.worldHeight = this.hierarchy.worldHeight;
+        this.TIME_RANGE = this.hierarchy.totalDurationNs * 1e-6;  // Convert ns to ms
+        this.numZones = this.hierarchy.zones.count;
 
         performance.mark('loadTraceFile:end');
         performance.measure('Load Trace File (Total)', 'loadTraceFile:start', 'loadTraceFile:end');
@@ -603,7 +605,8 @@ export class ZoneVisualizer {
      * Replaces placeholders like {0}, {1} with parameter values.
      */
     formatString(formatDescId: number, params: number[]): string {
-        return formatStringHelper(this.formatDescriptors, formatDescId, params);
+        if (!this.hierarchy) return '';
+        return formatStringHelper(this.hierarchy.formatDescriptors, formatDescId, params);
     }
 
     /**
@@ -611,7 +614,8 @@ export class ZoneVisualizer {
      * Replaces {lane} placeholder and numbered placeholders like {0}, {1} with values.
      */
     formatTrackString(formatDescId: number, laneId: number, params: number[]): string {
-        return formatTrackStringHelper(this.formatDescriptors, formatDescId, laneId, params);
+        if (!this.hierarchy) return '';
+        return formatTrackStringHelper(this.hierarchy.formatDescriptors, formatDescId, laneId, params);
     }
 
     /**
@@ -619,8 +623,9 @@ export class ZoneVisualizer {
      * Replaces special placeholders like {blockX}, {blockY}, {blockZ}, {clusterX}, etc.
      */
     formatBlockString(formatDescId: number, blockId: number, clusterId: number): string {
+        if (!this.hierarchy) return '';
         return formatBlockStringHelper(
-            this.formatDescriptors,
+            this.hierarchy.formatDescriptors,
             formatDescId,
             blockId,
             clusterId,
@@ -638,7 +643,8 @@ export class ZoneVisualizer {
      * Uses tooltip string instead of label string for hover display.
      */
     formatTooltipString(formatDescId: number, params: number[]): string {
-        return formatTooltipStringHelper(this.formatDescriptors, formatDescId, params);
+        if (!this.hierarchy) return '';
+        return formatTooltipStringHelper(this.hierarchy.formatDescriptors, formatDescId, params);
     }
 
     /**
@@ -646,7 +652,8 @@ export class ZoneVisualizer {
      * Uses tooltip string instead of label string for hover display.
      */
     formatTrackTooltipString(formatDescId: number, laneId: number, params: number[]): string {
-        return formatTrackTooltipStringHelper(this.formatDescriptors, formatDescId, laneId, params);
+        if (!this.hierarchy) return '';
+        return formatTrackTooltipStringHelper(this.hierarchy.formatDescriptors, formatDescId, laneId, params);
     }
 
     /**
@@ -654,8 +661,9 @@ export class ZoneVisualizer {
      * Uses tooltip string instead of label string for hover display.
      */
     formatBlockTooltipString(formatDescId: number, blockId: number, clusterId: number): string {
+        if (!this.hierarchy) return '';
         return formatBlockTooltipStringHelper(
-            this.formatDescriptors,
+            this.hierarchy.formatDescriptors,
             formatDescId,
             blockId,
             clusterId,
@@ -783,19 +791,25 @@ export class ZoneVisualizer {
         }, { passive: false });
 
         this.canvas.addEventListener('dblclick', (e) => {
-            if (e.button === 0 && this.interactionManager) {
-                const result = this.interactionManager.findZoneAtPosition(e.clientX, e.clientY, this.lanes, this.blocks);
+            if (e.button === 0 && this.interactionManager && this.hierarchy) {
+                const result = this.interactionManager.findZoneAtPosition(e.clientX, e.clientY, this.hierarchy);
 
-                if (result.zone) {
+                if (result.zoneIdx !== -1) {
                     const epsilon = SELECTION_EPSILON;
-                    this.interactionManager.startSelection(Math.max(0, result.zone.startX - epsilon));
-                    this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, result.zone.endX + epsilon));
+                    // Convert zone times from nanoseconds to milliseconds
+                    const zoneStartMs = this.hierarchy.zones.startsX[result.zoneIdx] * 1e-6;
+                    const zoneEndMs = this.hierarchy.zones.endsX[result.zoneIdx] * 1e-6;
+                    this.interactionManager.startSelection(Math.max(0, zoneStartMs - epsilon));
+                    this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, zoneEndMs + epsilon));
                     this.interactionManager.endSelection();
                     this.interactionManager.updateSelection();
-                } else if (result.block) {
+                } else if (result.blockIdx !== -1) {
                     const epsilon = SELECTION_EPSILON;
-                    this.interactionManager.startSelection(Math.max(0, result.block.startX - epsilon));
-                    this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, result.block.endX + epsilon));
+                    // Convert block times from nanoseconds to milliseconds
+                    const blockStartMs = this.hierarchy.blocks.startsX[result.blockIdx] * 1e-6;
+                    const blockEndMs = this.hierarchy.blocks.endsX[result.blockIdx] * 1e-6;
+                    this.interactionManager.startSelection(Math.max(0, blockStartMs - epsilon));
+                    this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, blockEndMs + epsilon));
                     this.interactionManager.endSelection();
                     this.interactionManager.updateSelection();
                 }
@@ -881,8 +895,8 @@ export class ZoneVisualizer {
             }
 
             // Don't update hover if help overlay is open
-            if (!isHelpOpen) {
-                this.interactionManager.updateHover(e.clientX, e.clientY, this.lanes, this.blocks, this.formatDescriptors, this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this), this.formatBlockTooltipString.bind(this));
+            if (!isHelpOpen && this.hierarchy) {
+                this.interactionManager.updateHover(e.clientX, e.clientY, this.hierarchy, this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this), this.formatBlockTooltipString.bind(this));
             }
         });
 
@@ -893,23 +907,23 @@ export class ZoneVisualizer {
     }
 
     /**
-     * Delegates zone label rendering to LabelRenderer.
+     * Delegates zone label rendering to LabelRenderer (SoA version).
      * Convenience wrapper that passes instance data to the renderer.
      */
     renderZoneLabels(): void {
-        if (!this.camera || !this.labelRenderer) return;
-        this.labelRenderer.renderZoneLabels(this.lanes, this.blockLanes, this.formatDescriptors, this.formatString.bind(this), this.formatBlockString.bind(this));
+        if (!this.camera || !this.labelRenderer || !this.hierarchy) return;
+        this.labelRenderer.renderZoneLabels(this.hierarchy, this.formatString.bind(this), this.formatBlockString.bind(this));
     }
 
     /**
-     * Updates SM lane label positions based on camera viewport.
+     * Updates SM lane label positions based on camera viewport (SoA version).
      *
      * Positions labels on the left edge of the viewport (50px wide) and vertically
      * aligns them with their corresponding lanes. Labels are clamped to stay below
      * the timeline bar (30px) and are hidden when lanes scroll off-screen.
      */
     updateLaneLabels(): void {
-        if (!this.camera) return;
+        if (!this.camera || !this.hierarchy) return;
 
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
@@ -923,16 +937,17 @@ export class ZoneVisualizer {
 
         const timelineHeight = TIMELINE_HEIGHT;
 
-        for (let i = 0; i < this.lanes.length; i++) {
-            const lane = this.lanes[i];
-
-            if (lane.blockLanes.length === 0) {
+        const lanes = this.hierarchy.lanes;
+        for (let i = 0; i < lanes.count; i++) {
+            // Check if lane has any block lanes
+            const hasBlockLanes = lanes.blockLanesEndIndices[i] > lanes.blockLanesStartIndices[i];
+            if (!hasBlockLanes) {
                 this.laneLabels[i].style.display = 'none';
                 continue;
             }
 
-            const laneTopY = lane.y + lane.height;
-            const laneBottomY = lane.y;
+            const laneTopY = lanes.ys[i] + lanes.heights[i];
+            const laneBottomY = lanes.ys[i];
 
             const worldTopY = laneTopY + this.camera.y;
             const worldBottomY = laneBottomY + this.camera.y;
@@ -993,8 +1008,8 @@ export class ZoneVisualizer {
 
         // Update only the dynamic content
         const dynamicStats = this.stats.querySelector('.stats-dynamic');
-        if (dynamicStats) {
-            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>Grid: (${this.gridDimX}, ${this.gridDimY}, ${this.gridDimZ}) | Cluster: (${this.clusterDimX}, ${this.clusterDimY}, ${this.clusterDimZ})<br>SMs: ${this.lanes.length.toLocaleString()} | Blocks: ${this.blocks.length.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
+        if (dynamicStats && this.hierarchy) {
+            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>Grid: (${this.gridDimX}, ${this.gridDimY}, ${this.gridDimZ}) | Cluster: (${this.clusterDimX}, ${this.clusterDimY}, ${this.clusterDimZ})<br>SMs: ${this.hierarchy.lanes.count.toLocaleString()} | Blocks: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
         }
         this.lastTime = now;
 
@@ -1044,8 +1059,11 @@ export class ZoneVisualizer {
 
         this.device.queue.writeBuffer(this.gpuResources.uniformBuffer, 0, this.uniformData);
 
-        const topLane = this.lanes[0];
-        const backgroundHeight = topLane.y + topLane.height;
+        if (!this.hierarchy) return;
+
+        const topLaneY = this.hierarchy.lanes.ys[0];
+        const topLaneHeight = this.hierarchy.lanes.heights[0];
+        const backgroundHeight = topLaneY + topLaneHeight;
 
         // Split TIME_RANGE into dual float for high precision
         const [timeRange_high, timeRange_low] = Camera.splitDouble(this.TIME_RANGE);
@@ -1080,19 +1098,19 @@ export class ZoneVisualizer {
 
         renderPass.setPipeline(this.gpuResources.passes.lane.pipeline);
         renderPass.setBindGroup(0, this.gpuResources.passes.lane.bindGroup);
-        renderPass.draw(6, this.lanes.length, 0, 0);
+        renderPass.draw(6, this.hierarchy.lanes.count, 0, 0);
 
         renderPass.setPipeline(this.gpuResources.passes.blockLane.pipeline);
         renderPass.setBindGroup(0, this.gpuResources.passes.blockLane.bindGroup);
-        renderPass.draw(6, this.blockLanes.length, 0, 0);
+        renderPass.draw(6, this.hierarchy.blockLanes.count, 0, 0);
 
         renderPass.setPipeline(this.gpuResources.passes.blockBg.pipeline);
         renderPass.setBindGroup(0, this.gpuResources.passes.blockBg.bindGroup);
-        renderPass.draw(6, this.blocks.length, 0, 0);
+        renderPass.draw(6, this.hierarchy.blocks.count, 0, 0);
 
         renderPass.setPipeline(this.gpuResources.passes.block.pipeline);
         renderPass.setBindGroup(0, this.gpuResources.passes.block.bindGroup);
-        renderPass.draw(6, this.blocks.length, 0, 0);
+        renderPass.draw(6, this.hierarchy.blocks.count, 0, 0);
 
         renderPass.setPipeline(this.gpuResources.passes.zone.pipeline);
         renderPass.setBindGroup(0, this.gpuResources.passes.zone.bindGroup);
