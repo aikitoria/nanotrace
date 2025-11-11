@@ -291,6 +291,12 @@ export class ZoneVisualizer {
             this.animationFrameId = null;
         }
 
+        // Clean up old timeline renderer if it exists
+        if (this.timelineRenderer) {
+            this.timelineRenderer.destroy();
+            this.timelineRenderer = null;
+        }
+
         this.loadingText.textContent = 'Initializing camera and renderers...';
         await new Promise(resolve => setTimeout(resolve, 0));
 
