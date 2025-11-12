@@ -417,14 +417,15 @@ fn vertexMain(
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
     // Read block data from 2 vec4s (8 floats, aligned)
-    let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, width]
-    let block1 = blocks[instanceIndex * 2u + 1u]; // [height, pad, pad, pad]
+    let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, endX_high]
+    let block1 = blocks[instanceIndex * 2u + 1u]; // [endX_low, height, pad, pad]
 
     let startX_high = block0.x;
     let startX_low = block0.y;
     let y = block0.z;
-    let width = block0.w;
-    let height = block1.x;
+    let endX_high = block0.w;
+    let endX_low = block1.x;
+    let height = block1.y;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -437,10 +438,12 @@ fn vertexMain(
 
     let vertex = vertices[vertexIndex];
 
-    // Calculate corner position with double-precision for X
-    let cornerOffsetX = vertex.x * width;
-    let worldCornerX_high = startX_high;
-    let worldCornerX_low = startX_low + cornerOffsetX;
+    // Block starts at startX and extends to endX
+    // Left edge (vertex.x=0): X = startX
+    // Right edge (vertex.x=1): X = endX
+    // Use select() to pick between the two double-single values without arithmetic
+    let worldCornerX_high = select(startX_high, endX_high, vertex.x > 0.5);
+    let worldCornerX_low = select(startX_low, endX_low, vertex.x > 0.5);
 
     // Apply camera transformation using double-precision
     let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
@@ -471,9 +474,11 @@ ${WGSL_FULL_UNIFORMS}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) blockCoord: vec2<f32>,
-    @location(1) @interpolate(flat) isHovered: f32,
-    @location(2) @interpolate(flat) isSelected: f32,
+    @location(0) worldPos: vec2<f32>,
+    @location(1) @interpolate(flat) blockStart: vec2<f32>,
+    @location(2) @interpolate(flat) blockEnd: vec2<f32>,
+    @location(3) @interpolate(flat) isHovered: f32,
+    @location(4) @interpolate(flat) isSelected: f32,
 }
 
 ${WGSL_DOUBLE_PRECISION_FUNCTIONS}
@@ -484,14 +489,15 @@ fn vertexMain(
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
     // Read block data from 2 vec4s (8 floats, aligned)
-    let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, width]
-    let block1 = blocks[instanceIndex * 2u + 1u]; // [height, pad, pad, pad]
+    let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, endX_high]
+    let block1 = blocks[instanceIndex * 2u + 1u]; // [endX_low, height, pad, pad]
 
     let startX_high = block0.x;
     let startX_low = block0.y;
     let y = block0.z;
-    let width = block0.w;
-    let height = block1.x;
+    let endX_high = block0.w;
+    let endX_low = block1.x;
+    let height = block1.y;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
@@ -504,15 +510,12 @@ fn vertexMain(
 
     let vertex = vertices[vertexIndex];
 
-    // Calculate center position with double-precision for X
-    let centerOffsetX = width * 0.5;
-    let centerX_high = startX_high;
-    let centerX_low = startX_low + centerOffsetX;
-
-    // Calculate corner offset from center
-    let cornerOffsetX = vertex.x * width * 0.5;
-    let worldCornerX_high = centerX_high;
-    let worldCornerX_low = centerX_low + cornerOffsetX;
+    // Block starts at startX and extends to endX
+    // Left edge (vertex.x=-1): X = startX
+    // Right edge (vertex.x=1): X = endX
+    // Use select() to pick between the two double-single values without arithmetic
+    let worldCornerX_high = select(startX_high, endX_high, vertex.x > 0.0);
+    let worldCornerX_low = select(startX_low, endX_low, vertex.x > 0.0);
 
     // Apply camera transformation using double-precision
     let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
@@ -526,15 +529,24 @@ fn vertexMain(
     let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     // Selection calculation using high-precision
+    // blockStart = startX, blockEnd = endX (use ds_add to collapse to f32 for comparison)
     let blockStart = ds_add(startX_high, startX_low, 0.0, 0.0);
-    let blockEnd = blockStart + width;
+    let blockEnd = ds_add(endX_high, endX_low, 0.0, 0.0);
     let isFullyInside = uniforms.hasSelection != 0 &&
                        blockStart >= uniforms.selectionStart &&
                        blockEnd <= uniforms.selectionEnd;
 
+    // Compute block bounds in view space (before scale to NDC)
+    let blockStartView = ds_add(startX_high, startX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+    let blockEndView = ds_add(endX_high, endX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+    let blockStartY = y + uniforms.camera_y;
+    let blockEndY = (y + height) + uniforms.camera_y;
+
     var output: VertexOutput;
     output.position = vec4<f32>(ndcPos, 0.0, 1.0);
-    output.blockCoord = vertex;
+    output.worldPos = vec2<f32>(viewX, viewY);
+    output.blockStart = vec2<f32>(blockStartView, blockStartY);
+    output.blockEnd = vec2<f32>(blockEndView, blockEndY);
     output.isHovered = select(0.0, 1.0, i32(instanceIndex) == uniforms.hoveredBlockId);
     output.isSelected = select(0.0, 1.0, isFullyInside);
     return output;
@@ -546,14 +558,25 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let coord = input.blockCoord;
-    let pixelSizeX = fwidth(coord.x);
-    let pixelSizeY = fwidth(coord.y);
+    // Use derivatives on view-space position for pixel-accurate edge detection
+    let pixelSizeX = fwidth(input.worldPos.x);
+    let pixelSizeY = fwidth(input.worldPos.y);
+
+    // Compute distance from edges in view space
+    let distFromLeftEdge = input.worldPos.x - input.blockStart.x;
+    let distFromRightEdge = input.blockEnd.x - input.worldPos.x;
+    let distFromTopEdge = input.blockEnd.y - input.worldPos.y;
+    let distFromBottomEdge = input.worldPos.y - input.blockStart.y;
+
+    // Edge threshold in view space (1 pixel worth, same as zones)
     let edgeThicknessX = pixelSizeX * ${OUTLINE_THICKNESS_MULTIPLIER};
     let edgeThicknessY = pixelSizeY * ${OUTLINE_THICKNESS_MULTIPLIER};
-    let distFromEdgeX = 1.0 - abs(coord.x);
-    let distFromEdgeY = 1.0 - abs(coord.y);
-    let isEdge = distFromEdgeX < edgeThicknessX || distFromEdgeY < edgeThicknessY;
+
+    // Check if we're on an edge
+    let isEdge = distFromLeftEdge < edgeThicknessX ||
+                 distFromRightEdge < edgeThicknessX ||
+                 distFromTopEdge < edgeThicknessY ||
+                 distFromBottomEdge < edgeThicknessY;
 
     if (!isEdge) {
         discard;
@@ -804,9 +827,9 @@ function createBackgroundPipeline(
  *   vec4: [y, height, width_high, width_low]
  *   Block lane width uses double-single precision for high-precision rendering at extreme zoom
  * - blockBuffer: Block geometry (8 floats per block, aligned to 2 vec4s):
- *   vec4 #0: [startX_high, startX_low, y, width]
- *   vec4 #1: [height, pad, pad, pad]
- *   Block X uses double-single precision to avoid Float32 precision loss at extreme zoom
+ *   vec4 #0: [startX_high, startX_low, y, endX_high]
+ *   vec4 #1: [endX_low, height, pad, pad]
+ *   Block startX and endX use double-single precision to avoid Float32 precision loss at extreme zoom
  *
  * Converts nanoseconds (SoA storage) to milliseconds (GPU rendering).
  * Uses mappedAtCreation for efficient one-time upload (no COPY_DST needed).
@@ -900,21 +923,20 @@ export function createGPUBuffers(
 
     const blockData = new Float32Array(blocks.count * BLOCK_BUFFER_FLOATS);
     for (let i = 0; i < blocks.count; i++) {
-        // Convert block startX from nanoseconds to milliseconds
+        // Convert block startX and endX from nanoseconds to milliseconds
         const startXMs = blocks.startsX[i] * NS_TO_MS;
+        const endXMs = blocks.endsX[i] * NS_TO_MS;
         const [startX_high, startX_low] = Camera.splitDouble(startXMs);
+        const [endX_high, endX_low] = Camera.splitDouble(endXMs);
 
-        // Convert block width from nanoseconds to milliseconds
-        const widthNs = blocks.endsX[i] - blocks.startsX[i];
-        const widthMs = widthNs * NS_TO_MS;
-
-        // vec4 #0: [startX_high, startX_low, y, width]
+        // vec4 #0: [startX_high, startX_low, y, endX_high]
         blockData[i * BLOCK_BUFFER_FLOATS + 0] = startX_high;
         blockData[i * BLOCK_BUFFER_FLOATS + 1] = startX_low;
         blockData[i * BLOCK_BUFFER_FLOATS + 2] = blocks.ys[i];
-        blockData[i * BLOCK_BUFFER_FLOATS + 3] = widthMs;
-        // vec4 #1: [height, pad, pad, pad] - padding already zero-initialized
-        blockData[i * BLOCK_BUFFER_FLOATS + 4] = blocks.heights[i];
+        blockData[i * BLOCK_BUFFER_FLOATS + 3] = endX_high;
+        // vec4 #1: [endX_low, height, pad, pad] - padding already zero-initialized
+        blockData[i * BLOCK_BUFFER_FLOATS + 4] = endX_low;
+        blockData[i * BLOCK_BUFFER_FLOATS + 5] = blocks.heights[i];
     }
 
     const blockBuffer = device.createBuffer({
