@@ -110,9 +110,11 @@ All operations are forceinlined and use predicated execution for zero overhead w
   - Stores grid and cluster dimensions from construction
 - `dynamic_trace_builder<NumLanes>(max_events, grid_dims, cluster_dims=0)` - Dynamic tensor (always event_width=8)
   - Constructor: `(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0,0,0))`
+- `static_trace_builder` / `dynamic_trace_builder` - Configure track types per tensor
+  - `set_track_type<TrackType>()` - Set default track type for all lanes in this tensor
+  - `set_track_type<TrackType>(uint32_t lane)` - Override track type for specific lane in this tensor
 - `trace_writer` - Generates `.nanotrace` file from tensors
-  - `set_block_type<BlockType>()` - Set block format descriptor (call before add_tensor)
-  - `set_track_type<TrackType>()` - Set track format descriptor (call before add_tensor)
+  - `set_block_type<BlockType>()` - Set default block format descriptor (call before add_tensor)
   - `register_trace_type<T>()` - Register trace type (throws on duplicate IDs)
   - `add_tensor(builder)` - Add tensor to trace file
   - Copies device buffers to host
@@ -123,6 +125,7 @@ All operations are forceinlined and use predicated execution for zero overhead w
   - Automatically maps `__COUNTER__` IDs to file indices for all format types
   - Clamps event durations to minimum 32ns (global timer resolution)
   - Optional deflate compression (enabled by default)
+  - **Logs statistics to stdout**: Per-tensor lane counts, max events/lane, total duration, compression ratio
 - `builder.reset()` - Reset trace tensor to zeros (cudaMemset)
   - **Best practice**: Warmup GPU (10 iterations) → reset() → traced run
   - Avoids cold-start timing artifacts in traces
@@ -191,13 +194,17 @@ __global__ void kernel(nanotrace::static_tensor_handle<8,2> handle, dim3 grid) {
     nanotrace::finish_lane(handle, lane);
 }
 
-// Write trace (set_block_type and set_track_type before add_tensor)
+// Configure track types on the tensor
+trace.set_track_type<MyTrack>();  // Default for all lanes in this tensor
+// Optional: Override track type for specific lanes
+// trace.set_track_type<SpecialTrack>(7);  // Lane 7 uses SpecialTrack
+
+// Write trace (set_block_type before add_tensor)
 nanotrace::trace_writer writer("kernel");
 writer.set_block_type<MyBlock>();
-writer.set_track_type<MyTrack>();
 writer.register_trace_type<TraceKernel>();
 writer.add_tensor(trace);
-writer.write("out.nanotrace");  // Compressed by default
+writer.write("out.nanotrace");  // Compressed by default, logs stats to stdout
 ```
 
 ### Build Requirements

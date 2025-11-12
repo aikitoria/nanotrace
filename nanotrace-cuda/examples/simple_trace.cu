@@ -74,6 +74,7 @@ int main() {
     // Create trace tensor
     // Each block has 8 lanes (one per warp), 100 events per lane
     TraceConfig trace_tensor(100, grid);
+    trace_tensor.set_track_type<SimpleTrack>();
 
     printf("Launching kernel with grid (%u, %u, %u) and block (%u, %u, %u)\n",
            grid.x, grid.y, grid.z, block.x, block.y, block.z);
@@ -108,8 +109,6 @@ int main() {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("simple_kernel");
     writer.set_block_type<SimpleBlock>();
-    writer.set_track_type<SimpleTrack>();
-    writer.register_trace_type<TraceKernelExec>();
     writer.add_tensor(trace_tensor);
     writer.write("simple_trace.nanotrace", false);  // Uncompressed for now
 

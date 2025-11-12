@@ -8,7 +8,8 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Set CUDA architecture to Blackwell (Compute Capability 10.0)
-set(CMAKE_CUDA_ARCHITECTURES 100)
+# Use 100a for sm_100a (architecture-specific, required for tcgen05)
+set(CMAKE_CUDA_ARCHITECTURES "100a")
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)

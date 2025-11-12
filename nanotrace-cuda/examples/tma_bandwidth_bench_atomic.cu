@@ -35,6 +35,22 @@ NANOTRACE_DEFINE_TRACE_TYPE(TileTransfer, "Tile {0},{1}", "Transfer tile ({0},{1
 NANOTRACE_DEFINE_BLOCK_TYPE(TMABlock, "Block {blockLinear}", "Block {blockLinear} on SM");
 NANOTRACE_DEFINE_TRACK_TYPE(BufferTrack, "Buffer {lane}", "Buffer {lane}", 0);
 
+// L2 cache flush kernel
+__global__ void flush_l2_kernel(uint8_t* buffer, size_t size) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = gridDim.x * blockDim.x;
+
+    uint8_t sum = 0;
+    for (size_t i = idx; i < size; i += stride) {
+        sum += buffer[i];
+    }
+
+    // Write back to prevent optimization
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        buffer[0] = sum;
+    }
+}
+
 PFN_cuTensorMapEncodeTiled_v12000 get_cuTensorMapEncodeTiled() {
     cudaDriverEntryPointQueryResult driver_status;
     void* cuTensorMapEncodeTiled_ptr = nullptr;
@@ -293,14 +309,20 @@ int main(int argc, char** argv) {
 
     using TraceConfig = nanotrace::static_trace_builder<3, TileTransfer, TileTransfer, TileTransfer>;
     TraceConfig trace_tensor(max_events_per_lane, grid);
+    trace_tensor.set_track_type<BufferTrack>();
 
     printf("Trace setup: %d blocks × 3 lanes/block, %u max events/lane\n",
            num_blocks, max_events_per_lane);
 
+    // Allocate L2 flush buffer (128 MB should be enough to flush L2)
+    uint8_t* d_flush_buffer;
+    size_t flush_size = 128 * 1024 * 1024;  // 128 MB in bytes
+    CUDA_CHECK(cudaMalloc(&d_flush_buffer, flush_size));
+    CUDA_CHECK(cudaMemset(d_flush_buffer, 0, flush_size));
+    CUDA_CHECK(cudaGetLastError());
+
     printf("\nWarming up...\n");
     int threads_per_block = 32;
-
-    CUDA_CHECK(cudaGetLastError());
 
     printf("Launching kernel with: blocks=%d, threads=%d, smem=%zu (dynamic load balancing)\n",
            num_blocks, threads_per_block, shared_mem_size);
@@ -308,6 +330,7 @@ int main(int argc, char** argv) {
     // Warmup runs
     for (int i = 0; i < 5; i++) {
         CUDA_CHECK(cudaMemset(d_tile_counter, 0, sizeof(int)));
+        flush_l2_kernel<<<256, 256>>>(d_flush_buffer, flush_size);
         tma_bandwidth_kernel<<<grid, threads_per_block, shared_mem_size>>>(
             tensor_map, total_tiles, d_tile_counter, trace_tensor.get_handle());
     }
@@ -332,6 +355,9 @@ int main(int argc, char** argv) {
     for (int i = 0; i < num_iters; i++) {
         CUDA_CHECK(cudaMemset(d_tile_counter, 0, sizeof(int)));
 
+        // Flush L2 before each timed iteration (no sync - let it overlap)
+        flush_l2_kernel<<<256, 256>>>(d_flush_buffer, flush_size);
+
         CUDA_CHECK(cudaEventRecord(start));
         tma_bandwidth_kernel<<<grid, threads_per_block, shared_mem_size>>>(
             tensor_map, total_tiles, d_tile_counter, trace_tensor.get_handle());
@@ -346,7 +372,7 @@ int main(int argc, char** argv) {
 
     double elapsed_s = elapsed_ms / 1000.0;
     double bandwidth_gb_s = TENSOR_SIZE_BYTES / (1000.0 * 1000 * 1000) / elapsed_s;
-    double peak_gb_s = 8000.0;
+    double peak_gb_s = 8000.0;  // B200 HBM3e peak: 8 TB/s
 
     printf("\n=== Results ===\n");
     printf("Elapsed time: %.3f ms\n", elapsed_ms);
@@ -358,6 +384,10 @@ int main(int argc, char** argv) {
     // Reset and run traced iteration
     printf("\nRunning traced iteration...\n");
     trace_tensor.reset();
+
+    // Flush L2 before traced run
+    flush_l2_kernel<<<256, 256>>>(d_flush_buffer, flush_size);
+
     CUDA_CHECK(cudaMemset(d_tile_counter, 0, sizeof(int)));
     tma_bandwidth_kernel<<<grid, threads_per_block, shared_mem_size>>>(
         tensor_map, total_tiles, d_tile_counter, trace_tensor.get_handle());
@@ -366,7 +396,6 @@ int main(int argc, char** argv) {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("tma_bandwidth_atomic");
     writer.set_block_type<TMABlock>();
-    writer.set_track_type<BufferTrack>();
     writer.register_trace_type<TileTransfer>();
     writer.add_tensor(trace_tensor);
     writer.write("tma_bandwidth_atomic.nanotrace", true);
@@ -376,6 +405,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventDestroy(stop));
     CUDA_CHECK(cudaFree(d_tensor));
     CUDA_CHECK(cudaFree(d_tile_counter));
+    CUDA_CHECK(cudaFree(d_flush_buffer));
 
     return 0;
 }

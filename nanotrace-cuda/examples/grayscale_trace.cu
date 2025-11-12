@@ -130,6 +130,7 @@ int main() {
     using TraceConfig = nanotrace::static_trace_builder<1, TraceWarp>;
 
     TraceConfig trace_tensor(1, grid);  // 1 event per lane
+    trace_tensor.set_track_type<WarpTrack>();
 
     // Allocate L2 flush buffer (128 MB should be enough to flush L2)
     float* d_flush_buffer;
@@ -191,7 +192,6 @@ int main() {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("rgb_to_grayscale");
     writer.set_block_type<GrayscaleBlock>();
-    writer.set_track_type<WarpTrack>();
     writer.register_trace_type<TraceWarp>();
     writer.add_tensor(trace_tensor);
     writer.write("grayscale_trace.nanotrace");

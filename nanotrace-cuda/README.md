@@ -87,12 +87,14 @@ __global__ void my_kernel(
 my_kernel<<<grid, block>>>(trace_tensor.get_handle(), grid);
 cudaDeviceSynchronize();
 
+// Configure track type on tensor
+trace_tensor.set_track_type<MyTrack>();
+
 nanotrace::trace_writer writer("my_kernel");
 writer.set_block_type<MyBlock>();
-writer.set_track_type<MyTrack>();
 writer.register_trace_type<TraceKernel>();
 writer.add_tensor(trace_tensor);
-writer.write("output.nanotrace");
+writer.write("output.nanotrace");  // Logs statistics to stdout
 ```
 
 ## API Reference
@@ -201,6 +203,30 @@ public:
 };
 ```
 
+#### Static/Dynamic Trace Builder
+
+```cpp
+template<uint32_t NumLanes, typename... TraceTypes>
+class static_trace_builder {
+public:
+    template<typename TrackType>
+    void set_track_type();  // Set default track type for all lanes in this tensor
+
+    template<typename TrackType>
+    void set_track_type(uint32_t lane);  // Override track type for specific lane
+};
+
+template<uint32_t NumLanes>
+class dynamic_trace_builder {
+public:
+    template<typename TrackType>
+    void set_track_type();  // Set default track type for all lanes in this tensor
+
+    template<typename TrackType>
+    void set_track_type(uint32_t lane);  // Override track type for specific lane
+};
+```
+
 #### Trace Writer
 
 ```cpp
@@ -211,9 +237,6 @@ public:
     template<typename BlockType>
     void set_block_type();
 
-    template<typename TrackType>
-    void set_track_type();
-
     template<typename TraceType>
     void register_trace_type();
 
@@ -221,6 +244,7 @@ public:
     void add_tensor(const Builder& builder);
 
     void write(const char* filename, bool compress = true);
+    // Logs statistics to stdout: tensors, lanes, blocks, events, duration, compression
 };
 ```
 

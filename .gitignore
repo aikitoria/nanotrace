@@ -1,19 +1,9 @@
 # Build outputs
 visualizer/dist/
 visualizer/node_modules/
-visualizer/*.js
-visualizer/*.js.map
 
 # CMake build artifacts
 nanotrace-cuda/build/
-nanotrace-cuda/CMakeCache.txt
-nanotrace-cuda/CMakeFiles/
-nanotrace-cuda/cmake_install.cmake
-nanotrace-cuda/Makefile
-nanotrace-cuda/*.a
-nanotrace-cuda/examples/simple_trace
-nanotrace-cuda/examples/mixed_trace
-nanotrace-cuda/examples/grayscale_trace
 
 # Generated trace files (ignore all by default)
 *.nanotrace
@@ -21,8 +11,8 @@ nanotrace-cuda/examples/grayscale_trace
 # Exception: commit B200 sample traces
 !visualizer/public/samples/*.nanotrace
 
-# Old/obsolete code
-old-warptrace-cuda/
+# Testing directory for development traces
+/testing/
 
 # IDE
 .vscode/

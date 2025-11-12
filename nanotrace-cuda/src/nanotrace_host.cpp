@@ -2,8 +2,8 @@
 #include <fstream>
 #include <cstring>
 #include <cstdio>
-#include <map>
-#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <stdexcept>
 
@@ -13,10 +13,30 @@
 
 namespace nanotrace {
 
+// Hash functions for unordered containers with composite keys
+struct pair_hash {
+    template <typename T1, typename T2>
+    std::size_t operator()(const std::pair<T1, T2>& p) const {
+        auto h1 = std::hash<T1>{}(p.first);
+        auto h2 = std::hash<T2>{}(p.second);
+        return h1 ^ (h2 << 1);
+    }
+};
+
+struct tuple3_hash {
+    template <typename T1, typename T2, typename T3>
+    std::size_t operator()(const std::tuple<T1, T2, T3>& t) const {
+        auto h1 = std::hash<T1>{}(std::get<0>(t));
+        auto h2 = std::hash<T2>{}(std::get<1>(t));
+        auto h3 = std::hash<T3>{}(std::get<2>(t));
+        return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+};
+
 trace_writer::trace_writer(const char* kernel_name)
     : kernel_name(kernel_name)
-    , block_format_id(0)  // Must call set_block_type<>() before write()
-    , track_format_id(0)  // Must call set_track_type<>() before write()
+    , default_block_format_id(0)  // Must call set_block_type<>() before write()
+    , total_lanes_so_far(0)
 {}
 
 trace_writer::~trace_writer() = default;
@@ -241,24 +261,40 @@ void trace_writer::write(const char* filename, bool compress) {
     convert_to_offsets(events, kernel_start_time);
 
     // Step 5: Build format ID mapping (original TraceType::id -> file index)
-    std::map<uint16_t, uint16_t> format_id_map;
+    std::unordered_map<uint16_t, uint16_t> format_id_map;
     for (size_t i = 0; i < formats.size(); ++i) {
         format_id_map[formats[i].id] = static_cast<uint16_t>(i);
     }
 
-    // Translate block and track format IDs to file indices
-    auto block_it = format_id_map.find(block_format_id);
+    // Translate default block and track format IDs to file indices
+    auto block_it = format_id_map.find(default_block_format_id);
     if (block_it != format_id_map.end()) {
-        block_format_id = block_it->second;
+        default_block_format_id = block_it->second;
     } else {
-        throw std::runtime_error("Block type not registered");
+        throw std::runtime_error("Default block type not registered");
     }
 
-    auto track_it = format_id_map.find(track_format_id);
-    if (track_it != format_id_map.end()) {
-        track_format_id = track_it->second;
-    } else {
-        throw std::runtime_error("Track type not registered");
+    // Translate per-tensor track format IDs to file indices
+    for (auto& tensor : tensors) {
+        // Translate default track format ID
+        if (tensor.default_track_format_id != 0) {
+            auto track_it = format_id_map.find(tensor.default_track_format_id);
+            if (track_it != format_id_map.end()) {
+                tensor.default_track_format_id = track_it->second;
+            } else {
+                throw std::runtime_error("Tensor track type not registered");
+            }
+        }
+
+        // Translate per-lane overrides
+        for (auto& [lane, format_id] : tensor.lane_track_format_ids) {
+            auto it = format_id_map.find(format_id);
+            if (it != format_id_map.end()) {
+                format_id = it->second;
+            } else {
+                throw std::runtime_error("Lane track type not registered");
+            }
+        }
     }
 
     // Step 6: Translate event format IDs to file indices
@@ -272,7 +308,7 @@ void trace_writer::write(const char* filename, bool compress) {
     }
 
     // Step 7: Group events by (block_id, lane_id) for writing
-    std::map<std::pair<uint32_t, uint32_t>, std::vector<parsed_event*>> tracks;
+    std::unordered_map<std::pair<uint32_t, uint32_t>, std::vector<parsed_event*>, pair_hash> tracks;
     for (auto& evt : events) {
         tracks[{evt.block_id, evt.lane_id}].push_back(&evt);
     }
@@ -280,7 +316,7 @@ void trace_writer::write(const char* filename, bool compress) {
     // Step 8: Collect unique block descriptors (block_id, cluster_id, sm_id tuples)
     struct block_desc { uint32_t block_id; uint32_t cluster_id; uint16_t sm_id; };
     std::vector<block_desc> block_descriptors;
-    std::set<std::tuple<uint32_t, uint32_t, uint16_t>> seen_blocks;
+    std::unordered_set<std::tuple<uint32_t, uint32_t, uint16_t>, tuple3_hash> seen_blocks;
 
     for (const auto& evt : events) {
         auto key = std::make_tuple(evt.block_id, evt.cluster_id, evt.sm_id);
@@ -296,7 +332,7 @@ void trace_writer::write(const char* filename, bool compress) {
         });
 
     // Build block descriptor ID map after sorting
-    std::map<std::tuple<uint32_t, uint32_t, uint16_t>, uint32_t> block_id_map;
+    std::unordered_map<std::tuple<uint32_t, uint32_t, uint16_t>, uint32_t, tuple3_hash> block_id_map;
     for (size_t i = 0; i < block_descriptors.size(); ++i) {
         const auto& desc = block_descriptors[i];
         block_id_map[{desc.block_id, desc.cluster_id, desc.sm_id}] = static_cast<uint32_t>(i);
@@ -364,7 +400,7 @@ void trace_writer::write(const char* filename, bool compress) {
         write_uint32(payload, desc.block_id);
         write_uint32(payload, desc.cluster_id);
         write_uint16(payload, desc.sm_id);
-        write_uint16(payload, block_format_id);
+        write_uint16(payload, default_block_format_id);
     }
 
     // Write event tracks
@@ -377,9 +413,33 @@ void trace_writer::write(const char* filename, bool compress) {
         uint16_t sm_id = event_ptrs[0]->sm_id;
         uint32_t cluster_id = event_ptrs[0]->cluster_id;
 
+        // Determine which tensor this lane belongs to and get track format ID
+        uint16_t track_format_id = 0;
+        uint32_t lane_offset = 0;
+        for (const auto& tensor : tensors) {
+            if (lane_id >= lane_offset && lane_id < lane_offset + tensor.num_lanes) {
+                // This lane belongs to this tensor
+                uint32_t tensor_relative_lane = lane_id - lane_offset;
+
+                // Check for per-lane override first
+                auto track_it = tensor.lane_track_format_ids.find(tensor_relative_lane);
+                if (track_it != tensor.lane_track_format_ids.end()) {
+                    track_format_id = track_it->second;
+                } else {
+                    track_format_id = tensor.default_track_format_id;
+                }
+                break;
+            }
+            lane_offset += tensor.num_lanes;
+        }
+
+        if (track_format_id == 0) {
+            throw std::runtime_error("Track format ID not set for lane " + std::to_string(lane_id));
+        }
+
         // Write track header
         write_uint32(payload, block_id_map[{block_id, cluster_id, sm_id}]);  // Block descriptor ID
-        write_uint16(payload, track_format_id);  // Track format ID
+        write_uint16(payload, track_format_id);  // Track format ID (from tensor)
         write_uint32(payload, lane_id);  // Lane ID (for {lane} placeholder expansion)
         // No track parameters (track format has 0 params, lane_id is metadata not a param)
         write_uint32(payload, event_ptrs.size());
@@ -419,6 +479,56 @@ void trace_writer::write(const char* filename, bool compress) {
     } else {
         final_payload = std::move(payload);
     }
+
+    // Calculate and log statistics per tensor
+    uint32_t min_duration = UINT32_MAX;
+    uint32_t max_duration = 0;
+    uint64_t min_time = UINT64_MAX;
+    uint64_t max_time = 0;
+
+    for (const auto& evt : events) {
+        uint32_t duration = (evt.duration == 0) ? 32 : evt.duration;
+        if (duration < min_duration) min_duration = duration;
+        if (duration > max_duration) max_duration = duration;
+
+        uint64_t evt_end = evt.time_offset + evt.duration;
+        if (evt.time_offset < min_time) min_time = evt.time_offset;
+        if (evt_end > max_time) max_time = evt_end;
+    }
+
+    uint64_t total_duration_ns = (events.empty()) ? 0 : (max_time - min_time);
+
+    // Log per-tensor statistics
+    printf("Nanotrace: %zu tensors, %zu blocks, %zu total events\n",
+            tensors.size(), block_descriptors.size(), events.size());
+
+    uint32_t lane_offset = 0;
+    for (size_t tensor_idx = 0; tensor_idx < tensors.size(); ++tensor_idx) {
+        const auto& tensor = tensors[tensor_idx];
+
+        // Calculate max events per lane for this tensor
+        uint32_t max_events_this_tensor = 0;
+        for (uint32_t lane_id = lane_offset; lane_id < lane_offset + tensor.num_lanes; ++lane_id) {
+            for (const auto& [key, event_ptrs] : tracks) {
+                if (key.second == lane_id && event_ptrs.size() > max_events_this_tensor) {
+                    max_events_this_tensor = static_cast<uint32_t>(event_ptrs.size());
+                }
+            }
+        }
+
+        printf("  Tensor %zu: %u lanes, max %u events/lane\n",
+                tensor_idx, tensor.num_lanes, max_events_this_tensor);
+
+        lane_offset += tensor.num_lanes;
+    }
+
+    if (!events.empty()) {
+        printf("  Duration: %.3f ms total, events %u-%u ns\n",
+                total_duration_ns / 1e6, min_duration, max_duration);
+    }
+    printf("  Output: %s (%zu bytes uncompressed, %zu compressed = %.1f%%)\n",
+            filename, payload.size(), final_payload.size(),
+            (payload.size() > 0) ? (100.0 * final_payload.size() / payload.size()) : 0.0);
 
     // Write to file
     std::ofstream file(filename, std::ios::binary);

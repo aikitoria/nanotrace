@@ -168,8 +168,10 @@ int main() {
     // Create trace tensors
     // Static lanes: max 10 events (warps 0-1)
     TraceConfig1 static_tensor(10, grid);
+    static_tensor.set_track_type<WarpTrack>();
     // Dynamic lanes: 6 events (warps 8-11)
     TraceConfig2 dynamic_tensor(6, grid);
+    dynamic_tensor.set_track_type<WarpTrack>();
 
     printf("Launching kernel with grid (%u, %u, %u) and block (%u, %u, %u)\n",
            grid.x, grid.y, grid.z, block.x, block.y, block.z);
@@ -211,7 +213,6 @@ int main() {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("mixed_kernel");
     writer.set_block_type<BlockTrace>();
-    writer.set_track_type<WarpTrack>();
     writer.register_trace_type<TraceKernel>();
     writer.register_trace_type<TraceLoad>();
     writer.register_trace_type<TraceCompute>();

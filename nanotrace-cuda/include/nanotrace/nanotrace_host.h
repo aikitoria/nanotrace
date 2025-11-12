@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <tuple>
 #include <utility>
 #include <stdexcept>
@@ -86,12 +87,26 @@ public:
         cudaMemset(d_buffer, 0, buffer_size);
     }
 
+    template<typename TrackType>
+    void set_track_type() {
+        static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
+        default_track_format_id = TrackType::id;
+    }
+
+    template<typename TrackType>
+    void set_track_type(uint32_t lane) {
+        static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
+        lane_track_format_ids[lane] = TrackType::id;
+    }
+
     uint32_t* d_buffer;
     dim3 grid_dims;
     dim3 cluster_dims;
     uint32_t total_blocks;
     uint32_t row_stride;
     size_t buffer_size;
+    uint16_t default_track_format_id = 0;
+    std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
 };
 
 // ============================================================================
@@ -145,12 +160,26 @@ public:
         cudaMemset(d_buffer, 0, buffer_size);
     }
 
+    template<typename TrackType>
+    void set_track_type() {
+        static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
+        default_track_format_id = TrackType::id;
+    }
+
+    template<typename TrackType>
+    void set_track_type(uint32_t lane) {
+        static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
+        lane_track_format_ids[lane] = TrackType::id;
+    }
+
     uint32_t* d_buffer;
     dim3 grid_dims;
     dim3 cluster_dims;
     uint32_t total_blocks;
     uint32_t row_stride;
     size_t buffer_size;
+    uint16_t default_track_format_id = 0;
+    std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
 };
 
 // ============================================================================
@@ -173,9 +202,6 @@ public:
 
     template<typename BlockType>
     void set_block_type();
-
-    template<typename TrackType>
-    void set_track_type();
 
     template<uint32_t NumLanes, typename... TraceTypes>
     void add_tensor(const static_trace_builder<NumLanes, TraceTypes...>& builder);
@@ -203,6 +229,8 @@ private:
         uint32_t row_stride;
         uint32_t event_width;
         std::vector<uint16_t> lane_format_ids;  // 0xFFFF for dynamic lanes
+        uint16_t default_track_format_id;  // Default track type for this tensor
+        std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;  // Per-lane overrides (relative to tensor)
     };
 
     struct parsed_event {
@@ -218,10 +246,10 @@ private:
     };
 
     std::string kernel_name;
-    uint16_t block_format_id;
-    uint16_t track_format_id;
+    uint16_t default_block_format_id;
     std::vector<format_descriptor> formats;
     std::vector<tensor_info> tensors;
+    uint32_t total_lanes_so_far;  // Track lane offset for multi-tensor lane IDs
 
     void write_uint8(std::vector<uint8_t>& buf, uint8_t val);
     void write_uint16(std::vector<uint8_t>& buf, uint16_t val);
@@ -270,33 +298,12 @@ void trace_writer::set_block_type() {
         }
     }
 
-    block_format_id = BlockType::id;
+    default_block_format_id = BlockType::id;
     formats.push_back({
         BlockType::id,
         BlockType::label_string,
         BlockType::tooltip_string,
         BlockType::param_count
-    });
-}
-
-template<typename TrackType>
-void trace_writer::set_track_type() {
-    static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
-
-    // Check for duplicate track type ID
-    for (const auto& fmt : formats) {
-        if (fmt.id == TrackType::id) {
-            throw std::runtime_error(std::string("Duplicate track type ID ") +
-                                     std::to_string(TrackType::id));
-        }
-    }
-
-    track_format_id = TrackType::id;
-    formats.push_back({
-        TrackType::id,
-        TrackType::label_string,
-        TrackType::tooltip_string,
-        TrackType::param_count
     });
 }
 
@@ -309,6 +316,36 @@ void trace_writer::add_tensor(const static_trace_builder<NumLanes, TraceTypes...
     [&]<size_t... Is>(std::index_sequence<Is...>) {
         (format_ids.push_back(builder.template get_lane_format_id<Is>()), ...);
     }(std::make_index_sequence<NumLanes>{});
+
+    // Register track types from builder (both default and per-lane overrides)
+    // Register default track type if set
+    if (builder.default_track_format_id != 0) {
+        bool found = false;
+        for (const auto& fmt : formats) {
+            if (fmt.id == builder.default_track_format_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("Track type must be registered before using it in tensor. "
+                                     "Call tensor.set_track_type<T>() after registering the type.");
+        }
+    }
+
+    // Register per-lane track type overrides if any
+    for (const auto& [lane, track_id] : builder.lane_track_format_ids) {
+        bool found = false;
+        for (const auto& fmt : formats) {
+            if (fmt.id == track_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("Track type must be registered before using it in tensor.");
+        }
+    }
 
     // Allocate host buffer and copy from device
     size_t buffer_size = builder.total_blocks * NumLanes * builder.row_stride;
@@ -326,7 +363,9 @@ void trace_writer::add_tensor(const static_trace_builder<NumLanes, TraceTypes...
         NumLanes,
         builder.row_stride,
         builder.max_event_width,
-        std::move(format_ids)
+        std::move(format_ids),
+        builder.default_track_format_id,
+        builder.lane_track_format_ids
     });
 }
 
@@ -334,6 +373,33 @@ template<uint32_t NumLanes>
 void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
     // Dynamic tensor: all lanes have format_id = 0xFFFF
     std::vector<uint16_t> format_ids(NumLanes, 0xFFFF);
+
+    // Register track types from builder
+    if (builder.default_track_format_id != 0) {
+        bool found = false;
+        for (const auto& fmt : formats) {
+            if (fmt.id == builder.default_track_format_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("Track type must be registered before using it in tensor.");
+        }
+    }
+
+    for (const auto& [lane, track_id] : builder.lane_track_format_ids) {
+        bool found = false;
+        for (const auto& fmt : formats) {
+            if (fmt.id == track_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("Track type must be registered before using it in tensor.");
+        }
+    }
 
     // Allocate host buffer and copy from device
     size_t buffer_size = builder.total_blocks * NumLanes * builder.row_stride;
@@ -351,7 +417,9 @@ void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
         NumLanes,
         builder.row_stride,
         8,  // event_width for dynamic
-        std::move(format_ids)
+        std::move(format_ids),
+        builder.default_track_format_id,
+        builder.lane_track_format_ids
     });
 }
 

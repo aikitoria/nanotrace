@@ -72,12 +72,14 @@ __global__ void kernel(nanotrace::static_tensor_handle<8, 2> handle) {
 int main() {
     kernel<<<dim3(16,1,1), dim3(256,1,1)>>>(trace.get_handle());
 
+    // Configure track type on tensor
+    trace.set_track_type<Warp>();
+
     nanotrace::trace_writer writer("kernel");
     writer.set_block_type<Block>();
-    writer.set_track_type<Warp>();
     writer.register_trace_type<Work>();
     writer.add_tensor(trace);
-    writer.write("trace.nanotrace");
+    writer.write("trace.nanotrace");  // Logs statistics to stdout
 }
 ```
 
@@ -140,6 +142,10 @@ nanotrace/
 └── docs/
     └── nanotrace.md         # Binary format specification
 ```
+
+## Contributing & Feedback
+
+This library is a work in progress and the API may change as it evolves. Suggestions and ideas are welcome! You can find me in the [GPU MODE Discord](https://discord.gg/gpumode).
 
 ## License
 
