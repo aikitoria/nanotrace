@@ -86,6 +86,9 @@ enum class lane_type : uint8_t {
         static constexpr const char* tooltip_string = tooltip_str; \
         static constexpr uint8_t param_count = pcount; \
         static constexpr nanotrace::lane_type usage = lane_usage; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count \
+        }; \
     }
 
 // Macro to define block types at compile time
@@ -96,6 +99,9 @@ enum class lane_type : uint8_t {
         static constexpr const char* tooltip_string = tooltip_str; \
         static constexpr uint8_t param_count = 0; \
         static constexpr bool is_block_type = true; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count \
+        }; \
     }
 
 // Macro to define track types at compile time
@@ -106,6 +112,9 @@ enum class lane_type : uint8_t {
         static constexpr const char* tooltip_string = tooltip_str; \
         static constexpr uint8_t param_count = pcount; \
         static constexpr bool is_track_type = true; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count \
+        }; \
     }
 
 // ============================================================================

@@ -396,7 +396,6 @@ int main(int argc, char** argv) {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("tma_bandwidth_atomic");
     writer.set_block_type<TMABlock>();
-    writer.register_trace_type<TileTransfer>();
     writer.add_tensor(trace_tensor);
     writer.write("tma_bandwidth_atomic.nanotrace", true);
     printf("Trace written to tma_bandwidth_atomic.nanotrace\n");

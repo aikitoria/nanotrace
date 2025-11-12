@@ -192,7 +192,6 @@ int main() {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("rgb_to_grayscale");
     writer.set_block_type<GrayscaleBlock>();
-    writer.register_trace_type<TraceWarp>();
     writer.add_tensor(trace_tensor);
     writer.write("grayscale_trace.nanotrace");
 

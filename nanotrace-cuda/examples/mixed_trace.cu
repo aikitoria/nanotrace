@@ -213,8 +213,8 @@ int main() {
     printf("Writing trace file...\n");
     nanotrace::trace_writer writer("mixed_kernel");
     writer.set_block_type<BlockTrace>();
-    writer.register_trace_type<TraceKernel>();
-    writer.register_trace_type<TraceLoad>();
+    // TraceKernel and TraceLoad are auto-registered from static tensor
+    // TraceCompute and TraceStore must be manually registered for dynamic tensor
     writer.register_trace_type<TraceCompute>();
     writer.register_trace_type<TraceStore>();
 

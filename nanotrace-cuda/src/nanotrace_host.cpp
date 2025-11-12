@@ -2,6 +2,7 @@
 #include <fstream>
 #include <cstring>
 #include <cstdio>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -310,7 +311,8 @@ void trace_writer::write(const char* filename, bool compress) {
     }
 
     // Step 7: Group events by (block_id, lane_id) for writing
-    std::unordered_map<std::pair<uint32_t, uint32_t>, std::vector<parsed_event*>, pair_hash> tracks;
+    // Use map (not unordered_map) to ensure tracks are written in sorted order
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<parsed_event*>> tracks;
     for (auto& evt : events) {
         tracks[{evt.block_id, evt.lane_id}].push_back(&evt);
     }
@@ -337,7 +339,7 @@ void trace_writer::write(const char* filename, bool compress) {
     std::unordered_map<std::tuple<uint32_t, uint32_t, uint16_t>, uint32_t, tuple3_hash> block_id_map;
     for (size_t i = 0; i < block_descriptors.size(); ++i) {
         const auto& desc = block_descriptors[i];
-        block_id_map[{desc.block_id, desc.cluster_id, desc.sm_id}] = static_cast<uint32_t>(i);
+        block_id_map[std::make_tuple(desc.block_id, desc.cluster_id, desc.sm_id)] = static_cast<uint32_t>(i);
     }
 
     // Step 7: Write binary file
@@ -440,7 +442,7 @@ void trace_writer::write(const char* filename, bool compress) {
         }
 
         // Write track header
-        write_uint32(payload, block_id_map[{block_id, cluster_id, sm_id}]);  // Block descriptor ID
+        write_uint32(payload, block_id_map[std::make_tuple(block_id, cluster_id, sm_id)]);  // Block descriptor ID
         write_uint16(payload, track_format_id);  // Track format ID (from tensor)
         write_uint32(payload, lane_id);  // Lane ID (for {lane} placeholder expansion)
         // No track parameters (track format has 0 params, lane_id is metadata not a param)

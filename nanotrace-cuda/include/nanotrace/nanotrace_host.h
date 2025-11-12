@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -12,6 +13,24 @@
 #include "nanotrace.cuh"
 
 namespace nanotrace {
+
+// ============================================================================
+// Format descriptor (global)
+// ============================================================================
+
+struct format_descriptor {
+    const char* label_string;
+    const char* tooltip_string;
+    uint16_t id;
+    uint8_t param_count;
+
+    bool operator==(const format_descriptor& other) const {
+        return id == other.id &&
+               param_count == other.param_count &&
+               std::strcmp(label_string, other.label_string) == 0 &&
+               std::strcmp(tooltip_string, other.tooltip_string) == 0;
+    }
+};
 
 // ============================================================================
 // Static trace builder
@@ -61,6 +80,9 @@ public:
 
         buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
         cudaMalloc(&d_buffer, buffer_size);
+
+        // Store trace type descriptors for auto-registration
+        (format_descriptors.push_back(TraceTypes::descriptor), ...);
     }
 
     ~static_trace_builder() {
@@ -91,12 +113,16 @@ public:
     void set_track_type() {
         static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
         default_track_format_id = TrackType::id;
+        // Store format descriptor for auto-registration
+        format_descriptors.push_back(TrackType::descriptor);
     }
 
     template<typename TrackType>
     void set_track_type(uint32_t lane) {
         static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
         lane_track_format_ids[lane] = TrackType::id;
+        // Store format descriptor for auto-registration
+        format_descriptors.push_back(TrackType::descriptor);
     }
 
     uint32_t* d_buffer;
@@ -107,6 +133,7 @@ public:
     size_t buffer_size;
     uint16_t default_track_format_id = 0;
     std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
+    std::vector<format_descriptor> format_descriptors;
 };
 
 // ============================================================================
@@ -164,12 +191,16 @@ public:
     void set_track_type() {
         static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
         default_track_format_id = TrackType::id;
+        // Store format descriptor for auto-registration
+        format_descriptors.push_back(TrackType::descriptor);
     }
 
     template<typename TrackType>
     void set_track_type(uint32_t lane) {
         static_assert(TrackType::is_track_type, "Must use NANOTRACE_DEFINE_TRACK_TYPE macro");
         lane_track_format_ids[lane] = TrackType::id;
+        // Store format descriptor for auto-registration
+        format_descriptors.push_back(TrackType::descriptor);
     }
 
     uint32_t* d_buffer;
@@ -180,6 +211,7 @@ public:
     size_t buffer_size;
     uint16_t default_track_format_id = 0;
     std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
+    std::vector<format_descriptor> format_descriptors;
 };
 
 // ============================================================================
@@ -212,13 +244,6 @@ public:
     void write(const char* filename, bool compress = true);
 
 private:
-    struct format_descriptor {
-        uint16_t id;
-        std::string label_string;
-        std::string tooltip_string;
-        uint8_t param_count;
-    };
-
     struct tensor_info {
         uint32_t* device_buffer;
         std::vector<uint32_t> host_buffer;  // Copied from device
@@ -278,12 +303,7 @@ void trace_writer::register_trace_type() {
         }
     }
 
-    formats.push_back({
-        TraceType::id,
-        TraceType::label_string,
-        TraceType::tooltip_string,
-        TraceType::param_count
-    });
+    formats.push_back(TraceType::descriptor);
 }
 
 template<typename BlockType>
@@ -299,12 +319,7 @@ void trace_writer::set_block_type() {
     }
 
     default_block_format_id = BlockType::id;
-    formats.push_back({
-        BlockType::id,
-        BlockType::label_string,
-        BlockType::tooltip_string,
-        BlockType::param_count
-    });
+    formats.push_back(BlockType::descriptor);
 }
 
 template<uint32_t NumLanes, typename... TraceTypes>
@@ -317,33 +332,25 @@ void trace_writer::add_tensor(const static_trace_builder<NumLanes, TraceTypes...
         (format_ids.push_back(builder.template get_lane_format_id<Is>()), ...);
     }(std::make_index_sequence<NumLanes>{});
 
-    // Register track types from builder (both default and per-lane overrides)
-    // Register default track type if set
-    if (builder.default_track_format_id != 0) {
+    // Auto-register format descriptors from builder (trace types and track types)
+    for (const auto& desc : builder.format_descriptors) {
+        // Check if already registered or if ID collision
         bool found = false;
         for (const auto& fmt : formats) {
-            if (fmt.id == builder.default_track_format_id) {
+            if (fmt.id == desc.id) {
+                // Check if it's the same type or a collision
+                if (!(fmt == desc)) {
+                    throw std::runtime_error(std::string("Duplicate format ID ") +
+                                             std::to_string(desc.id) +
+                                             " (__COUNTER__ collision)");
+                }
                 found = true;
                 break;
             }
         }
+        // Auto-register if not found
         if (!found) {
-            throw std::runtime_error("Track type must be registered before using it in tensor. "
-                                     "Call tensor.set_track_type<T>() after registering the type.");
-        }
-    }
-
-    // Register per-lane track type overrides if any
-    for (const auto& [lane, track_id] : builder.lane_track_format_ids) {
-        bool found = false;
-        for (const auto& fmt : formats) {
-            if (fmt.id == track_id) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            throw std::runtime_error("Track type must be registered before using it in tensor.");
+            formats.push_back(desc);
         }
     }
 
@@ -374,30 +381,25 @@ void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
     // Dynamic tensor: all lanes have format_id = 0xFFFF
     std::vector<uint16_t> format_ids(NumLanes, 0xFFFF);
 
-    // Register track types from builder
-    if (builder.default_track_format_id != 0) {
+    // Auto-register format descriptors from builder (track types)
+    for (const auto& desc : builder.format_descriptors) {
+        // Check if already registered or if ID collision
         bool found = false;
         for (const auto& fmt : formats) {
-            if (fmt.id == builder.default_track_format_id) {
+            if (fmt.id == desc.id) {
+                // Check if it's the same type or a collision
+                if (!(fmt == desc)) {
+                    throw std::runtime_error(std::string("Duplicate format ID ") +
+                                             std::to_string(desc.id) +
+                                             " (__COUNTER__ collision)");
+                }
                 found = true;
                 break;
             }
         }
+        // Auto-register if not found
         if (!found) {
-            throw std::runtime_error("Track type must be registered before using it in tensor.");
-        }
-    }
-
-    for (const auto& [lane, track_id] : builder.lane_track_format_ids) {
-        bool found = false;
-        for (const auto& fmt : formats) {
-            if (fmt.id == track_id) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            throw std::runtime_error("Track type must be registered before using it in tensor.");
+            formats.push_back(desc);
         }
     }
 
