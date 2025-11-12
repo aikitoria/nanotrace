@@ -9,6 +9,31 @@ High-performance CUDA tracing library for GPU kernel execution profiling. Genera
 - **Flexible**: Support for static lanes (fixed trace type) and dynamic lanes (mixed trace types)
 - **Heterogeneous tensors**: Multiple trace tensors with different event widths
 - **Clean API**: Simple `start()` → `end()` → `finish_lane()` workflow
+- **Conditional compilation**: Can be fully disabled at compile time with zero runtime overhead
+
+## Disabling Tracing
+
+Nanotrace supports compile-time disabling to completely eliminate tracing overhead:
+
+### NANOTRACE_DISABLED
+
+Disables all device-side instrumentation. All API calls become empty inline stubs that the compiler optimizes away entirely.
+
+```bash
+nvcc -DNANOTRACE_DISABLED -arch=sm_100a your_kernel.cu
+```
+
+When enabled, your code continues to compile and run normally, but produces no trace data and has zero performance impact.
+
+### NANOTRACE_NO_LOG
+
+Disables host-side logging output (statistics printed during trace file write). Trace files are still generated normally.
+
+```bash
+nvcc -DNANOTRACE_NO_LOG your_kernel.cu
+```
+
+Useful for production builds where you want trace files but don't need console output.
 
 ## Performance Optimizations
 

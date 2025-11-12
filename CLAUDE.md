@@ -102,6 +102,11 @@ All operations are forceinlined and use predicated execution for zero overhead w
 
 **Important**: Types can be defined in any order. The `trace_writer` automatically maps `__COUNTER__` IDs to sequential file indices, so block/track/trace types don't need to be defined in a specific order.
 
+**Disabling Tracing**:
+- `NANOTRACE_DISABLED` - Compile-time disable for device-side tracing (removes all instrumentation overhead)
+- `NANOTRACE_NO_LOG` - Disable host-side logging output (statistics during trace write)
+- **CRITICAL**: When adding new types, templates, or functions to `nanotrace.cuh`, ALWAYS update the `#ifdef NANOTRACE_DISABLED` section at the top of the file with corresponding empty stubs to maintain API compatibility
+
 ### Host-Side API (nanotrace_host.h/cpp)
 - `static_trace_builder<NumLanes, TraceTypes...>(max_events, grid_dims, cluster_dims=0)` - Static tensor with per-lane trace types
   - Constructor: `(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0,0,0))`

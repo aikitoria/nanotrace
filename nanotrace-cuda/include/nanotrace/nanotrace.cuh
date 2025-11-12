@@ -2,6 +2,74 @@
 
 #include <cstdint>
 
+#ifdef NANOTRACE_DISABLED
+
+namespace nanotrace {
+
+enum class lane_type : uint8_t { STATIC, DYNAMIC };
+
+template<uint32_t NumLanes, uint32_t MaxEventWidth>
+struct static_tensor_handle {};
+
+template<uint32_t NumLanes>
+struct dynamic_tensor_handle {};
+
+struct start_token {};
+
+template<uint32_t MaxEventWidth>
+class lane_context_static {
+public:
+    __device__ __forceinline__ bool enabled() const { return false; }
+};
+
+class lane_context_dynamic {
+public:
+    __device__ __forceinline__ bool enabled() const { return false; }
+};
+
+__device__ __forceinline__ start_token start() { return start_token{}; }
+
+__device__ __forceinline__ start_token start_zero() { return start_token{}; }
+
+template<uint32_t NumLanes, uint32_t MaxEventWidth>
+__device__ __forceinline__ lane_context_static<MaxEventWidth> begin_lane(
+    const static_tensor_handle<NumLanes, MaxEventWidth>&,
+    uint32_t,
+    uint32_t,
+    bool = true
+) {
+    return lane_context_static<MaxEventWidth>{};
+}
+
+template<uint32_t NumLanes>
+__device__ __forceinline__ lane_context_dynamic begin_lane_dynamic(
+    const dynamic_tensor_handle<NumLanes>&,
+    uint32_t,
+    uint32_t,
+    bool = true
+) {
+    return lane_context_dynamic{};
+}
+
+template<typename... Args>
+__device__ __forceinline__ void end(Args...) {}
+
+template<typename Handle, typename Lane>
+__device__ __forceinline__ void finish_lane(const Handle&, const Lane&) {}
+
+} // namespace nanotrace
+
+#define NANOTRACE_DEFINE_TRACE_TYPE(name, label_str, tooltip_str, pcount, lane_usage) \
+    struct name {}
+
+#define NANOTRACE_DEFINE_BLOCK_TYPE(name, label_str, tooltip_str) \
+    struct name {}
+
+#define NANOTRACE_DEFINE_TRACK_TYPE(name, label_str, tooltip_str, pcount) \
+    struct name {}
+
+#else
+
 namespace nanotrace {
 
 // Lane type enum
@@ -643,3 +711,5 @@ __device__ __forceinline__ void finish_lane(
 }
 
 } // namespace nanotrace
+
+#endif

@@ -247,7 +247,9 @@ void trace_writer::write(const char* filename, bool compress) {
     std::vector<parsed_event> events = parse_all_events();
 
     if (events.empty()) {
+#ifndef NANOTRACE_NO_LOG
         fprintf(stderr, "Warning: No trace events found\n");
+#endif
         return;
     }
 
@@ -498,6 +500,7 @@ void trace_writer::write(const char* filename, bool compress) {
 
     uint64_t total_duration_ns = (events.empty()) ? 0 : (max_time - min_time);
 
+#ifndef NANOTRACE_NO_LOG
     // Log per-tensor statistics
     printf("Nanotrace: %zu tensors, %zu blocks, %zu total events\n",
             tensors.size(), block_descriptors.size(), events.size());
@@ -529,6 +532,7 @@ void trace_writer::write(const char* filename, bool compress) {
     printf("  Output: %s (%zu bytes uncompressed, %zu compressed = %.1f%%)\n",
             filename, payload.size(), final_payload.size(),
             (payload.size() > 0) ? (100.0 * final_payload.size() / payload.size()) : 0.0);
+#endif
 
     // Write to file
     std::ofstream file(filename, std::ios::binary);
