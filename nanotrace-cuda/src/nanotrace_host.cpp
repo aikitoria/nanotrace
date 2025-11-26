@@ -528,8 +528,8 @@ void trace_writer::write(const char* filename, bool compress) {
     }
 
     if (!events.empty()) {
-        printf("  Duration: %.3f ms total, events %u-%u ns\n",
-                total_duration_ns / 1e6, min_duration, max_duration);
+        printf("  Duration: %.6f us total, events %u-%u ns\n",
+                total_duration_ns / 1e3, min_duration, max_duration);
     }
     printf("  Output: %s (%zu bytes uncompressed, %zu compressed = %.1f%%)\n",
             filename, payload.size(), final_payload.size(),
