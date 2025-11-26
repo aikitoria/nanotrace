@@ -12,25 +12,123 @@
 
 #include "nanotrace.cuh"
 
+// format_descriptor is now defined in nanotrace.cuh for NANOTRACE_DISABLED compatibility
+
+#ifdef NANOTRACE_DISABLED
+
 namespace nanotrace {
 
 // ============================================================================
-// Format descriptor (global)
+// Disabled stub implementations - do nothing but maintain API
 // ============================================================================
 
-struct format_descriptor {
-    const char* label_string;
-    const char* tooltip_string;
-    uint16_t id;
-    uint8_t param_count;
+template<uint32_t NumLanes, typename... TraceTypes>
+class static_trace_builder {
+public:
+    static constexpr uint32_t max_event_width = 4;
 
-    bool operator==(const format_descriptor& other) const {
-        return id == other.id &&
-               param_count == other.param_count &&
-               std::strcmp(label_string, other.label_string) == 0 &&
-               std::strcmp(tooltip_string, other.tooltip_string) == 0;
+    static_trace_builder(uint32_t, dim3, dim3 = dim3(0, 0, 0)) {}
+    ~static_trace_builder() = default;
+
+    static_trace_builder(const static_trace_builder&) = delete;
+    static_trace_builder& operator=(const static_trace_builder&) = delete;
+    static_trace_builder(static_trace_builder&&) = delete;
+    static_trace_builder& operator=(static_trace_builder&&) = delete;
+
+    static_tensor_handle<NumLanes, max_event_width> get_handle() const {
+        return static_tensor_handle<NumLanes, max_event_width>{};
+    }
+
+    template<uint32_t LaneIndex>
+    static constexpr uint16_t get_lane_format_id() { return 0; }
+
+    void reset() {}
+
+    template<typename TrackType>
+    void set_track_type() {}
+
+    template<typename TrackType>
+    void set_track_type(uint32_t) {}
+
+    uint32_t* d_buffer = nullptr;
+    dim3 grid_dims{};
+    dim3 cluster_dims{};
+    uint32_t total_blocks = 0;
+    uint32_t row_stride = 0;
+    size_t buffer_size = 0;
+    uint16_t default_track_format_id = 0;
+    std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
+    std::vector<format_descriptor> format_descriptors;
+};
+
+template<uint32_t NumLanes>
+class dynamic_trace_builder {
+public:
+    static constexpr uint32_t event_width = 8;
+
+    dynamic_trace_builder(uint32_t, dim3, dim3 = dim3(0, 0, 0)) {}
+    ~dynamic_trace_builder() = default;
+
+    dynamic_trace_builder(const dynamic_trace_builder&) = delete;
+    dynamic_trace_builder& operator=(const dynamic_trace_builder&) = delete;
+    dynamic_trace_builder(dynamic_trace_builder&&) = delete;
+    dynamic_trace_builder& operator=(dynamic_trace_builder&&) = delete;
+
+    dynamic_tensor_handle<NumLanes> get_handle() const {
+        return dynamic_tensor_handle<NumLanes>{};
+    }
+
+    void reset() {}
+
+    template<typename TrackType>
+    void set_track_type() {}
+
+    template<typename TrackType>
+    void set_track_type(uint32_t) {}
+
+    uint32_t* d_buffer = nullptr;
+    dim3 grid_dims{};
+    dim3 cluster_dims{};
+    uint32_t total_blocks = 0;
+    uint32_t row_stride = 0;
+    size_t buffer_size = 0;
+    uint16_t default_track_format_id = 0;
+    std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
+    std::vector<format_descriptor> format_descriptors;
+};
+
+class trace_writer {
+public:
+    trace_writer(const char*) {}
+    ~trace_writer() = default;
+
+    trace_writer(const trace_writer&) = delete;
+    trace_writer& operator=(const trace_writer&) = delete;
+    trace_writer(trace_writer&&) = delete;
+    trace_writer& operator=(trace_writer&&) = delete;
+
+    template<typename TraceType>
+    void register_trace_type() {}
+
+    template<typename BlockType>
+    void set_block_type() {}
+
+    template<uint32_t NumLanes, typename... TraceTypes>
+    void add_tensor(const static_trace_builder<NumLanes, TraceTypes...>&) {}
+
+    template<uint32_t NumLanes>
+    void add_tensor(const dynamic_trace_builder<NumLanes>&) {}
+
+    void write(const char*, bool = true) {
+        fprintf(stderr, "Warning: No trace events found\n");
     }
 };
+
+} // namespace nanotrace
+
+#else // NANOTRACE_DISABLED
+
+namespace nanotrace {
 
 // ============================================================================
 // Static trace builder
@@ -426,3 +524,5 @@ void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
 }
 
 } // namespace nanotrace
+
+#endif // NANOTRACE_DISABLED

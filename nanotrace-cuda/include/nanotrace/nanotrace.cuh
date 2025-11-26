@@ -2,29 +2,108 @@
 
 #include <cstdint>
 
+namespace nanotrace {
+
+// Lane type enum (always defined for host code compatibility)
+enum class lane_type : uint8_t {
+    STATIC,   // Fixed format per lane (format_id not written per event)
+    DYNAMIC   // Format_id written per event
+};
+
+// Format descriptor (always defined for host code compatibility)
+struct format_descriptor {
+    const char* label_string;
+    const char* tooltip_string;
+    uint16_t id;
+    uint8_t param_count;
+
+    bool operator==(const format_descriptor& other) const {
+        return id == other.id &&
+               param_count == other.param_count &&
+               label_string == other.label_string &&
+               tooltip_string == other.tooltip_string;
+    }
+};
+
+} // namespace nanotrace
+
+// Macros to define trace/block/track types - ALWAYS provide full definitions
+// so host code can access ::id, ::descriptor, ::usage, etc.
+#define NANOTRACE_DEFINE_TRACE_TYPE(name, label_str, tooltip_str, pcount, lane_usage) \
+    struct name { \
+        static constexpr uint16_t id = __COUNTER__; \
+        static constexpr const char* label_string = label_str; \
+        static constexpr const char* tooltip_string = tooltip_str; \
+        static constexpr uint8_t param_count = pcount; \
+        static constexpr nanotrace::lane_type usage = lane_usage; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count \
+        }; \
+    }
+
+#define NANOTRACE_DEFINE_BLOCK_TYPE(name, label_str, tooltip_str) \
+    struct name { \
+        static constexpr uint16_t id = __COUNTER__; \
+        static constexpr const char* label_string = label_str; \
+        static constexpr const char* tooltip_string = tooltip_str; \
+        static constexpr uint8_t param_count = 0; \
+        static constexpr bool is_block_type = true; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count \
+        }; \
+    }
+
+#define NANOTRACE_DEFINE_TRACK_TYPE(name, label_str, tooltip_str, pcount) \
+    struct name { \
+        static constexpr uint16_t id = __COUNTER__; \
+        static constexpr const char* label_string = label_str; \
+        static constexpr const char* tooltip_string = tooltip_str; \
+        static constexpr uint8_t param_count = pcount; \
+        static constexpr bool is_track_type = true; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count \
+        }; \
+    }
+
 #ifdef NANOTRACE_DISABLED
 
 namespace nanotrace {
 
-enum class lane_type : uint8_t { STATIC, DYNAMIC };
-
 template<uint32_t NumLanes, uint32_t MaxEventWidth>
-struct static_tensor_handle {};
+struct static_tensor_handle {
+    uint8_t* buffer = nullptr;
+    uint32_t row_stride_bytes = 0;
+    static constexpr uint32_t num_lanes = NumLanes;
+    static constexpr uint32_t max_event_width = MaxEventWidth;
+};
 
 template<uint32_t NumLanes>
-struct dynamic_tensor_handle {};
+struct dynamic_tensor_handle {
+    uint8_t* buffer = nullptr;
+    uint32_t row_stride_bytes = 0;
+    static constexpr uint32_t num_lanes = NumLanes;
+    static constexpr uint32_t event_width = 8;
+};
 
-struct start_token {};
+struct start_token {
+    uint32_t time = 0;
+};
 
 template<uint32_t MaxEventWidth>
 class lane_context_static {
 public:
+    static constexpr uint32_t max_event_width = MaxEventWidth;
+    __device__ __forceinline__ lane_context_static(uint32_t = 0, bool = true) {}
     __device__ __forceinline__ bool enabled() const { return false; }
+    __device__ __forceinline__ void advance() {}
 };
 
 class lane_context_dynamic {
 public:
+    static constexpr uint32_t event_width = 8;
+    __device__ __forceinline__ lane_context_dynamic(uint32_t = 0, bool = true) {}
     __device__ __forceinline__ bool enabled() const { return false; }
+    __device__ __forceinline__ void advance() {}
 };
 
 __device__ __forceinline__ start_token start() { return start_token{}; }
@@ -59,63 +138,9 @@ __device__ __forceinline__ void finish_lane(const Handle&, const Lane&) {}
 
 } // namespace nanotrace
 
-#define NANOTRACE_DEFINE_TRACE_TYPE(name, label_str, tooltip_str, pcount, lane_usage) \
-    struct name {}
-
-#define NANOTRACE_DEFINE_BLOCK_TYPE(name, label_str, tooltip_str) \
-    struct name {}
-
-#define NANOTRACE_DEFINE_TRACK_TYPE(name, label_str, tooltip_str, pcount) \
-    struct name {}
-
 #else
 
 namespace nanotrace {
-
-// Lane type enum
-enum class lane_type : uint8_t {
-    STATIC,   // Fixed format per lane (format_id not written per event)
-    DYNAMIC   // Format_id written per event
-};
-
-// Macro to define trace types at compile time
-#define NANOTRACE_DEFINE_TRACE_TYPE(name, label_str, tooltip_str, pcount, lane_usage) \
-    struct name { \
-        static constexpr uint16_t id = __COUNTER__; \
-        static constexpr const char* label_string = label_str; \
-        static constexpr const char* tooltip_string = tooltip_str; \
-        static constexpr uint8_t param_count = pcount; \
-        static constexpr nanotrace::lane_type usage = lane_usage; \
-        static inline const nanotrace::format_descriptor descriptor = { \
-            label_string, tooltip_string, id, param_count \
-        }; \
-    }
-
-// Macro to define block types at compile time
-#define NANOTRACE_DEFINE_BLOCK_TYPE(name, label_str, tooltip_str) \
-    struct name { \
-        static constexpr uint16_t id = __COUNTER__; \
-        static constexpr const char* label_string = label_str; \
-        static constexpr const char* tooltip_string = tooltip_str; \
-        static constexpr uint8_t param_count = 0; \
-        static constexpr bool is_block_type = true; \
-        static inline const nanotrace::format_descriptor descriptor = { \
-            label_string, tooltip_string, id, param_count \
-        }; \
-    }
-
-// Macro to define track types at compile time
-#define NANOTRACE_DEFINE_TRACK_TYPE(name, label_str, tooltip_str, pcount) \
-    struct name { \
-        static constexpr uint16_t id = __COUNTER__; \
-        static constexpr const char* label_string = label_str; \
-        static constexpr const char* tooltip_string = tooltip_str; \
-        static constexpr uint8_t param_count = pcount; \
-        static constexpr bool is_track_type = true; \
-        static inline const nanotrace::format_descriptor descriptor = { \
-            label_string, tooltip_string, id, param_count \
-        }; \
-    }
 
 // ============================================================================
 // Tensor handles (passed to kernels)
