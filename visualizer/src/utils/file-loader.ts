@@ -294,9 +294,9 @@ export async function parseTraceFile(
     blocksSoA.clusterIds = new Uint32Array(blockDescCount);
     blocksSoA.smIndices = new Uint8Array(blockDescCount);
     blocksSoA.blockLaneIndices = new Uint16Array(blockDescCount);  // Filled later by buildHierarchy
-    blocksSoA.zonesStartIndices = new Uint32Array(blockDescCount);
+    blocksSoA.zonesStartIndices = new Uint32Array(blockDescCount).fill(0xFFFFFFFF);
     blocksSoA.zonesEndIndices = new Uint32Array(blockDescCount);
-    blocksSoA.tracksStartIndices = new Uint32Array(blockDescCount);
+    blocksSoA.tracksStartIndices = new Uint32Array(blockDescCount).fill(0xFFFFFFFF);
     blocksSoA.tracksEndIndices = new Uint32Array(blockDescCount);
 
     performance.mark('parseTraceFile:allocate:end');
@@ -346,11 +346,8 @@ export async function parseTraceFile(
             offset += 4;
         }
 
-        // Update block's track range
-        if (blocksSoA.tracksStartIndices[blockDescId] === 0 && i !== 0) {
-            blocksSoA.tracksStartIndices[blockDescId] = trackIdx;
-        }
-        if (i === 0 || blocksSoA.tracksStartIndices[blockDescId] === 0) {
+        // Update block's track range (only set start on first track for this block)
+        if (blocksSoA.tracksStartIndices[blockDescId] === 0xFFFFFFFF) {
             blocksSoA.tracksStartIndices[blockDescId] = trackIdx;
         }
 
@@ -398,12 +395,9 @@ export async function parseTraceFile(
             zoneIdx++;
         }
 
-        // Update block's zone range and sublane count
+        // Update block's zone range (only set start on first track with events for this block)
         if (zoneIdx > zoneStartForTrack) {
-            if (blocksSoA.zonesStartIndices[blockDescId] === 0 && blockDescId !== 0) {
-                blocksSoA.zonesStartIndices[blockDescId] = zoneStartForTrack;
-            }
-            if (blockDescId === 0 || blocksSoA.zonesStartIndices[blockDescId] === 0) {
+            if (blocksSoA.zonesStartIndices[blockDescId] === 0xFFFFFFFF) {
                 blocksSoA.zonesStartIndices[blockDescId] = zoneStartForTrack;
             }
             blocksSoA.zonesEndIndices[blockDescId] = zoneIdx;
