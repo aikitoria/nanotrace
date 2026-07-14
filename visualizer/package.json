@@ -6,20 +6,20 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "generate:minimal": "tsx scripts/generate.ts minimal",
-    "generate:small": "tsx scripts/generate.ts small",
-    "generate:large": "tsx scripts/generate.ts large",
-    "generate:all": "npm run generate:minimal && npm run generate:small && npm run generate:large",
-    "validate": "tsx scripts/validate.ts"
+    "validate": "tsc -p tsconfig.validate.json && node .validate/scripts/validate.js"
   },
   "devDependencies": {
-    "@types/node": "^24.10.0",
-    "@webgpu/types": "^0.1.66",
-    "terser": "^5.44.1",
-    "tsx": "^4.20.6",
-    "typescript": "^5.9.3",
-    "vite": "^7.2.2",
-    "vite-imagetools": "^9.0.0",
+    "@types/node": "^26.1.1",
+    "@webgpu/types": "^0.1.71",
+    "terser": "^5.49.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4",
+    "vite-imagetools": "^10.0.1",
     "vite-plugin-html": "^3.2.2"
+  },
+  "overrides": {
+    "brace-expansion@2": "2.1.2",
+    "minimatch@5": "5.1.9",
+    "picomatch@<4": "2.3.2"
   }
 }

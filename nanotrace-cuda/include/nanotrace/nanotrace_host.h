@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -7,12 +9,29 @@
 #include <unordered_map>
 #include <tuple>
 #include <utility>
-#include <stdexcept>
 #include <cuda_runtime.h>
 
 #include "nanotrace.cuh"
+#include "nanotrace_session.h"
 
 // format_descriptor is now defined in nanotrace.cuh for NANOTRACE_DISABLED compatibility
+
+namespace nanotrace {
+
+[[noreturn]] inline void Fail(const char* message)
+{
+    std::fprintf(stderr, "nanotrace fatal error: %s\n",
+        message ? message : "unknown error");
+    std::abort();
+}
+
+struct event_parent_interval {
+    uint64_t start_ns;
+    uint64_t end_ns;
+    EventId event_id;
+};
+
+}
 
 #ifdef NANOTRACE_DISABLED
 
@@ -25,7 +44,17 @@ namespace nanotrace {
 template<uint32_t NumLanes, typename... TraceTypes>
 class static_trace_builder {
 public:
-    static constexpr uint32_t max_event_width = 4;
+    static constexpr uint32_t max_event_width = []() {
+        uint32_t widths[] = {
+            (TraceTypes::param_count == 0 ? 2 :
+             TraceTypes::param_count <= 2 ? 4 : 8)...
+        };
+        uint32_t max_width = 0;
+        for (uint32_t width : widths) {
+            if (width > max_width) max_width = width;
+        }
+        return max_width;
+    }();
 
     static_trace_builder(uint32_t, dim3, dim3 = dim3(0, 0, 0)) {}
     ~static_trace_builder() = default;
@@ -56,7 +85,7 @@ public:
     uint32_t total_blocks = 0;
     uint32_t row_stride = 0;
     size_t buffer_size = 0;
-    uint16_t default_track_format_id = 0;
+    uint16_t default_track_format_id = UINT16_MAX;
     std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
     std::vector<format_descriptor> format_descriptors;
 };
@@ -92,7 +121,7 @@ public:
     uint32_t total_blocks = 0;
     uint32_t row_stride = 0;
     size_t buffer_size = 0;
-    uint16_t default_track_format_id = 0;
+    uint16_t default_track_format_id = UINT16_MAX;
     std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
     std::vector<format_descriptor> format_descriptors;
 };
@@ -161,19 +190,18 @@ public:
         this->grid_dims = grid_dims;
         this->cluster_dims = cluster_dims;
         total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
-        // +1 for header slot
-        row_stride = (max_events_per_lane + 1) * max_event_width;
+        constexpr uint32_t HEADER_WORDS = 4;
+        constexpr uint32_t ROW_ALIGNMENT_WORDS = 4;
+        uint32_t row_words =
+            HEADER_WORDS + max_events_per_lane * max_event_width;
+        row_stride = (row_words + ROW_ALIGNMENT_WORDS - 1)
+            & ~(ROW_ALIGNMENT_WORDS - 1);
 
         // Check for uint32 byte offset overflow
         uint64_t row_stride_bytes = static_cast<uint64_t>(row_stride) * 4;
         uint64_t max_offset_bytes = static_cast<uint64_t>(total_blocks) * NumLanes * row_stride_bytes;
         if (max_offset_bytes > UINT32_MAX) {
-            throw std::runtime_error(
-                "Tensor configuration would overflow uint32 byte offsets: " +
-                std::to_string(total_blocks) + " blocks × " +
-                std::to_string(NumLanes) + " lanes × " +
-                std::to_string(row_stride_bytes) + " bytes/lane = " +
-                std::to_string(max_offset_bytes) + " bytes (max: 4294967295)");
+            Fail("Tensor configuration exceeds uint32 byte offsets");
         }
 
         buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
@@ -229,7 +257,7 @@ public:
     uint32_t total_blocks;
     uint32_t row_stride;
     size_t buffer_size;
-    uint16_t default_track_format_id = 0;
+    uint16_t default_track_format_id = UINT16_MAX;
     std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
     std::vector<format_descriptor> format_descriptors;
 };
@@ -248,19 +276,17 @@ public:
         this->grid_dims = grid_dims;
         this->cluster_dims = cluster_dims;
         total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
-        // +1 for header slot
-        row_stride = (max_events_per_lane + 1) * event_width;
+        constexpr uint32_t HEADER_WORDS = 4;
+        constexpr uint32_t ROW_ALIGNMENT_WORDS = 4;
+        uint32_t row_words = HEADER_WORDS + max_events_per_lane * event_width;
+        row_stride = (row_words + ROW_ALIGNMENT_WORDS - 1)
+            & ~(ROW_ALIGNMENT_WORDS - 1);
 
         // Check for uint32 byte offset overflow
         uint64_t row_stride_bytes = static_cast<uint64_t>(row_stride) * 4;
         uint64_t max_offset_bytes = static_cast<uint64_t>(total_blocks) * NumLanes * row_stride_bytes;
         if (max_offset_bytes > UINT32_MAX) {
-            throw std::runtime_error(
-                "Tensor configuration would overflow uint32 byte offsets: " +
-                std::to_string(total_blocks) + " blocks × " +
-                std::to_string(NumLanes) + " lanes × " +
-                std::to_string(row_stride_bytes) + " bytes/lane = " +
-                std::to_string(max_offset_bytes) + " bytes (max: 4294967295)");
+            Fail("Tensor configuration exceeds uint32 byte offsets");
         }
 
         buffer_size = static_cast<size_t>(total_blocks) * NumLanes * row_stride * sizeof(uint32_t);
@@ -307,7 +333,7 @@ public:
     uint32_t total_blocks;
     uint32_t row_stride;
     size_t buffer_size;
-    uint16_t default_track_format_id = 0;
+    uint16_t default_track_format_id = UINT16_MAX;
     std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;
     std::vector<format_descriptor> format_descriptors;
 };
@@ -339,11 +365,19 @@ public:
     template<uint32_t NumLanes>
     void add_tensor(const dynamic_trace_builder<NumLanes>& builder);
 
+    bool AppendToSession(TraceSession& session, TrackId parent_track,
+        ClockId gpu_clock, ClockId anchor_clock,
+        uint64_t reference_anchor_ns,
+        EventId parent_event = INVALID_EVENT_ID,
+        uint64_t uncertainty_ns = 0,
+        const std::vector<event_parent_interval>* parent_intervals = nullptr,
+        uint32_t displayed_block_count = 0,
+        bool parents_indexed_by_block = false);
     void write(const char* filename, bool compress = true);
+    const char* KernelName() const { return kernel_name.c_str(); }
 
 private:
     struct tensor_info {
-        uint32_t* device_buffer;
         std::vector<uint32_t> host_buffer;  // Copied from device
         dim3 grid_dims;
         dim3 cluster_dims;
@@ -356,35 +390,27 @@ private:
         std::unordered_map<uint32_t, uint16_t> lane_track_format_ids;  // Per-lane overrides (relative to tensor)
     };
 
+public:
     struct parsed_event {
         uint32_t block_id;
-        uint32_t cluster_id;
         uint32_t lane_id;
+        uint64_t anchor_time;
         uint64_t time_offset;    // 64-bit after unwrap, ns from kernel start after conversion
         uint32_t duration;       // Nanoseconds
         uint16_t sm_id;
         uint16_t format_id;
+        uint16_t track_format_id;
         uint8_t param_count;
         uint32_t params[6];      // Maximum 6 parameters (static lanes)
     };
 
+private:
     std::string kernel_name;
     uint16_t default_block_format_id;
     std::vector<format_descriptor> formats;
     std::vector<tensor_info> tensors;
-    uint32_t total_lanes_so_far;  // Track lane offset for multi-tensor lane IDs
 
-    void write_uint8(std::vector<uint8_t>& buf, uint8_t val);
-    void write_uint16(std::vector<uint8_t>& buf, uint16_t val);
-    void write_uint32(std::vector<uint8_t>& buf, uint32_t val);
-    void write_uint64(std::vector<uint8_t>& buf, uint64_t val);
-    void write_string(std::vector<uint8_t>& buf, const std::string& str);
-
-    // Post-processing pipeline (warptrace-style)
     std::vector<parsed_event> parse_all_events();
-    void fix_timer_wraparound(std::vector<parsed_event>& events);
-    uint64_t find_kernel_start_time(const std::vector<parsed_event>& events);
-    void convert_to_offsets(std::vector<parsed_event>& events, uint64_t kernel_start_time);
 };
 
 // ============================================================================
@@ -396,8 +422,7 @@ void trace_writer::register_trace_type() {
     // Check for duplicate trace type ID
     for (const auto& fmt : formats) {
         if (fmt.id == TraceType::id) {
-            throw std::runtime_error(std::string("Duplicate trace type ID ") +
-                                     std::to_string(TraceType::id));
+            Fail("Duplicate trace type ID");
         }
     }
 
@@ -411,8 +436,7 @@ void trace_writer::set_block_type() {
     // Check for duplicate block type ID
     for (const auto& fmt : formats) {
         if (fmt.id == BlockType::id) {
-            throw std::runtime_error(std::string("Duplicate block type ID ") +
-                                     std::to_string(BlockType::id));
+            Fail("Duplicate block type ID");
         }
     }
 
@@ -438,9 +462,7 @@ void trace_writer::add_tensor(const static_trace_builder<NumLanes, TraceTypes...
             if (fmt.id == desc.id) {
                 // Check if it's the same type or a collision
                 if (!(fmt == desc)) {
-                    throw std::runtime_error(std::string("Duplicate format ID ") +
-                                             std::to_string(desc.id) +
-                                             " (__COUNTER__ collision)");
+                    Fail("Duplicate format ID from __COUNTER__ collision");
                 }
                 found = true;
                 break;
@@ -460,7 +482,6 @@ void trace_writer::add_tensor(const static_trace_builder<NumLanes, TraceTypes...
                buffer_size * sizeof(uint32_t), cudaMemcpyDeviceToHost);
 
     tensors.push_back({
-        builder.d_buffer,
         std::move(host_buffer),
         builder.grid_dims,
         builder.cluster_dims,
@@ -487,9 +508,7 @@ void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
             if (fmt.id == desc.id) {
                 // Check if it's the same type or a collision
                 if (!(fmt == desc)) {
-                    throw std::runtime_error(std::string("Duplicate format ID ") +
-                                             std::to_string(desc.id) +
-                                             " (__COUNTER__ collision)");
+                    Fail("Duplicate format ID from __COUNTER__ collision");
                 }
                 found = true;
                 break;
@@ -509,7 +528,6 @@ void trace_writer::add_tensor(const dynamic_trace_builder<NumLanes>& builder) {
                buffer_size * sizeof(uint32_t), cudaMemcpyDeviceToHost);
 
     tensors.push_back({
-        builder.d_buffer,
         std::move(host_buffer),
         builder.grid_dims,
         builder.cluster_dims,

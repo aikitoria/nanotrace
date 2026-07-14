@@ -23,7 +23,6 @@ import {
     LANE_EDGE_PADDING,
     SUBLANE_HEIGHT,
     SUBLANE_PADDING,
-    BLOCK_EDGE_PADDING,
     BLOCK_LANE_PADDING,
     TOOLTIP_OFFSET_X,
     TOOLTIP_OFFSET_Y,
@@ -32,6 +31,54 @@ import {
     TIME_DECIMAL_THRESHOLD,
     TIME_DECIMAL_PLACES
 } from './utils/constants.js';
+
+function EscapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function JoinHierarchyPath(trackName: string, blockName: string): string {
+    const trackParts = trackName.split(' / ');
+    const blockParts = blockName.split(' / ');
+    const containsPath = (path: string[], candidate: string[]): boolean => {
+        if (candidate.length > path.length) return false;
+        for (let offset = 0;
+            offset <= path.length - candidate.length; offset++) {
+            let matches = true;
+            for (let i = 0; i < candidate.length; i++) {
+                if (path[offset + i] !== candidate[i]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return true;
+        }
+        return false;
+    };
+
+    if (containsPath(trackParts, blockParts)) return trackName;
+    if (containsPath(blockParts, trackParts)) return blockName;
+
+    let overlap = Math.min(trackParts.length, blockParts.length);
+    while (overlap > 0) {
+        let matches = true;
+        for (let i = 0; i < overlap; i++) {
+            if (trackParts[trackParts.length - overlap + i]
+                !== blockParts[i]) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) break;
+        overlap--;
+    }
+
+    return [...trackParts, ...blockParts.slice(overlap)].join(' / ');
+}
 
 /**
  * Handles all mouse interaction logic for the trace visualizer.
@@ -53,6 +100,10 @@ export class InteractionManager {
     // Hover state (IDs are passed to shaders for highlighting)
     private hoveredZoneId: number = -1;
     private hoveredBlockId: number = -1;
+    private rowOffsets: Float32Array<ArrayBufferLike> = new Float32Array();
+    private rowVisible: Uint8Array<ArrayBufferLike> = new Uint8Array();
+    private zoneVisibility: Uint32Array<ArrayBufferLike> =
+        new Uint32Array();
 
     // Selection state (world space X coordinates)
     private isSelecting: boolean = false;
@@ -85,6 +136,17 @@ export class InteractionManager {
     /** Updates camera reference when visualization is reinitialized. */
     updateCamera(camera: Camera): void {
         this.camera = camera;
+    }
+
+    /** Updates the dynamic row and event visibility used by hit detection. */
+    updateLayout(
+        rowOffsets: Float32Array,
+        rowVisible: Uint8Array,
+        zoneVisibility: Uint32Array
+    ): void {
+        this.rowOffsets = rowOffsets;
+        this.rowVisible = rowVisible;
+        this.zoneVisibility = zoneVisibility;
     }
 
     /** Returns ID of currently hovered zone (-1 if none). Passed to shaders for highlighting. */
@@ -163,6 +225,7 @@ export class InteractionManager {
         // 1. Find lane (linear search)
         let foundLaneIdx = -1;
         for (let i = 0; i < lanes.count; i++) {
+            if (this.rowVisible[i] === 0) continue;
             if (worldPos.y >= lanes.ys[i] && worldPos.y <= lanes.ys[i] + lanes.heights[i]) {
                 foundLaneIdx = i;
                 break;
@@ -191,18 +254,24 @@ export class InteractionManager {
         // 3. Find block (binary search using indirection)
         const offset = blockLanes.blockIndicesOffsets[foundBlockLaneIdx];
         const count = blockLanes.blockIndicesCounts[foundBlockLaneIdx];
+        const rowOffset = this.rowOffsets[foundLaneIdx] ?? 0;
+        const localWorldY = worldPos.y - rowOffset;
         const blockIdx = binarySearchBlocksIndirect(
             blocks,
             blockLanes.blockIndices,
             offset,
             count,
             worldXNs,
-            worldPos.y
+            localWorldY
         );
         if (blockIdx === -1) return { zoneIdx: -1, blockIdx: -1 };
+        if (this.zoneVisibility[blocks.zonesStartIndices[blockIdx]] === 0) {
+            return { zoneIdx: -1, blockIdx: -1 };
+        }
 
         // 4. Calculate sublane index from Y position
-        const relativeY = (blocks.ys[blockIdx] + blocks.heights[blockIdx] - BLOCK_EDGE_PADDING) - worldPos.y;
+        const relativeY = (blocks.ys[blockIdx] + blocks.heights[blockIdx]
+            - blocks.headerHeights[blockIdx]) - localWorldY;
         const sublaneIdx = Math.floor(relativeY / (SUBLANE_HEIGHT + SUBLANE_PADDING));
         if (sublaneIdx < 0 || sublaneIdx >= blocks.sublanesCounts[blockIdx]) {
             return { zoneIdx: -1, blockIdx };
@@ -211,13 +280,16 @@ export class InteractionManager {
         // 5. Find zone (binary search within block's zone range, filtered by sublane)
         const zoneStart = blocks.zonesStartIndices[blockIdx];
         const zoneEnd = blocks.zonesEndIndices[blockIdx];
-        const zoneIdx = binarySearchZones(
+        let zoneIdx = binarySearchZones(
             zones,
             zoneStart,
             zoneEnd,
             worldXNs,
             sublaneIdx
         );
+        if (zoneIdx !== -1 && this.zoneVisibility[zoneIdx] === 0) {
+            zoneIdx = -1;
+        }
 
         return { zoneIdx, blockIdx };
     }
@@ -293,20 +365,34 @@ export class InteractionManager {
                     trackParams
                   )
                 : `Sublane ${zones.sublaneIndices[result.zoneIdx]}`;
+            const hierarchyName = JoinHierarchyPath(warpName, blockName);
+            const expansionHint = zones.hasChildren[result.zoneIdx] !== 0
+                ? `<br>Click to ${
+                    zones.expanded[result.zoneIdx] !== 0 ? 'collapse' : 'expand'}`
+                : '';
+            const details = zones.details[result.zoneIdx]
+                ? `<br>${zones.details[result.zoneIdx]
+                    .split('\n')
+                    .map(detail => EscapeHtml(detail))
+                    .join('<br>')}`
+                : '';
 
             // Display hierarchical tooltip: Zone / Warp / Block / Timing
             this.tooltip.innerHTML = `
-                ${zoneName}<br>
-                ${warpName} / ${blockName}<br>
+                ${EscapeHtml(zoneName)}<br>
+                ${EscapeHtml(hierarchyName)}<br>
                 Start: ${startNs.toLocaleString()} ns<br>
                 End: ${endNs.toLocaleString()} ns<br>
-                Len: ${durNs.toLocaleString()} ns
+                Duration: ${durNs.toLocaleString()} ns${details}${expansionHint}
             `;
+            this.canvas.style.cursor = zones.hasChildren[result.zoneIdx] !== 0
+                ? 'pointer' : 'default';
             this.tooltip.style.left = `${screenX + TOOLTIP_OFFSET_X}px`;
             this.tooltip.style.top = `${screenY + TOOLTIP_OFFSET_Y}px`;
             this.tooltip.classList.add('visible');
         } else {
             this.hoveredZoneId = -1;
+            this.canvas.style.cursor = 'default';
             this.tooltip.classList.remove('visible');
         }
     }

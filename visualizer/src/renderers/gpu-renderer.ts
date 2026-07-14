@@ -24,6 +24,8 @@ import { Camera } from '../utils/camera.js';
 import {
     SUBLANE_HEIGHT,
     ZONE_FILL_BRIGHTNESS,
+    ZONE_COLOR_SATURATION,
+    ZONE_PASTEL_MIX,
     ZONE_HOVER_COLOR_R,
     ZONE_HOVER_COLOR_G,
     ZONE_HOVER_COLOR_B,
@@ -81,6 +83,8 @@ export interface GPUResources {
         lane: GPUBuffer;                      // Lane geometry (storage buffer)
         blockLane: GPUBuffer;                 // Block lane geometry (storage buffer)
         block: GPUBuffer;                     // Block geometry (storage buffer)
+        rowLayout: GPUBuffer;                 // Dynamic row Y offsets and visibility
+        zoneVisibility: GPUBuffer;            // Dynamic per-zone visibility
     };
     passes: {
         zone: RenderPass;                     // Zone rendering (colored rectangles)
@@ -112,6 +116,7 @@ struct Uniforms {
     camera_y: f32,
     scale_x: f32,
     scale_y: f32,
+    viewport_width: f32,
 }
 `;
 
@@ -139,6 +144,17 @@ fn ds_add(ah: f32, al: f32, bh: f32, bl: f32) -> f32 {
 }
 `;
 
+const WGSL_ROW_LAYOUT = `
+struct RowLayout {
+    yOffset: f32,
+    visible: f32,
+    padding0: f32,
+    padding1: f32,
+}
+
+@group(0) @binding(2) var<storage, read> rowLayouts: array<RowLayout>;
+`;
+
 /**
  * WGSL shader for zone rendering with hover and selection highlighting.
  * Uses instanced rendering with per-zone data from storage buffer.
@@ -146,9 +162,11 @@ fn ds_add(ah: f32, al: f32, bh: f32, bl: f32) -> f32 {
  */
 const ZONE_SHADER = `
 ${WGSL_FULL_UNIFORMS}
+${WGSL_ROW_LAYOUT}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> zones: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> zoneVisibility: array<u32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -169,7 +187,7 @@ fn vertexMain(
     // Read zone data from 3 vec4s (12 floats, aligned)
     let zone0 = zones[instanceIndex * 3u];      // [x_high, x_low, y, width]
     let zone1 = zones[instanceIndex * 3u + 1u]; // [height, r, g, b]
-    let zone2 = zones[instanceIndex * 3u + 2u]; // [id, pad, pad, pad]
+    let zone2 = zones[instanceIndex * 3u + 2u]; // [id, row, pad, pad]
 
     let x_high = zone0.x;
     let x_low = zone0.y;
@@ -178,6 +196,8 @@ fn vertexMain(
     let height = zone1.x;
     let color = zone1.yzw;
     let id = i32(zone2.x);
+    let rowIndex = u32(zone2.y);
+    let rowLayout = rowLayouts[rowIndex];
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
@@ -190,25 +210,31 @@ fn vertexMain(
 
     let vertex = vertices[vertexIndex];
 
-    // Step 1: Calculate world corner position from center in double-precision
-    // Add small vertex offset to low component (vertex offset is typically < 0.001)
-    let cornerOffsetX = vertex.x * width * 0.5;
-    let worldCornerX_high = x_high;
-    let worldCornerX_low = x_low + cornerOffsetX;
-
-    // Step 2: Apply camera transformation using double-precision
-    // This is where precision loss would occur in regular f32
-    let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
+    // Calculate the center with double-single precision, then enforce a
+    // one-pixel minimum raster width without changing the zone's true bounds.
+    let viewCenterX = ds_add(
+        x_high, x_low, uniforms.camera_x_high, uniforms.camera_x_low);
+    let ndcCenterX = viewCenterX * uniforms.scale_x;
+    let actualNdcWidth = abs(width * uniforms.scale_x);
+    let minimumNdcWidth = 2.0 / uniforms.viewport_width;
+    let ndcHalfWidth = max(actualNdcWidth, minimumNdcWidth) * 0.5;
 
     // Y doesn't need double precision (small range)
-    let worldCornerY = y + vertex.y * height * 0.5;
+    let worldCornerY = y + rowLayout.yOffset
+        + vertex.y * height * 0.5;
     let viewY = worldCornerY + uniforms.camera_y;
 
-    // Step 3: Apply scale to get NDC
-    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
+    // Apply scale to get NDC.
+    let ndcPos = vec2<f32>(
+        ndcCenterX + vertex.x * ndcHalfWidth,
+        viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
+    let visible = rowLayout.visible >= 0.5
+        && zoneVisibility[instanceIndex] != 0u;
+    output.position = select(
+        vec4<f32>(2.0, 2.0, 0.0, 1.0),
+        vec4<f32>(ndcPos, 0.0, 1.0), visible);
     output.zoneCoord = vertex;
     output.isHovered = select(0.0, 1.0, id == uniforms.hoveredId);
     output.color = color;
@@ -228,7 +254,10 @@ fn vertexMain(
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    let baseFillColor = input.color * ${ZONE_FILL_BRIGHTNESS};
+    let luminance = dot(input.color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let mutedColor = mix(vec3<f32>(luminance), input.color, ${ZONE_COLOR_SATURATION});
+    let pastelColor = mix(mutedColor, vec3<f32>(1.0), ${ZONE_PASTEL_MIX});
+    let baseFillColor = pastelColor * ${ZONE_FILL_BRIGHTNESS};
     let hoverFillColor = vec3<f32>(${ZONE_HOVER_COLOR_R}, ${ZONE_HOVER_COLOR_G}, ${ZONE_HOVER_COLOR_B}) * ${ZONE_HOVER_BRIGHTNESS};
 
     // If both hovered and selected, use hover color (don't stack brightness)
@@ -256,7 +285,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let isEdge = distFromEdgeX < edgeThicknessX || distFromEdgeY < edgeThicknessY;
 
-    let baseOutlineColor = input.color * ${ZONE_OUTLINE_BRIGHTNESS};
+    let baseOutlineColor = mutedColor * ${ZONE_OUTLINE_BRIGHTNESS};
     let hoverOutlineColor = vec3<f32>(${ZONE_HOVER_OUTLINE_COLOR_R}, ${ZONE_HOVER_OUTLINE_COLOR_G}, ${ZONE_HOVER_OUTLINE_COLOR_B}) * ${ZONE_HOVER_OUTLINE_BRIGHTNESS};
 
     // Same logic for outlines - don't stack hover and selection
@@ -275,9 +304,15 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const LANE_SHADER = `
 ${WGSL_FULL_UNIFORMS}
+${WGSL_ROW_LAYOUT}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var<storage, read> lanes: array<vec4<f32>>;
+struct LaneData {
+    geometry: vec4<f32>,
+    horizontal: vec4<f32>,
+}
+
+@group(0) @binding(1) var<storage, read> lanes: array<LaneData>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -290,13 +325,16 @@ fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    // Read lane data from single vec4
-    let lane = lanes[instanceIndex];  // [y, height, width_high, width_low]
+    let lane = lanes[instanceIndex];
+    let rowLayout = rowLayouts[instanceIndex];
 
-    let laneY = lane.x;
-    let laneHeight = lane.y;
-    let width_high = lane.z;
-    let width_low = lane.w;
+    let laneY = lane.geometry.x;
+    let laneHeight = lane.geometry.y;
+    let mainLane = lane.geometry.z < 0.5;
+    let start_high = lane.horizontal.x;
+    let start_low = lane.horizontal.y;
+    let end_high = lane.horizontal.z;
+    let end_low = lane.horizontal.w;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -309,38 +347,51 @@ fn vertexMain(
 
     let vertex = vertices[vertexIndex];
 
-    // Lane starts at X=0 and extends to width
-    // Left edge (vertex.x=0): X = 0.0
-    // Right edge (vertex.x=1): X = width
-    let worldX_high = select(0.0, width_high, vertex.x > 0.5);
-    let worldX_low = select(0.0, width_low, vertex.x > 0.5);
+    let worldX_high = select(start_high, end_high, vertex.x > 0.5);
+    let worldX_low = select(start_low, end_low, vertex.x > 0.5);
 
     // Apply camera transformation using double-precision
     let viewX = ds_add(worldX_high, worldX_low, uniforms.camera_x_high, uniforms.camera_x_low);
 
     // Y doesn't need double precision
-    let worldY = laneY + vertex.y * laneHeight;
+    let worldY = laneY + rowLayout.yOffset + vertex.y * laneHeight;
     let viewY = worldY + uniforms.camera_y;
 
     // Apply scale to get NDC
-    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
+    // Background rectangles can become millions of pixels wide at high time
+    // zoom. Clip their horizontal vertices before rasterization so their
+    // horizontal edges remain stable.
+    let timeNdcX = clamp(viewX * uniforms.scale_x, -1.0, 1.0);
+    let screenNdcX = select(-1.0, 1.0, vertex.x > 0.5);
+    let ndcPos = vec2<f32>(
+        select(timeNdcX, screenNdcX, mainLane),
+        viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
+    output.position = select(
+        vec4<f32>(2.0, 2.0, 0.0, 1.0),
+        vec4<f32>(ndcPos, 0.0, 1.0), rowLayout.visible >= 0.5);
     return output;
 }
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(${LANE_BG_COLOR_R}, ${LANE_BG_COLOR_G}, ${LANE_BG_COLOR_B}, 1.0);
+    return vec4<f32>(
+        ${LANE_BG_COLOR_R}, ${LANE_BG_COLOR_G}, ${LANE_BG_COLOR_B}, 1.0);
 }
 `;
 
 const BLOCK_LANE_SHADER = `
 ${WGSL_FULL_UNIFORMS}
+${WGSL_ROW_LAYOUT}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var<storage, read> blockLanes: array<vec4<f32>>;
+struct BlockLaneData {
+    geometry: vec4<f32>,
+    horizontal: vec4<f32>,
+}
+
+@group(0) @binding(1) var<storage, read> blockLanes: array<BlockLaneData>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -353,13 +404,17 @@ fn vertexMain(
     @builtin(vertex_index) vertexIndex: u32,
     @builtin(instance_index) instanceIndex: u32
 ) -> VertexOutput {
-    // Read block lane data from single vec4
-    let blockLane = blockLanes[instanceIndex];  // [y, height, width_high, width_low]
+    let blockLane = blockLanes[instanceIndex];
 
-    let y = blockLane.x;
-    let height = blockLane.y;
-    let width_high = blockLane.z;
-    let width_low = blockLane.w;
+    let y = blockLane.geometry.x;
+    let height = blockLane.geometry.y;
+    let rowIndex = u32(blockLane.geometry.z);
+    let rowLayout = rowLayouts[rowIndex];
+    let mainLane = blockLane.geometry.w < 0.5;
+    let start_high = blockLane.horizontal.x;
+    let start_low = blockLane.horizontal.y;
+    let end_high = blockLane.horizontal.z;
+    let end_low = blockLane.horizontal.w;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -372,23 +427,29 @@ fn vertexMain(
 
     let vertex = vertices[vertexIndex];
 
-    // Block lane starts at X=0 and extends to width
-    // Left edge (vertex.x=0): X = 0.0
-    // Right edge (vertex.x=1): X = width
-    let worldX_high = select(0.0, width_high, vertex.x > 0.5);
-    let worldX_low = select(0.0, width_low, vertex.x > 0.5);
+    let worldX_high = select(start_high, end_high, vertex.x > 0.5);
+    let worldX_low = select(start_low, end_low, vertex.x > 0.5);
 
     // Apply camera transformation using double-precision
     let viewX = ds_add(worldX_high, worldX_low, uniforms.camera_x_high, uniforms.camera_x_low);
 
     // Y doesn't need double precision
-    let worldY = y + vertex.y * height;
+    let worldY = y + rowLayout.yOffset + vertex.y * height;
     let viewY = worldY + uniforms.camera_y;
 
     // Apply scale to get NDC
-    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
+    // Keep off-screen horizontal coordinates within the rasterizer viewport.
+    let timeNdcX = clamp(viewX * uniforms.scale_x, -1.0, 1.0);
+    let screenNdcX = select(-1.0, 1.0, vertex.x > 0.5);
+    let ndcPos = vec2<f32>(
+        select(timeNdcX, screenNdcX, mainLane),
+        viewY * uniforms.scale_y);
 
     var output: VertexOutput;
+    if (rowLayout.visible < 0.5) {
+        output.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return output;
+    }
     output.position = vec4<f32>(ndcPos, 0.0, 1.0);
     return output;
 }
@@ -401,9 +462,11 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const BLOCK_BG_SHADER = `
 ${WGSL_FULL_UNIFORMS}
+${WGSL_ROW_LAYOUT}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> blocks: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> zoneVisibility: array<u32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -418,7 +481,7 @@ fn vertexMain(
 ) -> VertexOutput {
     // Read block data from 2 vec4s (8 floats, aligned)
     let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, endX_high]
-    let block1 = blocks[instanceIndex * 2u + 1u]; // [endX_low, height, pad, pad]
+    let block1 = blocks[instanceIndex * 2u + 1u]; // [endX_low, height, row, firstZone]
 
     let startX_high = block0.x;
     let startX_low = block0.y;
@@ -426,6 +489,8 @@ fn vertexMain(
     let endX_high = block0.w;
     let endX_low = block1.x;
     let height = block1.y;
+    let rowLayout = rowLayouts[u32(block1.z)];
+    let blockVisible = zoneVisibility[u32(block1.w)] != 0u;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -449,14 +514,23 @@ fn vertexMain(
     let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
 
     // Y doesn't need double precision
-    let worldCornerY = y + vertex.y * height;
+    let worldCornerY = y + rowLayout.yOffset + vertex.y * height;
     let viewY = worldCornerY + uniforms.camera_y;
 
     // Apply scale to get NDC
-    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
+    // Keep off-screen horizontal coordinates within the rasterizer viewport.
+    let ndcPos = vec2<f32>(
+        clamp(viewX * uniforms.scale_x, -1.0, 1.0),
+        viewY * uniforms.scale_y);
 
     var output: VertexOutput;
-    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
+    if (rowLayout.visible < 0.5) {
+        output.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return output;
+    }
+    output.position = select(
+        vec4<f32>(2.0, 2.0, 0.0, 1.0),
+        vec4<f32>(ndcPos, 0.0, 1.0), blockVisible);
     return output;
 }
 
@@ -468,9 +542,11 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const BLOCK_BORDER_SHADER = `
 ${WGSL_FULL_UNIFORMS}
+${WGSL_ROW_LAYOUT}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> blocks: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> zoneVisibility: array<u32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -490,7 +566,7 @@ fn vertexMain(
 ) -> VertexOutput {
     // Read block data from 2 vec4s (8 floats, aligned)
     let block0 = blocks[instanceIndex * 2u];      // [startX_high, startX_low, y, endX_high]
-    let block1 = blocks[instanceIndex * 2u + 1u]; // [endX_low, height, pad, pad]
+    let block1 = blocks[instanceIndex * 2u + 1u]; // [endX_low, height, row, firstZone]
 
     let startX_high = block0.x;
     let startX_low = block0.y;
@@ -498,6 +574,8 @@ fn vertexMain(
     let endX_high = block0.w;
     let endX_low = block1.x;
     let height = block1.y;
+    let rowLayout = rowLayouts[u32(block1.z)];
+    let blockVisible = zoneVisibility[u32(block1.w)] != 0u;
 
     let vertices = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
@@ -521,7 +599,7 @@ fn vertexMain(
     let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
 
     // Y doesn't need double precision
-    let centerY = y + height * 0.5;
+    let centerY = y + rowLayout.yOffset + height * 0.5;
     let worldCornerY = centerY + vertex.y * height * 0.5;
     let viewY = worldCornerY + uniforms.camera_y;
 
@@ -539,11 +617,14 @@ fn vertexMain(
     // Compute block bounds in view space (before scale to NDC)
     let blockStartView = ds_add(startX_high, startX_low, uniforms.camera_x_high, uniforms.camera_x_low);
     let blockEndView = ds_add(endX_high, endX_low, uniforms.camera_x_high, uniforms.camera_x_low);
-    let blockStartY = y + uniforms.camera_y;
-    let blockEndY = (y + height) + uniforms.camera_y;
+    let blockStartY = y + rowLayout.yOffset + uniforms.camera_y;
+    let blockEndY = y + rowLayout.yOffset + height + uniforms.camera_y;
 
     var output: VertexOutput;
-    output.position = vec4<f32>(ndcPos, 0.0, 1.0);
+    output.position = select(
+        vec4<f32>(2.0, 2.0, 0.0, 1.0),
+        vec4<f32>(ndcPos, 0.0, 1.0),
+        rowLayout.visible >= 0.5 && blockVisible);
     output.worldPos = vec2<f32>(viewX, viewY);
     output.blockStart = vec2<f32>(blockStartView, blockStartY);
     output.blockEnd = vec2<f32>(blockEndView, blockEndY);
@@ -689,6 +770,16 @@ function createStorageBindGroupLayout(device: GPUDevice, fragmentAccess: boolean
                 binding: 1,
                 visibility: GPUShaderStage.VERTEX,
                 buffer: { type: 'read-only-storage' }
+            },
+            {
+                binding: 2,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: 'read-only-storage' }
+            },
+            {
+                binding: 3,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: 'read-only-storage' }
             }
         ]
     });
@@ -712,6 +803,8 @@ function createSimplePipeline(
     shaderCode: string,
     uniformBuffer: GPUBuffer,
     storageBuffer: GPUBuffer,
+    rowLayoutBuffer: GPUBuffer,
+    zoneVisibilityBuffer: GPUBuffer,
     hasBlending: boolean = false,
     fragmentAccess: boolean = false
 ): RenderPass {
@@ -722,7 +815,9 @@ function createSimplePipeline(
         layout: bindGroupLayout,
         entries: [
             { binding: 0, resource: { buffer: uniformBuffer } },
-            { binding: 1, resource: { buffer: storageBuffer } }
+            { binding: 1, resource: { buffer: storageBuffer } },
+            { binding: 2, resource: { buffer: rowLayoutBuffer } },
+            { binding: 3, resource: { buffer: zoneVisibilityBuffer } }
         ]
     });
 
@@ -820,11 +915,11 @@ function createBackgroundPipeline(
  *   vec4 #1: [height, r, g, b]
  *   vec4 #2: [id, pad, pad, pad]
  *   Zone X uses double-single precision to avoid Float32 precision loss at extreme zoom
- * - laneBuffer: Lane geometry (4 floats per lane, 1 vec4):
- *   vec4: [y, height, width_high, width_low]
+ * - laneBuffer: Lane geometry (8 floats per lane, 2 vec4s):
+ *   [y, height, padding, padding, start_high, start_low, end_high, end_low]
  *   Lane width uses double-single precision for high-precision rendering at extreme zoom
- * - blockLaneBuffer: Block lane geometry (4 floats per block lane, 1 vec4):
- *   vec4: [y, height, width_high, width_low]
+ * - blockLaneBuffer: Block lane geometry (8 floats per block lane, 2 vec4s):
+ *   [y, height, padding, padding, start_high, start_low, end_high, end_low]
  *   Block lane width uses double-single precision for high-precision rendering at extreme zoom
  * - blockBuffer: Block geometry (8 floats per block, aligned to 2 vec4s):
  *   vec4 #0: [startX_high, startX_low, y, endX_high]
@@ -841,8 +936,12 @@ export function createGPUBuffers(
     zones: ZonesSoA,
     blocks: BlocksSoA,
     blockLanes: BlockLanesSoA,
-    lanes: LanesSoA
-): { positionBuffer: GPUBuffer; laneBuffer: GPUBuffer; blockLaneBuffer: GPUBuffer; blockBuffer: GPUBuffer; gpuMemoryUsage: number } {
+    lanes: LanesSoA,
+    rowBaseYs: Float32Array,
+    rowTimeBounded: Float32Array,
+    rowLayout: Float32Array,
+    zoneVisibility: Uint32Array
+): { positionBuffer: GPUBuffer; laneBuffer: GPUBuffer; blockLaneBuffer: GPUBuffer; blockBuffer: GPUBuffer; rowLayoutBuffer: GPUBuffer; zoneVisibilityBuffer: GPUBuffer; gpuMemoryUsage: number } {
     const positions = new Float32Array(zones.count * ZONE_BUFFER_FLOATS);
     for (let i = 0; i < zones.count; i++) {
         // Compute zone center X in nanoseconds, then convert to milliseconds
@@ -871,6 +970,7 @@ export function createGPUBuffers(
         positions[i * ZONE_BUFFER_FLOATS + 7] = b;
         // vec4 #2: [id, pad, pad, pad] - padding already zero-initialized
         positions[i * ZONE_BUFFER_FLOATS + 8] = i;  // Array index is the ID
+        positions[i * ZONE_BUFFER_FLOATS + 9] = zones.smIndices[i];
     }
 
     const positionBuffer = device.createBuffer({
@@ -883,14 +983,17 @@ export function createGPUBuffers(
 
     const laneData = new Float32Array(lanes.count * LANE_BUFFER_FLOATS);
     for (let i = 0; i < lanes.count; i++) {
-        // Convert lane width from nanoseconds to milliseconds
-        const widthMs = lanes.widths[i] * NS_TO_MS;
-        const [width_high, width_low] = Camera.splitDouble(widthMs);
-        // Single vec4: [y, height, width_high, width_low]
-        laneData[i * LANE_BUFFER_FLOATS + 0] = lanes.ys[i];
+        const startMs = lanes.startsX[i] * NS_TO_MS;
+        const endMs = lanes.widths[i] * NS_TO_MS;
+        const [startHigh, startLow] = Camera.splitDouble(startMs);
+        const [endHigh, endLow] = Camera.splitDouble(endMs);
+        laneData[i * LANE_BUFFER_FLOATS + 0] = rowBaseYs[i];
         laneData[i * LANE_BUFFER_FLOATS + 1] = lanes.heights[i];
-        laneData[i * LANE_BUFFER_FLOATS + 2] = width_high;
-        laneData[i * LANE_BUFFER_FLOATS + 3] = width_low;
+        laneData[i * LANE_BUFFER_FLOATS + 2] = rowTimeBounded[i];
+        laneData[i * LANE_BUFFER_FLOATS + 4] = startHigh;
+        laneData[i * LANE_BUFFER_FLOATS + 5] = startLow;
+        laneData[i * LANE_BUFFER_FLOATS + 6] = endHigh;
+        laneData[i * LANE_BUFFER_FLOATS + 7] = endLow;
     }
 
     const laneBuffer = device.createBuffer({
@@ -903,14 +1006,20 @@ export function createGPUBuffers(
 
     const blockLaneData = new Float32Array(blockLanes.count * BLOCK_LANE_BUFFER_FLOATS);
     for (let i = 0; i < blockLanes.count; i++) {
-        // Convert block lane width from nanoseconds to milliseconds
-        const widthMs = blockLanes.widths[i] * NS_TO_MS;
-        const [width_high, width_low] = Camera.splitDouble(widthMs);
-        // Single vec4: [y, height, width_high, width_low]
+        const startMs = blockLanes.startsX[i] * NS_TO_MS;
+        const endMs = blockLanes.widths[i] * NS_TO_MS;
+        const [startHigh, startLow] = Camera.splitDouble(startMs);
+        const [endHigh, endLow] = Camera.splitDouble(endMs);
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 0] = blockLanes.ys[i];
         blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 1] = blockLanes.heights[i];
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] = width_high;
-        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] = width_low;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 2] =
+            blockLanes.smIndices[i];
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 3] =
+            rowTimeBounded[blockLanes.smIndices[i]];
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 4] = startHigh;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 5] = startLow;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 6] = endHigh;
+        blockLaneData[i * BLOCK_LANE_BUFFER_FLOATS + 7] = endLow;
     }
 
     const blockLaneBuffer = device.createBuffer({
@@ -937,6 +1046,9 @@ export function createGPUBuffers(
         // vec4 #1: [endX_low, height, pad, pad] - padding already zero-initialized
         blockData[i * BLOCK_BUFFER_FLOATS + 4] = endX_low;
         blockData[i * BLOCK_BUFFER_FLOATS + 5] = blocks.heights[i];
+        blockData[i * BLOCK_BUFFER_FLOATS + 6] = blocks.smIndices[i];
+        blockData[i * BLOCK_BUFFER_FLOATS + 7] =
+            blocks.zonesStartIndices[i];
     }
 
     const blockBuffer = device.createBuffer({
@@ -947,11 +1059,31 @@ export function createGPUBuffers(
     new Float32Array(blockBuffer.getMappedRange()).set(blockData);
     blockBuffer.unmap();
 
+    const rowLayoutBuffer = device.createBuffer({
+        size: Math.max(MIN_GPU_BUFFER_SIZE, rowLayout.byteLength),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+    });
+    new Float32Array(rowLayoutBuffer.getMappedRange()).set(rowLayout);
+    rowLayoutBuffer.unmap();
+
+    const zoneVisibilityBuffer = device.createBuffer({
+        size: Math.max(MIN_GPU_BUFFER_SIZE, zoneVisibility.byteLength),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+    });
+    new Uint32Array(zoneVisibilityBuffer.getMappedRange()).set(
+        zoneVisibility);
+    zoneVisibilityBuffer.unmap();
+
     const gpuMemoryUsage = positions.byteLength + laneData.byteLength +
         Math.max(MIN_GPU_BUFFER_SIZE, blockLaneData.byteLength) + Math.max(MIN_GPU_BUFFER_SIZE, blockData.byteLength) +
-        (64 + 32) + (64 + 16);
+        Math.max(MIN_GPU_BUFFER_SIZE, rowLayout.byteLength)
+        + Math.max(MIN_GPU_BUFFER_SIZE, zoneVisibility.byteLength)
+        + (64 + 32) + (64 + 16);
 
-    return { positionBuffer, laneBuffer, blockLaneBuffer, blockBuffer, gpuMemoryUsage };
+    return { positionBuffer, laneBuffer, blockLaneBuffer, blockBuffer,
+        rowLayoutBuffer, zoneVisibilityBuffer, gpuMemoryUsage };
 }
 
 /**
@@ -974,10 +1106,71 @@ export function createPipelines(
     positionBuffer: GPUBuffer,
     laneBuffer: GPUBuffer,
     blockLaneBuffer: GPUBuffer,
-    blockBuffer: GPUBuffer
+    blockBuffer: GPUBuffer,
+    rowLayoutBuffer: GPUBuffer,
+    zoneVisibilityBuffer: GPUBuffer,
+    cachedPasses?: GPUResources['passes']
 ): GPUResources {
-    const uniformBuffer = createUniformBuffer(device, UNIFORM_BUFFER_SIZE);  // 64 (mat4x4) + 32 (7 ints/floats) + 20 (5 floats for double-single camera + scales)
+    const uniformBuffer = createUniformBuffer(device, UNIFORM_BUFFER_SIZE);
     const backgroundUniformBuffer = createUniformBuffer(device, BACKGROUND_UNIFORM_BUFFER_SIZE);
+
+    const RebindStoragePass = (
+        pipeline: GPURenderPipeline,
+        storageBuffer: GPUBuffer
+    ): RenderPass => {
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 1, resource: { buffer: storageBuffer } },
+                { binding: 2, resource: { buffer: rowLayoutBuffer } },
+                { binding: 3, resource: { buffer: zoneVisibilityBuffer } }
+            ]
+        });
+        return { pipeline, bindGroup };
+    };
+
+    const RebindBackgroundPass = (
+        pipeline: GPURenderPipeline
+    ): RenderPass => {
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{
+                binding: 0,
+                resource: { buffer: backgroundUniformBuffer }
+            }]
+        });
+        return { pipeline, bindGroup };
+    };
+
+    const passes = cachedPasses ? {
+        zone: RebindStoragePass(cachedPasses.zone.pipeline, positionBuffer),
+        lane: RebindStoragePass(cachedPasses.lane.pipeline, laneBuffer),
+        blockLane: RebindStoragePass(
+            cachedPasses.blockLane.pipeline, blockLaneBuffer),
+        blockBg: RebindStoragePass(
+            cachedPasses.blockBg.pipeline, blockBuffer),
+        block: RebindStoragePass(cachedPasses.block.pipeline, blockBuffer),
+        background: RebindBackgroundPass(cachedPasses.background.pipeline)
+    } : {
+        zone: createSimplePipeline(device, format, ZONE_SHADER,
+            uniformBuffer, positionBuffer, rowLayoutBuffer,
+            zoneVisibilityBuffer, true, true),
+        lane: createSimplePipeline(device, format, LANE_SHADER,
+            uniformBuffer, laneBuffer, rowLayoutBuffer,
+            zoneVisibilityBuffer),
+        blockLane: createSimplePipeline(device, format, BLOCK_LANE_SHADER,
+            uniformBuffer, blockLaneBuffer, rowLayoutBuffer,
+            zoneVisibilityBuffer),
+        blockBg: createSimplePipeline(device, format, BLOCK_BG_SHADER,
+            uniformBuffer, blockBuffer, rowLayoutBuffer,
+            zoneVisibilityBuffer),
+        block: createSimplePipeline(device, format, BLOCK_BORDER_SHADER,
+            uniformBuffer, blockBuffer, rowLayoutBuffer,
+            zoneVisibilityBuffer, true, true),
+        background: createBackgroundPipeline(
+            device, format, backgroundUniformBuffer)
+    };
 
     return {
         uniformBuffer,
@@ -986,16 +1179,11 @@ export function createPipelines(
             position: positionBuffer,
             lane: laneBuffer,
             blockLane: blockLaneBuffer,
-            block: blockBuffer
+            block: blockBuffer,
+            rowLayout: rowLayoutBuffer,
+            zoneVisibility: zoneVisibilityBuffer
         },
-        passes: {
-            zone: createSimplePipeline(device, format, ZONE_SHADER, uniformBuffer, positionBuffer, true, true),
-            lane: createSimplePipeline(device, format, LANE_SHADER, uniformBuffer, laneBuffer),
-            blockLane: createSimplePipeline(device, format, BLOCK_LANE_SHADER, uniformBuffer, blockLaneBuffer),
-            blockBg: createSimplePipeline(device, format, BLOCK_BG_SHADER, uniformBuffer, blockBuffer),
-            block: createSimplePipeline(device, format, BLOCK_BORDER_SHADER, uniformBuffer, blockBuffer, true, true),
-            background: createBackgroundPipeline(device, format, backgroundUniformBuffer)
-        },
+        passes,
         gpuMemoryUsage: 0
     };
 }

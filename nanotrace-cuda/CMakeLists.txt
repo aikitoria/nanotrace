@@ -7,9 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Set CUDA architecture to Blackwell (Compute Capability 10.0)
-# Use 100a for sm_100a (architecture-specific, required for tcgen05)
-set(CMAKE_CUDA_ARCHITECTURES "100a")
+# Target architecture-specific Blackwell GeForce and workstation features.
+set(CMAKE_CUDA_ARCHITECTURES "120a")
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
@@ -22,7 +21,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Library sources
 set(NANOTRACE_SOURCES
+    src/nanotrace_gpu.cu
+    src/nanotrace_hes.cpp
     src/nanotrace_host.cpp
+    src/nanotrace_session.cpp
 )
 
 # Add miniz if enabled
@@ -49,15 +51,26 @@ if(NANOTRACE_WITH_MINIZ)
     target_include_directories(nanotrace_host PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/ext
     )
-    target_compile_definitions(nanotrace_host PUBLIC NANOTRACE_WITH_MINIZ)
+    target_compile_definitions(nanotrace_host PRIVATE NANOTRACE_WITH_MINIZ)
 endif()
 
 target_link_libraries(nanotrace_host PUBLIC
+    CUDA::cuda_driver
     CUDA::cudart
 )
 
+if(NANOTRACE_CUPTI_LIBRARY)
+    add_library(nanotrace_cupti SHARED IMPORTED)
+    set_target_properties(nanotrace_cupti PROPERTIES
+        IMPORTED_LOCATION "${NANOTRACE_CUPTI_LIBRARY}"
+    )
+    target_link_libraries(nanotrace_host PUBLIC nanotrace_cupti)
+else()
+    target_link_libraries(nanotrace_host PUBLIC CUDA::cupti)
+endif()
+
 # Examples (optional)
-option(BUILD_EXAMPLES "Build example programs" ON)
+option(BUILD_EXAMPLES "Build example programs" OFF)
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()

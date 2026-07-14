@@ -11,7 +11,7 @@
  * - Block labels: Min 100px width, min 12px padding height
  * - Zone labels: Min 100px width, min 15px height
  *
- * Labels are clipped using fillText maxWidth parameter to fit available space.
+ * Labels are shortened with an ellipsis to fit available space.
  * Uses 10px monospace font (Consolas/Monaco) for consistent readability.
  */
 
@@ -22,20 +22,19 @@ import {
 import { NS_TO_MS } from '../utils/soa-helpers.js';
 import {
     SUBLANE_HEIGHT,
-    BLOCK_EDGE_PADDING,
     LABEL_COLOR,
-    SM_LABEL_WIDTH,
+    TRACK_LABEL_WIDTH,
     MIN_BLOCK_LABEL_WIDTH,
-    MIN_BLOCK_LABEL_PADDING_HEIGHT,
     MIN_ZONE_LABEL_WIDTH,
     MIN_ZONE_LABEL_HEIGHT,
     BLOCK_LABEL_PADDING_X,
-    BLOCK_LABEL_PADDING_Y,
     ZONE_LABEL_PADDING_X,
-    ZONE_LABEL_PADDING_Y,
     LABEL_CLIP_MARGIN,
     LABEL_FONT_SIZE,
-    LABEL_FONT_FAMILY
+    MIN_LABEL_FONT_SIZE,
+    MIN_LABEL_ZOOM_Y,
+    LABEL_FONT_FAMILY,
+    ZONE_LABEL_COLOR
 } from '../utils/constants.js';
 
 /**
@@ -64,6 +63,29 @@ export class LabelRenderer {
         this.camera = camera;
     }
 
+    /** Returns text that fits without allowing Canvas to horizontally scale it. */
+    private fitLabel(text: string, maxWidth: number): string | null {
+        if (maxWidth <= 0) return null;
+        if (this.labelCtx.measureText(text).width <= maxWidth) return text;
+
+        const ellipsis = '...';
+        if (this.labelCtx.measureText(ellipsis).width > maxWidth) return null;
+
+        let low = 0;
+        let high = text.length;
+        while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            const candidate = `${text.slice(0, middle)}${ellipsis}`;
+            if (this.labelCtx.measureText(candidate).width <= maxWidth) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        return `${text.slice(0, low)}${ellipsis}`;
+    }
+
     /**
      * Renders block labels with performance culling (SoA version).
      *
@@ -74,28 +96,32 @@ export class LabelRenderer {
      * 4. Per-block size check: Only render if block is wide/tall enough for readability
      *
      * Minimum thresholds:
-     * - Block width: 100px
+     * - Block width: 25px at the reference font size
      * - Padding height: 12px (space above block for label)
      *
      * Labels show: "Block Name (duration ns)" in gray (#a8a8a8)
-     * Long labels are clipped using fillText maxWidth to fit available space.
+     * Long labels are shortened with an ellipsis to fit available space.
      */
     renderBlockLabels(
         hierarchy: HierarchyData,
-        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
+        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string,
+        rowOffsets: Float32Array,
+        rowVisible: Uint8Array,
+        zoneVisibility: Uint32Array
     ): void {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
         const { blocks, blockLanes, formatDescriptors } = hierarchy;
 
-        const minWidth = MIN_BLOCK_LABEL_WIDTH;
-        const minPaddingHeight = MIN_BLOCK_LABEL_PADDING_HEIGHT;
-        const smLabelWidth = SM_LABEL_WIDTH;
-
-        const minScreenPaddingHeight = BLOCK_EDGE_PADDING * this.camera.zoomY * (rect.height / 2);
-        if (minScreenPaddingHeight < minPaddingHeight) {
-            return;
-        }
+        const referenceWidth = MIN_BLOCK_LABEL_WIDTH;
+        const trackLabelWidth = TRACK_LABEL_WIDTH;
+        const headerScreenHeight = SUBLANE_HEIGHT * this.camera.zoomY
+            * (rect.height / 2);
+        const fontSize = LABEL_FONT_SIZE * headerScreenHeight
+            / MIN_ZONE_LABEL_HEIGHT;
+        if (fontSize < MIN_LABEL_FONT_SIZE) return;
+        const fontScale = fontSize / LABEL_FONT_SIZE;
+        const minWidth = referenceWidth;
 
         const worldLeft = this.camera.screenToWorld(0, 0, this.canvas).x;
         const worldRight = this.camera.screenToWorld(rect.width, 0, this.canvas).x;
@@ -105,8 +131,12 @@ export class LabelRenderer {
         // Check max visible block width for early exit
         let maxVisibleBlockWidth = 0;
         for (let blIdx = 0; blIdx < blockLanes.count; blIdx++) {
-            const blockLaneTop = blockLanes.ys[blIdx] + blockLanes.heights[blIdx];
-            const blockLaneBottom = blockLanes.ys[blIdx];
+            const rowIndex = blockLanes.smIndices[blIdx];
+            if (rowVisible[rowIndex] === 0) continue;
+            const rowOffset = rowOffsets[rowIndex];
+            const blockLaneTop = blockLanes.ys[blIdx] + rowOffset
+                + blockLanes.heights[blIdx];
+            const blockLaneBottom = blockLanes.ys[blIdx] + rowOffset;
             if (blockLaneBottom <= worldTop && blockLaneTop >= worldBottom) {
                 maxVisibleBlockWidth = Math.max(maxVisibleBlockWidth, blockLanes.maxBlockWidths[blIdx]);
             }
@@ -119,13 +149,17 @@ export class LabelRenderer {
             }
         }
 
-        this.labelCtx.font = `${LABEL_FONT_SIZE}px ${LABEL_FONT_FAMILY}`;
+        this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
         this.labelCtx.textAlign = 'left';
-        this.labelCtx.textBaseline = 'top';
+        this.labelCtx.textBaseline = 'middle';
         this.labelCtx.fillStyle = LABEL_COLOR;
 
         // Iterate all blocks (not using indirection for blocks - direct iteration)
         for (let i = 0; i < blocks.count; i++) {
+            const rowIndex = blocks.smIndices[i];
+            if (rowVisible[rowIndex] === 0) continue;
+            if (zoneVisibility[blocks.zonesStartIndices[i]] === 0) continue;
+            const rowOffset = rowOffsets[rowIndex];
             // Convert block times from nanoseconds to milliseconds for comparison
             const blockStartMs = blocks.startsX[i] * NS_TO_MS;
             const blockEndMs = blocks.endsX[i] * NS_TO_MS;
@@ -134,8 +168,8 @@ export class LabelRenderer {
                 continue;
             }
 
-            const blockTop = blocks.ys[i] + blocks.heights[i];
-            const blockBottom = blocks.ys[i];
+            const blockTop = blocks.ys[i] + rowOffset + blocks.heights[i];
+            const blockBottom = blocks.ys[i] + rowOffset;
             if (blockBottom > worldTop || blockTop < worldBottom) {
                 continue;
             }
@@ -143,10 +177,11 @@ export class LabelRenderer {
             const ndcLeft = (blockStartMs + this.camera.x) * this.camera.zoomX / aspect;
             const ndcRight = (blockEndMs + this.camera.x) * this.camera.zoomX / aspect;
 
-            const blockTopY = blocks.ys[i] + blocks.heights[i];
+            const blockTopY = blocks.ys[i] + rowOffset + blocks.heights[i];
             const ndcTop = (blockTopY + this.camera.y) * this.camera.zoomY;
 
-            const sublanesTopY = blocks.ys[i] + blocks.heights[i] - BLOCK_EDGE_PADDING;
+            const sublanesTopY = blocks.ys[i] + rowOffset + blocks.heights[i]
+                - blocks.headerHeights[i];
             const ndcSublanesTop = (sublanesTopY + this.camera.y) * this.camera.zoomY;
 
             const screenLeft = (ndcLeft + 1) * rect.width / 2;
@@ -156,20 +191,27 @@ export class LabelRenderer {
 
             const screenPaddingHeight = screenSublanesTop - screenTop;
 
-            const visibleLeft = Math.max(screenLeft, smLabelWidth);
+            const visibleLeft = Math.max(screenLeft, trackLabelWidth);
             const visibleWidth = screenRight - visibleLeft;
 
-            if (visibleWidth >= minWidth && screenPaddingHeight >= minPaddingHeight) {
-                const labelX = visibleLeft + BLOCK_LABEL_PADDING_X;
-                const labelY = screenTop + BLOCK_LABEL_PADDING_Y;
+            if (visibleWidth >= minWidth
+                && screenPaddingHeight >= MIN_LABEL_FONT_SIZE) {
+                const horizontalPadding = BLOCK_LABEL_PADDING_X * fontScale;
+                const labelX = visibleLeft + horizontalPadding;
+                const labelY = screenTop + screenPaddingHeight / 2;
                 const durationNs = blocks.endsX[i] - blocks.startsX[i];
 
                 const blockName = formatDescriptors.length > 0
                     ? formatBlockString(blocks.formatDescIds[i], blocks.gridIds[i], blocks.clusterIds[i])
                     : `Block #${i}`;
 
-                // Use maxWidth parameter to clip long labels to fit available space
-                this.labelCtx.fillText(`${blockName} (${durationNs.toLocaleString()} ns)`, labelX, labelY, visibleWidth - LABEL_CLIP_MARGIN);
+                const label = this.fitLabel(
+                    `${blockName} (${durationNs.toLocaleString()} ns)`,
+                    visibleWidth - horizontalPadding
+                        - LABEL_CLIP_MARGIN * fontScale);
+                if (label !== null) {
+                    this.labelCtx.fillText(label, labelX, labelY);
+                }
             }
         }
     }
@@ -186,17 +228,20 @@ export class LabelRenderer {
      * 4. Per-zone size check: Only render if zone is wide/tall enough for readability
      *
      * Minimum thresholds:
-     * - Zone width: 100px
+     * - Zone width: 25px at the reference font size
      * - Zone height: 15px
      *
      * Labels show: "Zone Name (duration ns)" in light gray (#d4d4d4)
-     * Long labels are clipped using fillText maxWidth to fit available space.
+     * Long labels are shortened with an ellipsis to fit available space.
      * Font: 10px Consolas/Monaco monospace with device pixel ratio scaling
      */
     renderZoneLabels(
         hierarchy: HierarchyData,
         formatString: (formatDescId: number, params: number[]) => string,
-        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
+        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string,
+        rowOffsets: Float32Array,
+        rowVisible: Uint8Array,
+        zoneVisibility: Uint32Array
     ): void {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
@@ -204,22 +249,27 @@ export class LabelRenderer {
 
         this.labelCtx.clearRect(0, 0, this.labelCtx.canvas.width, this.labelCtx.canvas.height);
 
+        if (this.camera.zoomY < MIN_LABEL_ZOOM_Y) return;
+
         this.labelCtx.save();
         this.labelCtx.scale(devicePixelRatio, devicePixelRatio);
 
         // Render block labels first
-        this.renderBlockLabels(hierarchy, formatBlockString);
+        this.renderBlockLabels(
+            hierarchy, formatBlockString, rowOffsets, rowVisible,
+            zoneVisibility);
 
-        const minWidth = MIN_ZONE_LABEL_WIDTH;
-        const minHeight = MIN_ZONE_LABEL_HEIGHT;
-        const smLabelWidth = SM_LABEL_WIDTH;
+        const trackLabelWidth = TRACK_LABEL_WIDTH;
 
         const maxZoneHeight = SUBLANE_HEIGHT;
-        const minScreenHeight = maxZoneHeight * this.camera.zoomY * (rect.height / 2);
-        if (minScreenHeight < minHeight) {
-            this.labelCtx.restore();
-            return;
-        }
+        const screenZoneHeight = maxZoneHeight * this.camera.zoomY
+            * (rect.height / 2);
+        const fontSize = LABEL_FONT_SIZE * screenZoneHeight
+            / MIN_ZONE_LABEL_HEIGHT;
+        const fontScale = fontSize / LABEL_FONT_SIZE;
+        const minWidth = MIN_ZONE_LABEL_WIDTH;
+        const horizontalPadding = ZONE_LABEL_PADDING_X * fontScale;
+        let canRenderLabels = fontSize >= MIN_LABEL_FONT_SIZE;
 
         const worldTop = this.camera.screenToWorld(0, 0, this.canvas).y;
         const worldBottom = this.camera.screenToWorld(0, rect.height, this.canvas).y;
@@ -227,8 +277,12 @@ export class LabelRenderer {
         // Check max visible zone width for early exit
         let maxVisibleZoneWidth = 0;
         for (let blIdx = 0; blIdx < blockLanes.count; blIdx++) {
-            const blockLaneTop = blockLanes.ys[blIdx] + blockLanes.heights[blIdx];
-            const blockLaneBottom = blockLanes.ys[blIdx];
+            const rowIndex = blockLanes.smIndices[blIdx];
+            if (rowVisible[rowIndex] === 0) continue;
+            const rowOffset = rowOffsets[rowIndex];
+            const blockLaneTop = blockLanes.ys[blIdx] + rowOffset
+                + blockLanes.heights[blIdx];
+            const blockLaneBottom = blockLanes.ys[blIdx] + rowOffset;
             if (blockLaneBottom <= worldTop && blockLaneTop >= worldBottom) {
                 maxVisibleZoneWidth = Math.max(maxVisibleZoneWidth, blockLanes.maxZoneWidths[blIdx]);
             }
@@ -237,21 +291,21 @@ export class LabelRenderer {
         if (maxVisibleZoneWidth > 0) {
             const maxScreenWidth = (maxVisibleZoneWidth * NS_TO_MS) * this.camera.zoomX * (rect.width / 2) / aspect;
             if (maxScreenWidth < minWidth) {
-                this.labelCtx.restore();
-                return;
+                canRenderLabels = false;
             }
         }
 
-        this.labelCtx.font = `${LABEL_FONT_SIZE}px ${LABEL_FONT_FAMILY}`;
+        this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
         this.labelCtx.textAlign = 'left';
         this.labelCtx.textBaseline = 'middle';
-        this.labelCtx.fillStyle = LABEL_COLOR;
+        this.labelCtx.fillStyle = ZONE_LABEL_COLOR;
 
         const worldLeft = this.camera.screenToWorld(0, 0, this.canvas).x;
         const worldRight = this.camera.screenToWorld(rect.width, 0, this.canvas).x;
 
         // Iterate through hierarchy: lanes → block lanes → blocks (via indirection) → zones
         for (let laneIdx = 0; laneIdx < lanes.count; laneIdx++) {
+            if (rowVisible[laneIdx] === 0) continue;
             const laneTopY = lanes.ys[laneIdx] + lanes.heights[laneIdx];
             const laneBottomY = lanes.ys[laneIdx];
             const ndcTopY = (laneTopY + this.camera.y) * this.camera.zoomY;
@@ -267,8 +321,10 @@ export class LabelRenderer {
             const blockLaneEnd = lanes.blockLanesEndIndices[laneIdx];
 
             for (let blIdx = blockLaneStart; blIdx < blockLaneEnd; blIdx++) {
-                const blockLaneTopY = blockLanes.ys[blIdx] + blockLanes.heights[blIdx];
-                const blockLaneBottomY = blockLanes.ys[blIdx];
+                const rowOffset = rowOffsets[laneIdx];
+                const blockLaneTopY = blockLanes.ys[blIdx] + rowOffset
+                    + blockLanes.heights[blIdx];
+                const blockLaneBottomY = blockLanes.ys[blIdx] + rowOffset;
                 const ndcBlockLaneTopY = (blockLaneTopY + this.camera.y) * this.camera.zoomY;
                 const ndcBlockLaneBottomY = (blockLaneBottomY + this.camera.y) * this.camera.zoomY;
                 const screenBlockLaneTopY = rect.height / 2 - (ndcBlockLaneTopY * rect.height / 2);
@@ -298,6 +354,7 @@ export class LabelRenderer {
                     const zoneEnd = blocks.zonesEndIndices[blockIdx];
 
                     for (let zIdx = zoneStart; zIdx < zoneEnd; zIdx++) {
+                        if (zoneVisibility[zIdx] === 0) continue;
                         // Convert zone times from nanoseconds to milliseconds
                         const zoneStartMs = zones.startsX[zIdx] * NS_TO_MS;
                         const zoneEndMs = zones.endsX[zIdx] * NS_TO_MS;
@@ -308,8 +365,10 @@ export class LabelRenderer {
 
                         const worldZoneLeft = zoneStartMs;
                         const worldZoneRight = zoneEndMs;
-                        const worldZoneTop = zones.ys[zIdx] + SUBLANE_HEIGHT / 2;
-                        const worldZoneBottom = zones.ys[zIdx] - SUBLANE_HEIGHT / 2;
+                        const worldZoneTop = zones.ys[zIdx] + rowOffset
+                            + SUBLANE_HEIGHT / 2;
+                        const worldZoneBottom = zones.ys[zIdx] + rowOffset
+                            - SUBLANE_HEIGHT / 2;
 
                         const ndcLeft = (worldZoneLeft + this.camera.x) * this.camera.zoomX / aspect;
                         const ndcRight = (worldZoneRight + this.camera.x) * this.camera.zoomX / aspect;
@@ -323,12 +382,28 @@ export class LabelRenderer {
 
                         const screenHeight = screenBottom - screenTop;
 
-                        const visibleLeft = Math.max(screenLeft, smLabelWidth);
+                        const visibleLeft = Math.max(
+                            screenLeft, trackLabelWidth);
                         const visibleWidth = screenRight - visibleLeft;
+                        const canRenderFullLabel = canRenderLabels
+                            && visibleWidth >= minWidth
+                            && screenHeight >= MIN_LABEL_FONT_SIZE;
 
-                        if (visibleWidth >= minWidth && screenHeight >= minHeight) {
-                            const labelX = visibleLeft + ZONE_LABEL_PADDING_X;
-                            const labelY = screenTop + ZONE_LABEL_PADDING_Y;
+                        if (zones.hasChildren[zIdx] !== 0
+                            && canRenderLabels
+                            && !canRenderFullLabel
+                            && visibleWidth >= fontSize
+                            && screenHeight >= fontSize) {
+                            const disclosure = zones.expanded[zIdx] !== 0
+                                ? '\u25be' : '\u25b8';
+                            this.labelCtx.fillText(
+                                disclosure, visibleLeft + horizontalPadding,
+                                screenTop + screenHeight / 2);
+                        }
+
+                        if (canRenderFullLabel) {
+                            const labelX = visibleLeft + horizontalPadding;
+                            const labelY = screenTop + screenHeight / 2;
                             const durationNs = zones.endsX[zIdx] - zones.startsX[zIdx];
 
                             // Get zone params from pool (small temporary array for formatting)
@@ -342,9 +417,17 @@ export class LabelRenderer {
                             const zoneName = formatDescriptors.length > 0
                                 ? formatString(zones.formatDescIds[zIdx], params)
                                 : `#${zIdx}`;
+                            const disclosure = zones.hasChildren[zIdx] !== 0
+                                ? (zones.expanded[zIdx] !== 0 ? '\u25be ' : '\u25b8 ')
+                                : '';
 
-                            // Use maxWidth parameter to clip long labels to fit available space
-                            this.labelCtx.fillText(`${zoneName} (${durationNs.toLocaleString()} ns)`, labelX, labelY, visibleWidth - LABEL_CLIP_MARGIN);
+                            const label = this.fitLabel(
+                                `${disclosure}${zoneName} (${durationNs.toLocaleString()} ns)`,
+                                visibleWidth - horizontalPadding
+                                    - LABEL_CLIP_MARGIN * fontScale);
+                            if (label !== null) {
+                                this.labelCtx.fillText(label, labelX, labelY);
+                            }
                         }
                     }
                 }

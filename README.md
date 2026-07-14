@@ -1,152 +1,106 @@
 # nanotrace
 
-Have you ever looked at nsys and wished you could zoom in much, much further?
+Nanotrace is a CUDA and CPU timeline tracer for studying kernels below the
+resolution and overhead limits of conventional software tracing.
 
-![NSight Systems view](docs/img0.png)
-
-Now you can! <sub>*\*Assuming you wrote that kernel*</sub>
-
-![Zoomed in trace view](docs/img1.png)
-
-Nanotrace reveals what your warp specialized and pipelined kernels are actually doing over time.
-
-![Warp specialized kernel view](docs/img2.png)
-
-Enormous kernel traces with 10 million+ zones can be viewed without any issues.
-
-![Large kernel view](docs/img3.png)
-
-## Overview
-
-Nanotrace consists of a CUDA library for instrumenting kernels and a WebGPU visualizer for inspecting execution traces. Traces capture timing data with 32ns resolution using the GPU's global timer.
-
-**Live demo**: [aikitoria.github.io/nanotrace](https://aikitoria.github.io/nanotrace)
+![Nsight Systems view](docs/img0.png)
 
 ## Components
 
-**CUDA Library (`nanotrace-cuda/`):**
-- Low overhead instrumentation
-- Conditional tracing (enable/disable per-thread)
-- Optional compression
+- `nanotrace-cuda`: CUDA instrumentation, CPU thread scopes, CUPTI HES
+  collection, clock correlation, and the v4 trace writer.
+- `visualizer`: a WebGPU timeline capable of displaying CPU, hardware kernel,
+  and intra-kernel tracks in one view.
+- `docs/nanotrace.md`: the nanotrace v4 binary format specification.
 
-**Visualizer (`visualizer/`):**
-- WebGPU-based interactive timeline
-- Independent X/Y zoom and time range selection
-- Handles 10M+ events at 60 FPS
+## Unified timeline
 
-**File Format:**
-- Compact binary with optional compression
-- Nanosecond precision timing
-- Full spec in `docs/nanotrace.md`
+Nanotrace v4 uses `CLOCK_MONOTONIC_RAW` as its session reference clock. CUPTI
+HES timestamps are correlated to that clock with bracketing snapshots. Explicit
+CUDA instrumentation uses `%globaltimer` and is correlated through the matching
+HES kernel event:
 
-## Quick Start
+    GPU %globaltimer -> CUPTI HES clock -> CLOCK_MONOTONIC_RAW
 
-### CUDA Library
+Track and event parent IDs preserve the hierarchy from GPU and stream through
+kernel, SM, block, and lane while CPU thread tracks remain on the same time
+axis.
 
-```cpp
-#include <nanotrace/nanotrace.cuh>
-#include <nanotrace/nanotrace_host.h>
+## Build the CUDA library
 
-// Define trace types
-NANOTRACE_DEFINE_TRACE_TYPE(Work, "Work", "Work execution", 0, nanotrace::lane_type::STATIC);
-NANOTRACE_DEFINE_BLOCK_TYPE(Block, "Block {blockX}", "Block {blockX} on SM");
-NANOTRACE_DEFINE_TRACK_TYPE(Warp, "Warp {lane}", "Warp {lane}", 0);
+~~~bash
+cmake -S nanotrace-cuda -B build -GNinja -DBUILD_EXAMPLES=ON
+cmake --build build
+~~~
 
-// Create trace tensor
-using TraceConfig = nanotrace::static_trace_builder<8, Work, Work, Work, Work, Work, Work, Work, Work>;
-TraceConfig trace(100, dim3(16, 1, 1));  // 100 events per lane
+The standalone configuration requires CUDA 13.3 and targets `sm_120a`.
 
-__global__ void kernel(nanotrace::static_tensor_handle<8, 2> handle) {
-    uint32_t warp_id = threadIdx.x / 32;
-    bool should_trace = (threadIdx.x % 32 == 0);  // Only lane 0 traces
+Run the unified example before any other code in the process creates a CUDA
+context:
 
-    auto lane = nanotrace::begin_lane(handle, blockIdx.x, warp_id, should_trace);
-    auto s = nanotrace::start();
+~~~bash
+CUDA_VISIBLE_DEVICES=0 ./build/examples/unified_trace
+~~~
 
-    // ... work ...
+## Build the visualizer
 
-    nanotrace::end(s, handle, lane, Work{});
-    nanotrace::finish_lane(handle, lane);
-}
-
-int main() {
-    kernel<<<dim3(16,1,1), dim3(256,1,1)>>>(trace.get_handle());
-
-    // Configure track type on tensor
-    trace.set_track_type<Warp>();
-
-    nanotrace::trace_writer writer("kernel");
-    writer.set_block_type<Block>();
-    writer.register_trace_type<Work>();
-    writer.add_tensor(trace);
-    writer.write("trace.nanotrace");  // Logs statistics to stdout
-}
-```
-
-Build with CMake (requires CUDA 13.0+, sm_100 target):
-```bash
-cd nanotrace-cuda
-mkdir build && cd build
-cmake ..
-make
-```
-
-### Visualizer
-
-Visit [aikitoria.github.io/nanotrace](https://aikitoria.github.io/nanotrace) or run locally:
-
-```bash
+~~~bash
 cd visualizer
-npm install
-npm run dev
-```
+npm ci
+npm run build
+npm run validate -- /path/to/trace.nanotrace
+~~~
 
-Sample traces included:
-- **B200 samples**: Real kernel traces from NVIDIA B200 (Blackwell)
-- **Test generators**: Synthetic traces for testing
+Development mode is available with `npm run dev`.
 
-## Navigation
+## Standalone examples and samples
 
-- **Pan**: Right-click + drag
-- **Zoom**: Scroll (X-axis), Shift+Scroll (Y-axis), Ctrl+Scroll (uniform)
-- **Select time range**: Left-click + drag
-- **Snap selection**: Double-click on zone or block
-- **Reset view**: Press R
+The viewer ships five canonical v4 samples generated by the standalone C++
+examples:
 
-## Test Trace Generation
+- `unified_trace`: three CUDA kernels with CPU launch scopes, CUPTI HES kernel
+  timing, and expandable intra-kernel events;
+- `multistream_graph_trace`: a captured CUDA graph replayed across two
+  driver-selected execution streams;
+- `cpu_hierarchy_trace`: deterministic application-defined CPU parent and
+  worker tracks;
+- `tma_bandwidth_bench_static`: TMA transfers with statically distributed
+  tiles across 170 blocks;
+- `tma_bandwidth_bench_atomic`: TMA transfers with dynamically distributed
+  tiles across 170 blocks.
 
-Synthetic traces for testing (TypeScript generators):
+After building with `BUILD_EXAMPLES=ON`, regenerate them from the repository
+root:
 
-```bash
-cd visualizer
-npm run generate:minimal   # 1 block, 2 events
-npm run generate:small     # ~50K events, 16 SMs
-npm run generate:large     # ~10M events, 148 SMs
-npm run validate <file>    # Validate binary format
-```
+~~~bash
+./build/examples/cpu_hierarchy_trace \
+  visualizer/public/cpu_hierarchy.nanotrace
+CUDA_VISIBLE_DEVICES=0 ./build/examples/unified_trace \
+  visualizer/public/unified_trace.nanotrace
+CUDA_VISIBLE_DEVICES=0 ./build/examples/multistream_graph_trace \
+  visualizer/public/multistream_graph.nanotrace
+CUDA_VISIBLE_DEVICES=0 ./build/examples/tma_bandwidth_bench_static 170 \
+  visualizer/public/tma_bandwidth_static_sm120a.nanotrace
+CUDA_VISIBLE_DEVICES=0 ./build/examples/tma_bandwidth_bench_atomic 170 \
+  visualizer/public/tma_bandwidth_atomic_sm120a.nanotrace
+~~~
 
-## Project Structure
+The CUDA examples and committed GPU samples target `sm_120a`. HES examples
+must run before any other code in the process creates a CUDA context.
 
-```
-nanotrace/
-├── nanotrace-cuda/          # CUDA tracing library
-│   ├── include/nanotrace/   # Header-only device API
-│   ├── src/                 # Host-side implementation
-│   ├── examples/            # Example kernels
-│   └── CMakeLists.txt
-├── visualizer/              # WebGPU visualizer
-│   ├── src/                 # TypeScript source
-│   ├── scripts/             # Test trace generators
-│   ├── public/samples/      # B200 sample traces
-│   └── dist/                # Build output
-└── docs/
-    └── nanotrace.md         # Binary format specification
-```
+## Important constraints
 
-## Contributing & Feedback
+- CUPTI HES must be requested before CUDA driver initialization and before a
+  context is created.
+- Blackwell HES does not support MPS, MIG, vGPU, WSL, or confidential-compute
+  configurations.
+- A lane trace must span less than one 32-bit `%globaltimer_lo` wrap.
+- Device lane rows must remain 16-byte aligned.
+- `NANOTRACE_DISABLED` removes device instrumentation at compile time.
 
-This library is a work in progress and the API may change as it evolves. Suggestions and ideas are welcome! You can find me in the [GPU MODE Discord](https://discord.gg/gpumode).
+See the CUDA library README for the API and the format specification for binary
+layout details.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License; see `LICENSE`.

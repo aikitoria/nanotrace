@@ -1,15 +1,8 @@
 import { defineConfig } from 'vite';
 import { imagetools } from 'vite-imagetools';
 import { createHtmlPlugin } from 'vite-plugin-html';
-import { execSync } from 'child_process';
 
-// Get git commit hash (first 4 chars) for version string
-let gitHash = 'dev';
-try {
-  gitHash = execSync('git rev-parse --short=4 HEAD').toString().trim();
-} catch (e) {
-  console.warn('Could not get git commit hash, using "dev"');
-}
+const gitHash = process.env.NANOTRACE_GIT_HASH ?? 'dev';
 
 export default defineConfig({
   base: '/nanotrace/',

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <nanotrace/nanotrace.cuh>
+#include <nanotrace/nanotrace_gpu.h>
 #include <nanotrace/nanotrace_host.h>
 
 using barrier = cuda::barrier<cuda::thread_scope_block>;
@@ -26,12 +27,14 @@ constexpr int TILE_WIDTH = 128;
 constexpr int TILE_SIZE_BYTES = TILE_HEIGHT * TILE_WIDTH * sizeof(float);
 
 constexpr int TENSOR_WIDTH = 131072;
-constexpr int TENSOR_HEIGHT = 131072;
+constexpr int TENSOR_HEIGHT = 32768;
 constexpr size_t TENSOR_NUM_ELEMENTS = static_cast<size_t>(TENSOR_WIDTH) * TENSOR_HEIGHT;
 constexpr size_t TENSOR_SIZE_BYTES = TENSOR_NUM_ELEMENTS * sizeof(float);
+constexpr double PEAK_BANDWIDTH_GB_S = 1792.0;
 
 // Define trace types
-NANOTRACE_DEFINE_TRACE_TYPE(TileTransfer, "Tile {0},{1}", "Transfer tile ({0},{1})", 2, nanotrace::lane_type::STATIC);
+NANOTRACE_DEFINE_TRACE_TYPE_WITH_PARAMETERS(TileTransfer, "Tile {0},{1}", "Transfer tile ({0},{1})",
+                                            nanotrace::lane_type::STATIC, "tile_x", "tile_y");
 NANOTRACE_DEFINE_BLOCK_TYPE(TMABlock, "Block {blockLinear}", "Block {blockLinear} on SM");
 NANOTRACE_DEFINE_TRACK_TYPE(BufferTrack, "Buffer {lane}", "Buffer {lane}", 0);
 
@@ -137,13 +140,14 @@ __global__ void tma_bandwidth_kernel(
             trace_start[stage] = nanotrace::start();
 
             cg::invoke_one(cg::coalesced_threads(), [&]() {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                const cuda::std::int32_t coordinates[]{ coord_x, coord_y };
+                cuda::ptx::cp_async_bulk_tensor(
+                    cuda::ptx::space_cluster,
+                    cuda::ptx::space_global,
                     &smem_buffer[stage],
                     &tensor_map,
-                    coord_x,
-                    coord_y,
-                    bar[stage]
-                );
+                    coordinates,
+                    cuda::device::barrier_native_handle(bar[stage]));
                 (void)cuda::device::barrier_arrive_tx(bar[stage], 1, TILE_SIZE_BYTES);
             });
         }
@@ -173,13 +177,14 @@ __global__ void tma_bandwidth_kernel(
             trace_start[stage] = nanotrace::start();
 
             cg::invoke_one(cg::coalesced_threads(), [&]() {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                const cuda::std::int32_t coordinates[]{ coord_x, coord_y };
+                cuda::ptx::cp_async_bulk_tensor(
+                    cuda::ptx::space_cluster,
+                    cuda::ptx::space_global,
                     &smem_buffer[stage],
                     &tensor_map,
-                    coord_x,
-                    coord_y,
-                    bar[stage]
-                );
+                    coordinates,
+                    cuda::device::barrier_native_handle(bar[stage]));
                 (void)cuda::device::barrier_arrive_tx(bar[stage], 1, TILE_SIZE_BYTES);
             });
         }
@@ -221,15 +226,22 @@ __global__ void tma_bandwidth_kernel(
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <num_blocks>\n", argv[0]);
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "Usage: %s <num_blocks> [output.nanotrace]\n", argv[0]);
         fprintf(stderr, "  num_blocks: Number of thread blocks (SMs to use)\n");
         return 1;
     }
 
     int num_blocks = atoi(argv[1]);
+    const char* output_path = argc == 3 ? argv[2] : "tma_bandwidth_atomic.nanotrace";
     if (num_blocks <= 0) {
         fprintf(stderr, "Error: num_blocks must be positive\n");
+        return 1;
+    }
+
+    nanotrace::GpuTrace gpu_trace("TMA bandwidth atomic schedule");
+    if (!gpu_trace) {
+        fprintf(stderr, "GPU tracing initialization failed: %s\n", gpu_trace.LastError().c_str());
         return 1;
     }
 
@@ -372,14 +384,20 @@ int main(int argc, char** argv) {
 
     double elapsed_s = elapsed_ms / 1000.0;
     double bandwidth_gb_s = TENSOR_SIZE_BYTES / (1000.0 * 1000 * 1000) / elapsed_s;
-    double peak_gb_s = 8000.0;  // B200 HBM3e peak: 8 TB/s
 
     printf("\n=== Results ===\n");
     printf("Elapsed time: %.3f ms\n", elapsed_ms);
     printf("Bandwidth: %.2f GB/s (%.1f%% of peak %.0f GB/s)\n",
-           bandwidth_gb_s, (bandwidth_gb_s / peak_gb_s) * 100, peak_gb_s);
+           bandwidth_gb_s,
+           (bandwidth_gb_s / PEAK_BANDWIDTH_GB_S) * 100,
+           PEAK_BANDWIDTH_GB_S);
     printf("Tiles processed: %d\n", total_tiles);
     printf("Tiles/ms: %.0f\n", total_tiles / elapsed_ms);
+
+    if (!gpu_trace.Begin()) {
+        fprintf(stderr, "GPU trace capture failed: %s\n", gpu_trace.LastError().c_str());
+        return 1;
+    }
 
     // Reset and run traced iteration
     printf("\nRunning traced iteration...\n");
@@ -394,11 +412,14 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     printf("Writing trace file...\n");
-    nanotrace::trace_writer writer("tma_bandwidth_atomic");
+    nanotrace::trace_writer writer("tma_bandwidth_kernel");
     writer.set_block_type<TMABlock>();
     writer.add_tensor(trace_tensor);
-    writer.write("tma_bandwidth_atomic.nanotrace", true);
-    printf("Trace written to tma_bandwidth_atomic.nanotrace\n");
+    if (!gpu_trace.Write(output_path, writer)) {
+        fprintf(stderr, "Trace write failed: %s\n", gpu_trace.LastError().c_str());
+        return 1;
+    }
+    printf("Trace written to %s\n", output_path);
 
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));

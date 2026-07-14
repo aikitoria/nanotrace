@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": ".validate",
+    "rootDir": ".",
+    "types": ["node", "@webgpu/types"]
+  },
+  "include": ["scripts/validate.ts", "src/**/*.ts", "src/**/*.d.ts"]
+}

@@ -8,20 +8,23 @@
 </head>
 <body>
     <canvas id="canvas"></canvas>
+    <div id="track-frame"></div>
+    <div id="kernel-frames"></div>
     <canvas id="labelCanvas" class="overlay-full"></canvas>
-    <div id="tooltip" class="glass-dark mono"></div>
+    <div id="tooltip" class="mono"></div>
     <div id="loading">Initializing WebGPU...</div>
-    <div id="stats" class="glass mono"></div>
+    <div id="stats" class="mono"></div>
     <div id="lane-labels"></div>
-    <div id="timeline" class="glass"></div>
-    <button id="help-btn" class="glass">?</button>
-    <button id="close-btn" class="glass">×</button>
+    <div id="timeline"></div>
+    <button id="expand-all-btn">Expand all</button>
+    <button id="help-btn" aria-label="Show controls">?</button>
+    <button id="close-btn" aria-label="Close trace">×</button>
     <div id="cursor-line"></div>
-    <div id="cursor-timestamp" class="glass-dark mono"></div>
+    <div id="cursor-timestamp" class="mono"></div>
     <div id="selection-region"></div>
     <div class="selection-line" id="selection-line-start"></div>
     <div class="selection-line" id="selection-line-end"></div>
-    <div id="selection-label" class="glass-dark mono"></div>
+    <div id="selection-label" class="mono"></div>
 
     <div id="file-selector" class="overlay-full">
         <div class="file-selector-content" id="file-selector-content">
@@ -45,37 +48,25 @@
         <div class="sample-menu-content">
             <h3>Select Sample</h3>
             <div class="sample-grid">
-                <button class="sample-option btn-primary" data-sample="sample1">
-                    <div class="sample-title">Minimal</div>
-                    <div class="sample-desc">1 block, 2 events</div>
+                <button class="sample-option btn-primary" data-sample="unified">
+                    <div class="sample-title">Unified Trace</div>
+                    <div class="sample-desc">Three kernels with CPU, HES, and intra-kernel tracks</div>
                 </button>
-                <button class="sample-option btn-primary" data-sample="sample2">
-                    <div class="sample-title">Small Random</div>
-                    <div class="sample-desc">~48K events, 16 SMs</div>
+                <button class="sample-option btn-primary" data-sample="multistream-graph">
+                    <div class="sample-title">Multistream CUDA Graph</div>
+                    <div class="sample-desc">Graph execution across two internal streams</div>
                 </button>
-                <button class="sample-option btn-primary" data-sample="sample3">
-                    <div class="sample-title">Large Random</div>
-                    <div class="sample-desc">~10M events, 148 SMs</div>
+                <button class="sample-option btn-primary" data-sample="cpu-hierarchy">
+                    <div class="sample-title">CPU Hierarchy</div>
+                    <div class="sample-desc">Application-defined parent and worker tracks</div>
                 </button>
-                <button class="sample-option btn-primary" data-sample="simple_b200">
-                    <div class="sample-title">Simple Trace (B200)</div>
-                    <div class="sample-desc">16 blocks, 128 tracks, ~13K events (from nanotrace-cuda example)</div>
+                <button class="sample-option btn-primary" data-sample="tma-static">
+                    <div class="sample-title">TMA Static Schedule</div>
+                    <div class="sample-desc">sm_120a TMA transfers with static work distribution</div>
                 </button>
-                <button class="sample-option btn-primary" data-sample="mixed_b200">
-                    <div class="sample-title">Mixed Trace (B200)</div>
-                    <div class="sample-desc">32 blocks, 384 tracks, ~2.5K events (from nanotrace-cuda example)</div>
-                </button>
-                <button class="sample-option btn-primary" data-sample="grayscale_b200">
-                    <div class="sample-title">Grayscale (B200)</div>
-                    <div class="sample-desc">419K blocks, 419K events (1 per block) from nanotrace-cuda example</div>
-                </button>
-                <button class="sample-option btn-primary" data-sample="tma_static_296">
-                    <div class="sample-title">TMA Bandwidth Static (B200)</div>
-                    <div class="sample-desc">296 blocks, 888 tracks (3 buffers/block), 2.1M tiles, 6969 GB/s (87.1%)</div>
-                </button>
-                <button class="sample-option btn-primary" data-sample="tma_atomic_296">
-                    <div class="sample-title">TMA Bandwidth Atomic (B200)</div>
-                    <div class="sample-desc">296 blocks, 888 tracks (3 buffers/block), 2.1M tiles, 7427 GB/s (92.8%)</div>
+                <button class="sample-option btn-primary" data-sample="tma-atomic">
+                    <div class="sample-title">TMA Atomic Schedule</div>
+                    <div class="sample-desc">sm_120a TMA transfers with dynamic work distribution</div>
                 </button>
             </div>
             <button class="sample-menu-cancel btn-secondary">Cancel</button>
@@ -108,7 +99,11 @@
                 </div>
                 <div class="help-item">
                     <div class="help-key">Double-click</div>
-                    <div class="help-desc">Snap to zone/block boundaries</div>
+                    <div class="help-desc">Snap to a zone</div>
+                </div>
+                <div class="help-item">
+                    <div class="help-key">Click kernel</div>
+                    <div class="help-desc">Expand or collapse details</div>
                 </div>
                 <div class="help-item">
                     <div class="help-key">R</div>

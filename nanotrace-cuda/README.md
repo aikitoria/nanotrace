@@ -1,361 +1,144 @@
 # nanotrace-cuda
 
-High-performance CUDA tracing library for GPU kernel execution profiling. Generates `.nanotrace` files compatible with the nanotrace visualizer.
+Nanotrace combines three event sources in one timeline:
 
-## Features
+- low-overhead CPU thread scopes using `CLOCK_MONOTONIC_RAW`;
+- hardware kernel timestamps from CUPTI HES on Blackwell;
+- explicit intra-kernel ranges recorded with `%globaltimer`.
 
-- **Minimal overhead**: 2 uint32 lane context, vectorized writes with write-through caching
-- **Type-safe**: Compile-time trace type definitions with static assertions
-- **Flexible**: Support for static lanes (fixed trace type) and dynamic lanes (mixed trace types)
-- **Heterogeneous tensors**: Multiple trace tensors with different event widths
-- **Clean API**: Simple `start()` → `end()` → `finish_lane()` workflow
-- **Conditional compilation**: Can be fully disabled at compile time with zero runtime overhead
+The host writer emits the compact chunked nanotrace v4 format. Clock snapshots correlate
+GPU `%globaltimer` through the CUPTI clock into the CPU reference clock.
 
-## Disabling Tracing
+## Requirements
 
-Nanotrace supports compile-time disabling to completely eliminate tracing overhead:
+- CUDA 13.3 or newer;
+- a Blackwell GPU with HES support;
+- CMake 3.18 or newer;
+- a C++20 compiler.
 
-### NANOTRACE_DISABLED
+The standalone build targets architecture-specific `sm_120a`.
 
-Disables all device-side instrumentation. All API calls become empty inline stubs that the compiler optimizes away entirely.
+## Build
 
-```bash
-nvcc -DNANOTRACE_DISABLED -arch=sm_100a your_kernel.cu
-```
+~~~bash
+cmake -S . -B build -GNinja -DBUILD_EXAMPLES=ON
+cmake --build build
+~~~
 
-When enabled, your code continues to compile and run normally, but produces no trace data and has zero performance impact.
+## Unified tracing
 
-### NANOTRACE_NO_LOG
+Construct `GpuTrace` before any CUDA context exists. It initializes HES
+immediately and hides CUPTI setup, priming, clock snapshots, kernel matching,
+and attachment:
 
-Disables host-side logging output (statistics printed during trace file write). Trace files are still generated normally.
-
-```bash
-nvcc -DNANOTRACE_NO_LOG your_kernel.cu
-```
-
-Useful for production builds where you want trace files but don't need console output.
-
-## Performance Optimizations
-
-- Write-through caching (`.wt` specifier) prevents L1 cache pollution
-- Vectorized stores: v2/v4/v8 based on parameter count
-- SM ID written once per lane (not per event)
-- Event width optimized per tensor (2/4/8 uint32s)
-- No runtime branching for event type lookup
-- Compile-time event width validation
-
-## Quick Start
-
-### 1. Define Trace Types
-
-```cpp
-#include <nanotrace/nanotrace.cuh>
-#include <nanotrace/nanotrace_host.h>
-
-// Static trace types (fixed format per lane)
-NANOTRACE_DEFINE_TRACE_TYPE(TraceKernel, "Kernel", "Kernel execution", 0, nanotrace::lane_type::STATIC);
-NANOTRACE_DEFINE_TRACE_TYPE(TraceLoad, "Load", "Load from {0} to {1}", 2, nanotrace::lane_type::STATIC);
-
-// Dynamic trace types (format ID written per event)
-NANOTRACE_DEFINE_TRACE_TYPE(TraceCompute, "Compute", "Compute iteration {0}", 1, nanotrace::lane_type::DYNAMIC);
-
-// Block type (for block labels)
-NANOTRACE_DEFINE_BLOCK_TYPE(MyBlock, "Block {blockX}", "Block {blockX} on SM");
-
-// Track type (for lane/track labels)
-NANOTRACE_DEFINE_TRACK_TYPE(MyTrack, "Warp {lane}", "Warp {lane}", 0);
-```
-
-### 2. Create Trace Tensor
-
-```cpp
-// Static tensor: 8 lanes, all using TraceKernel (0 params → width 2)
-using TraceTensor = nanotrace::static_trace_builder<8,
-    TraceKernel, TraceKernel, TraceKernel, TraceKernel,
-    TraceKernel, TraceKernel, TraceKernel, TraceKernel
->;
-
-dim3 grid(16, 1, 1);  // Match kernel grid
-TraceTensor trace_tensor(100, grid);  // 100 events per lane
-```
-
-### 3. Instrument Kernel
-
-```cpp
-__global__ void my_kernel(
-    nanotrace::static_tensor_handle<8, 2> trace_handle,
-    dim3 grid_dims)
+~~~cpp
+nanotrace::GpuTrace gpu_trace{ "Inference step" };
+if (!gpu_trace)
 {
-    uint32_t block_id = blockIdx.x;
-    uint32_t warp_id = threadIdx.x / 32;
-    uint32_t lane_in_warp = threadIdx.x % 32;
-
-    if (lane_in_warp == 0 && warp_id < 8) {
-        auto lane = nanotrace::begin_lane(trace_handle, block_id, warp_id);
-
-        for (int i = 0; i < 100; ++i) {
-            auto s = nanotrace::start();
-
-            // ... your work here ...
-
-            nanotrace::end(s, trace_handle, lane, TraceKernel{});
-        }
-
-        nanotrace::finish_lane(trace_handle, lane);
-    }
+    // Handle gpu_trace.LastError().
 }
-```
 
-### 4. Write Trace File
+// CUDA contexts may now be created normally.
+cudaSetDevice(0);
 
-```cpp
-my_kernel<<<grid, block>>>(trace_tensor.get_handle(), grid);
-cudaDeviceSynchronize();
+gpu_trace.Begin();
+InstrumentedKernel<<<grid, block>>>(device_trace.get_handle());
 
-// Configure track type on tensor
-trace_tensor.set_track_type<MyTrack>();
+nanotrace::trace_writer kernel_trace{ "InstrumentedKernel" };
+kernel_trace.add_tensor(device_trace);
+gpu_trace.Write("trace.nanotrace", kernel_trace);
+~~~
 
-nanotrace::trace_writer writer("my_kernel");
-writer.set_block_type<MyBlock>();
-writer.register_trace_type<TraceKernel>();
-writer.add_tensor(trace_tensor);
-writer.write("output.nanotrace");  // Logs statistics to stdout
-```
+CPU events use a fixed-capacity per-thread buffer:
 
-## API Reference
+~~~cpp
+nanotrace::TraceSession& session = gpu_trace.Session();
+nanotrace::CpuThreadContext cpu{
+    session, "Rank 0", 1024 };
+{
+    nanotrace::CpuScope scope{ cpu, "Execute step" };
+    // Launch work.
+}
+cpu.Flush();
+~~~
 
-### Device-Side API
+Parent CPU tracks explicitly when the application has a hierarchy:
 
-#### Capture Start Time
+~~~cpp
+nanotrace::CpuThreadContext rank{ session, "Rank 0", 1024 };
+nanotrace::CpuThreadContext worker{
+    session, "Worker 0", 1024, rank.Track(), 0 };
 
-```cpp
-nanotrace::start_token nanotrace::start()
-```
+// A parent can also be assigned after both tracks exist.
+session.SetTrackParent(worker.Track(), rank.Track());
+~~~
 
-Returns an opaque start token with current `%%globaltimer` value.
+Parent IDs are serialized in the trace. The viewer never infers application
+relationships from track names.
 
-#### Begin Lane
+`GpuTrace::Write()` places explicit intra-kernel events beneath the matching
+hardware kernel event. See `examples/unified_trace.cu` for the full flow.
 
-```cpp
-template<uint32_t NumLanes, uint32_t MaxEventWidth>
-auto nanotrace::begin_lane(
-    static_tensor_handle<NumLanes, MaxEventWidth> handle,
-    uint32_t block_id,
-    uint32_t lane_index)
-```
+## Device instrumentation
 
-Initializes lane context for static tensor. Returns `lane_context_static<MaxEventWidth>`.
+Define event, block, and lane formats:
 
-```cpp
-template<uint32_t NumLanes>
-auto nanotrace::begin_lane_dynamic(
-    dynamic_tensor_handle<NumLanes> handle,
-    uint32_t block_id,
-    uint32_t lane_index)
-```
+~~~cpp
+NANOTRACE_DEFINE_TRACE_TYPE(Work, "Work", "Kernel work", 0,
+    nanotrace::lane_type::STATIC);
+NANOTRACE_DEFINE_BLOCK_TYPE(Block, "Block {blockLinear}",
+    "Block {blockLinear}");
+NANOTRACE_DEFINE_TRACK_TYPE(Warp, "Warp {lane}", "Warp {lane}", 0);
 
-Initializes lane context for dynamic tensor. Returns `lane_context_dynamic`.
+using Trace = nanotrace::static_trace_builder<1, Work>;
+~~~
 
-#### End Event (Static Lanes)
+For parameterized events, provide names for the viewer tooltip:
 
-```cpp
-// 0 parameters (v2 store, 8 bytes)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{})
+~~~cpp
+NANOTRACE_DEFINE_TRACE_TYPE_WITH_PARAMETERS(
+    TileTransfer, "Tile {0},{1}", "Transfer tile ({0},{1})",
+    nanotrace::lane_type::STATIC, "tile_x", "tile_y");
+~~~
 
-// 1 parameter (v4 store, 16 bytes)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0)
+Instrument one controlling thread per logical lane:
 
-// 2 parameters (v4 store, 16 bytes)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0, uint32_t p1)
+~~~cpp
+nanotrace::lane_context_static<2> lane = nanotrace::begin_lane(
+    trace, blockIdx.x, 0, threadIdx.x == 0);
+nanotrace::start_token token = nanotrace::start();
 
-// 3-6 parameters (v8 store, 32 bytes)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0, ..., uint32_t p5)
-```
+// Work being measured.
 
-**Note**: The `TraceType` parameter enables compile-time validation that the correct number of parameters are passed.
+nanotrace::end(token, trace, lane, Work{});
+nanotrace::finish_lane(trace, lane);
+~~~
 
-#### End Event (Dynamic Lanes)
+Each enabled lane captures only low 32-bit timestamps while work is in flight.
+`finish_lane()` reads one full 64-bit `%globaltimer` anchor and commits it with
+the lane header, so no 64-bit anchor stays live in the lane context. Lane rows
+are padded to 16-byte alignment for the vectorized header commit.
 
-```cpp
-// 0 parameters (v4 store, 16 bytes, includes format ID)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{})
+## Compile-time controls
 
-// 1 parameter (v4 store, 16 bytes, includes format ID)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0)
-
-// 2-5 parameters (v8 store, 32 bytes, includes format ID)
-template<typename TraceType>
-void nanotrace::end(start_token, handle, lane, TraceType{}, uint32_t p0, ..., uint32_t p4)
-```
-
-#### Finish Lane
-
-```cpp
-void nanotrace::finish_lane(handle, lane)
-```
-
-Writes lane header with SM ID and event count.
-
-### Host-Side API
-
-#### Static Trace Builder
-
-```cpp
-template<uint32_t NumLanes, typename... TraceTypes>
-class static_trace_builder {
-public:
-    static_trace_builder(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0, 0, 0));
-    auto get_handle() const;
-    // ... getters ...
-};
-```
-
-#### Dynamic Trace Builder
-
-```cpp
-template<uint32_t NumLanes>
-class dynamic_trace_builder {
-public:
-    dynamic_trace_builder(uint32_t max_events_per_lane, dim3 grid_dims, dim3 cluster_dims = dim3(0, 0, 0));
-    auto get_handle() const;
-    // ... getters ...
-};
-```
-
-#### Static/Dynamic Trace Builder
-
-```cpp
-template<uint32_t NumLanes, typename... TraceTypes>
-class static_trace_builder {
-public:
-    template<typename TrackType>
-    void set_track_type();  // Set default track type for all lanes in this tensor
-
-    template<typename TrackType>
-    void set_track_type(uint32_t lane);  // Override track type for specific lane
-};
-
-template<uint32_t NumLanes>
-class dynamic_trace_builder {
-public:
-    template<typename TrackType>
-    void set_track_type();  // Set default track type for all lanes in this tensor
-
-    template<typename TrackType>
-    void set_track_type(uint32_t lane);  // Override track type for specific lane
-};
-```
-
-#### Trace Writer
-
-```cpp
-class trace_writer {
-public:
-    trace_writer(const char* kernel_name);
-
-    template<typename BlockType>
-    void set_block_type();
-
-    template<typename TraceType>
-    void register_trace_type();
-
-    template<typename Builder>
-    void add_tensor(const Builder& builder);
-
-    void write(const char* filename, bool compress = true);
-    // Logs statistics to stdout: tensors, lanes, blocks, events, duration, compression
-};
-```
-
-## Memory Layout
-
-### Static Tensor (event_width = 2, 0 params)
-
-```
-Lane: [Header: 2 uint32] [Event 0: 2 uint32] [Event 1: 2 uint32] ...
-       [sm_id, write_offset_bytes] [start, end] [start, end]
-```
-
-### Static Tensor (event_width = 4, 1-2 params)
-
-```
-Lane: [Header: 4 uint32] [Event 0: 4 uint32] [Event 1: 4 uint32] ...
-       [sm_id, write_offset_bytes, 0, 0] [start, end, p0, p1] [start, end, p0, p1]
-```
-
-### Dynamic Tensor (event_width = 8)
-
-```
-Lane: [Header: 8 uint32] [Event 0: 8 uint32] [Event 1: 8 uint32] ...
-       [sm_id, write_offset_bytes, ...] [start, end, fmt_id, p0-p4] [start, end, fmt_id, p0-p4]
-```
-
-**Note**: The header stores `write_offset_bytes` (the final write position in bytes) instead of event count. The host post-processor computes the event count from this value, which enables overflow detection when `write_offset_bytes` exceeds the allocated lane capacity.
-
-## Building
-
-```bash
-mkdir build && cd build
-cmake ..
-make
-```
-
-### Build Options
-
-- `BUILD_EXAMPLES` (default: ON) - Build example programs
-- `NANOTRACE_WITH_MINIZ` (default: ON) - Enable compression support using miniz
-
-To build without examples:
-
-```bash
-cmake -DBUILD_EXAMPLES=OFF ..
-make
-```
-
-To build without compression:
-
-```bash
-cmake -DNANOTRACE_WITH_MINIZ=OFF ..
-make
-```
-
-### Requirements
-
-- CMake 3.18+
-- CUDA Toolkit 11.0+ (with C++20 support)
-- C++20 compiler
+- `NANOTRACE_DISABLED` removes device instrumentation.
+- `NANOTRACE_NO_LOG` suppresses host writer diagnostics.
+- `NANOTRACE_WITH_MINIZ` enables the default deflate-compressed v4 body in
+  addition to compact varint event and argument records.
 
 ## Examples
 
-- `simple_trace.cu`: Basic usage with static tensor
-- `mixed_trace.cu`: Static + dynamic tensors with 2D grid
+- `unified_trace`: launches three kernels and correlates CPU scopes, HES kernel
+  timestamps, and one explicit intra-kernel trace;
+- `multistream_graph_trace`: captures a fork/join CUDA graph that HES reports
+  on two driver-selected execution streams;
+- `cpu_hierarchy_trace`: writes deterministic parent and worker CPU tracks;
+- `simple_trace`, `mixed_trace`, and `grayscale_trace`: device-lane API
+  examples;
+- `tma_bandwidth_bench_static` and `tma_bandwidth_bench_atomic`: TMA tracing
+  benchmarks using the non-deprecated `cuda::ptx` API. They accept the block
+  count and an optional output path, for example
+  `tma_bandwidth_bench_static 170 output.nanotrace`.
 
-Run examples:
-
-```bash
-./simple_trace
-./mixed_trace
-```
-
-## File Format
-
-Generates `.nanotrace` binary files compatible with the nanotrace visualizer. Format includes:
-
-- File header (magic, version, compression flag) - always uncompressed
-- Payload (optionally compressed with deflate):
-  - Kernel name
-  - Format descriptors (trace type definitions)
-  - Block descriptors (SM assignments)
-  - Event tracks (lanes with timing data)
-
-When compression is enabled (default), the payload is compressed using miniz (deflate algorithm), significantly reducing file size.
-
-## License
-
-See project root for license information.
+Every CUDA target is compiled for `sm_120a`. The host library is compatible
+with warning-as-error and `-fno-exceptions` builds.

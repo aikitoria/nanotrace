@@ -84,9 +84,17 @@ export class TracksSoA {
 export class ZonesSoA {
     count: number = 0;
 
+    // Trace identity and event hierarchy (host-side only)
+    eventIds!: BigUint64Array;
+    parentEventIds!: BigUint64Array;
+    hasChildren!: Uint8Array;
+    expanded!: Uint8Array;
+    disclosureKeys: string[] = [];
+    details: string[] = [];
+
     // Spatial bounds (integer nanoseconds for precision)
-    startsX!: Uint32Array;              // Start time in nanoseconds
-    endsX!: Uint32Array;                // End time in nanoseconds
+    startsX!: Float64Array;              // Start time in nanoseconds
+    endsX!: Float64Array;                // End time in nanoseconds
     ys!: Float32Array;                  // Y position in world space
     // No ID array - index is ID
     // No centers cache - compute (startsX[i] + endsX[i]) / 2 when needed
@@ -104,7 +112,7 @@ export class ZonesSoA {
     trackIndices!: Uint32Array;         // Index into TracksSoA
 
     // Hierarchy (compact types)
-    smIndices!: Uint8Array;             // SM index (0-255)
+    smIndices!: Uint32Array;            // Generic visible track index
     blockIndices!: Uint32Array;         // Block index into BlocksSoA
     sublaneIndices!: Uint8Array;        // Sublane within block (0-255)
 
@@ -124,14 +132,15 @@ export class BlocksSoA {
     // Block lanes use indirection to reference blocks.
 
     // Spatial (integer nanoseconds)
-    startsX!: Uint32Array;              // Start time in nanoseconds
-    endsX!: Uint32Array;                // End time in nanoseconds
+    startsX!: Float64Array;              // Start time in nanoseconds
+    endsX!: Float64Array;                // End time in nanoseconds
     ys!: Float32Array;                  // Bottom-left Y in world space
     heights!: Float32Array;             // Total height including sublanes
+    headerHeights!: Float32Array;       // Optional block-label header height
 
     // Sublane structure
     sublanesCounts!: Uint8Array;        // Number of sublanes per block
-    sublanesMaxWidths!: Uint32Array;    // Max zone width in ns (for culling)
+    sublanesMaxWidths!: Float64Array;    // Max zone width in ns (for culling)
 
     // Format descriptors
     formatDescIds!: Uint16Array;        // Format descriptor index
@@ -141,8 +150,8 @@ export class BlocksSoA {
     clusterIds!: Uint32Array;           // Original cluster ID
 
     // Hierarchy
-    smIndices!: Uint8Array;             // SM index
-    blockLaneIndices!: Uint16Array;     // Assigned during hierarchy build
+    smIndices!: Uint32Array;            // Generic visible track index
+    blockLaneIndices!: Uint32Array;     // Assigned during hierarchy build
 
     // Zone ranges (for efficient sublane access)
     zonesStartIndices!: Uint32Array;    // First zone index for this block
@@ -164,14 +173,15 @@ export class BlockLanesSoA {
     // Spatial
     ys!: Float32Array;                  // Bottom edge Y
     heights!: Float32Array;             // Maximum block height in this lane
-    widths!: Uint32Array;               // Rightmost block end time (ns)
+    startsX!: Float64Array;             // Left edge in nanoseconds
+    widths!: Float64Array;              // Rightmost block end time (ns)
 
     // Culling optimization
-    maxBlockWidths!: Uint32Array;       // Widest block in ns
-    maxZoneWidths!: Uint32Array;        // Widest zone in ns
+    maxBlockWidths!: Float64Array;      // Widest block in ns
+    maxZoneWidths!: Float64Array;       // Widest zone in ns
 
     // Hierarchy
-    smIndices!: Uint8Array;             // SM index
+    smIndices!: Uint32Array;            // Generic visible track index
 
     // Block indirection (blocks cannot be reordered, use indirection!)
     // Flat array of block indices, partitioned by block lane
@@ -196,12 +206,15 @@ export class LanesSoA {
     count: number = 0;
 
     // Identity (SM hardware index)
-    smIndices!: Uint8Array;             // SM ID (matches hardware)
+    smIndices!: Uint32Array;            // Generic visible track index
+    names: string[] = [];
+    depths!: Uint8Array;                // Visible event hierarchy depth
 
     // Spatial
     ys!: Float32Array;                  // Bottom edge Y
     heights!: Float32Array;             // Total height
-    widths!: Uint32Array;               // Rightmost time (ns)
+    startsX!: Float64Array;             // Left edge in nanoseconds
+    widths!: Float64Array;              // Rightmost time (ns)
 
     // BlockLane ranges
     blockLanesStartIndices!: Uint32Array;  // First block lane index
@@ -246,4 +259,3 @@ export interface HierarchyData {
     gridDims: [number, number, number];
     clusterDims: [number, number, number];
 }
-

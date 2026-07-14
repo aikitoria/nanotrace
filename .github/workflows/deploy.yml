@@ -25,7 +25,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
           cache-dependency-path: visualizer/package-lock.json
 
@@ -33,9 +33,12 @@ jobs:
         working-directory: ./visualizer
         run: npm ci
 
-      - name: Generate samples
+      - name: Validate samples
         working-directory: ./visualizer
-        run: npm run generate:all
+        run: |
+          for trace in public/*.nanotrace; do
+            npm run validate -- "$trace"
+          done
 
       - name: Build
         working-directory: ./visualizer

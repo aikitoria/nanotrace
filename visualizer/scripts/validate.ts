@@ -1,233 +1,204 @@
-#!/usr/bin/env tsx
-/**
- * Validate a .nanotrace file by parsing it and printing its structure.
- *
- * Usage:
- *   npm run validate <file.nanotrace>
- */
+#!/usr/bin/env node
 
-import * as fs from 'fs';
-import * as zlib from 'zlib';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
-interface FormatDescriptor {
-    labelString: string;
-    tooltipString: string;
-    paramCount: number;
+import {
+    buildHierarchy,
+    parseTraceFile,
+    projectTraceData,
+    type ParsedTraceData
+} from '../src/utils/file-loader.js';
+import { binarySearchZones } from '../src/utils/soa-helpers.js';
+
+function validateTrackOrder(trace: ParsedTraceData): void {
+    let encounteredCpuTrack = false;
+
+    for (const hierarchy of trace.trackHierarchies) {
+        const gpuTrack = hierarchy.some(node => node.kind === 2);
+        if (!gpuTrack) encounteredCpuTrack = true;
+        if (gpuTrack && encounteredCpuTrack) {
+            throw new Error('GPU track appears below a CPU track');
+        }
+    }
 }
 
-function validateNanotrace(filename: string): boolean {
-    console.log(`Validating ${filename}...`);
-
-    const fileBuffer = fs.readFileSync(filename);
-    let buffer = fileBuffer;
-    let offset = 0;
-
-    // Helper to read string
-    const readString = (): string => {
-        const length = buffer.readUInt16LE(offset);
-        offset += 2;
-        const str = buffer.toString('utf-8', offset, offset + length);
-        offset += length;
-        return str;
-    };
-
-    // Read magic number
-    const magic = buffer.toString('binary', 0, 9);
-    if (magic !== 'nanotrace') {
-        console.log(`ERROR: Invalid magic number: ${magic}`);
-        return false;
+function validateProjection(trace: ParsedTraceData): void {
+    if (trace.tracks.count === 0 || trace.zones.count === 0) {
+        throw new Error('Trace has no visible events');
     }
-    console.log(`✓ Magic number: nanotrace`);
-    offset = 10;
-
-    // Read format version
-    const version = buffer.readUInt8(offset);
-    offset += 1;
-    console.log(`✓ Format version: ${version}`);
-
-    // Read compression mode
-    const compressionMode = buffer.readUInt8(offset);
-    offset += 1;
-    console.log(`✓ Compression mode: ${compressionMode === 1 ? 'deflate' : 'none'}`);
-
-    // Decompress if needed
-    if (compressionMode === 1) {
-        const compressedData = buffer.subarray(offset);
-        buffer = zlib.inflateSync(compressedData);
-        offset = 0;
-        console.log(`✓ Decompressed ${compressedData.length} → ${buffer.length} bytes`);
+    if (trace.trackNames.length !== trace.trackHierarchies.length
+        || trace.trackNames.length !== trace.trackDepths.length) {
+        throw new Error('Track metadata arrays have different lengths');
     }
 
-    // Read kernel name
-    const kernelName = readString();
-    console.log(`✓ Kernel name: ${kernelName}`);
-
-    // Read grid dimensions
-    const gridDimX = buffer.readUInt32LE(offset); offset += 4;
-    const gridDimY = buffer.readUInt32LE(offset); offset += 4;
-    const gridDimZ = buffer.readUInt32LE(offset); offset += 4;
-    console.log(`✓ Grid dimensions: (${gridDimX}, ${gridDimY}, ${gridDimZ})`);
-
-    // Read cluster dimensions
-    const clusterDimX = buffer.readUInt32LE(offset); offset += 4;
-    const clusterDimY = buffer.readUInt32LE(offset); offset += 4;
-    const clusterDimZ = buffer.readUInt32LE(offset); offset += 4;
-    const usingClusters = clusterDimX > 0 || clusterDimY > 0 || clusterDimZ > 0;
-    console.log(`✓ Cluster dimensions: (${clusterDimX}, ${clusterDimY}, ${clusterDimZ})${usingClusters ? ' [ENABLED]' : ''}`);
-
-    // Read counts
-    const formatDescCount = buffer.readUInt32LE(offset); offset += 4;
-    const blockDescCount = buffer.readUInt32LE(offset); offset += 4;
-    const trackCount = buffer.readUInt32LE(offset); offset += 4;
-    const totalEventCount = Number(buffer.readBigUInt64LE(offset)); offset += 8;
-
-    console.log(`✓ Format descriptors: ${formatDescCount}`);
-    console.log(`✓ Block descriptors: ${blockDescCount}`);
-    console.log(`✓ Event tracks: ${trackCount}`);
-    console.log(`✓ Total events: ${totalEventCount}`);
-
-    // Read format descriptors
-    console.log('\nFormat Descriptors:');
-    const formatDescriptors: FormatDescriptor[] = [];
-    for (let i = 0; i < formatDescCount; i++) {
-        const labelString = readString();
-        const tooltipString = readString();
-        const paramCount = buffer.readUInt8(offset); offset += 1;
-        formatDescriptors.push({ labelString, tooltipString, paramCount });
-        console.log(`  [${i}] Label: "${labelString}", Tooltip: "${tooltipString}" (${paramCount} params)`);
-    }
-
-    // Read block descriptors
-    console.log(`\nBlock Descriptors: (${blockDescCount} total)`);
-    const smIds = new Set<number>();
-    for (let i = 0; i < Math.min(5, blockDescCount); i++) {
-        const blockId = buffer.readUInt32LE(offset); offset += 4;
-        const clusterId = buffer.readUInt32LE(offset); offset += 4;
-        const smId = buffer.readUInt16LE(offset); offset += 2;
-        const formatId = buffer.readUInt16LE(offset); offset += 2;
-        smIds.add(smId);
-
-        const labelStr = formatDescriptors[formatId].labelString;
-        console.log(`  [${i}] Block ${blockId}, Cluster ${clusterId}, SM ${smId}: "${labelStr}"`);
-    }
-
-    // Skip remaining block descriptors
-    for (let i = 5; i < blockDescCount; i++) {
-        offset += 4; // block ID
-        offset += 4; // cluster ID
-        const smId = buffer.readUInt16LE(offset); offset += 2;
-        offset += 2; // format ID
-        smIds.add(smId);
-    }
-
-    if (blockDescCount > 5) {
-        console.log(`  ... (${blockDescCount - 5} more)`);
-    }
-    console.log(`  Unique SMs: [${Array.from(smIds).sort((a, b) => a - b).join(', ')}]`);
-
-    // Read event tracks
-    console.log(`\nEvent Tracks: (${trackCount} total)`);
-    let totalEventsRead = 0;
-
-    for (let i = 0; i < Math.min(3, trackCount); i++) {
-        const blockDescId = buffer.readUInt32LE(offset); offset += 4;
-        const formatId = buffer.readUInt16LE(offset); offset += 2;
-        const laneId = buffer.readUInt32LE(offset); offset += 4;
-
-        // Read track params
-        const trackParamCount = formatDescriptors[formatId].paramCount;
-        const trackParams: number[] = [];
-        for (let j = 0; j < trackParamCount; j++) {
-            trackParams.push(buffer.readUInt32LE(offset)); offset += 4;
+    for (let trackIndex = 0;
+        trackIndex < trace.tracks.count; trackIndex++) {
+        if (trace.tracks.formatDescIds[trackIndex]
+            >= trace.formatDescriptors.length) {
+            throw new Error(`Track ${trackIndex} has an invalid format`);
         }
+    }
+    for (let zoneIndex = 0;
+        zoneIndex < trace.zones.count; zoneIndex++) {
+        if (trace.zones.formatDescIds[zoneIndex]
+            >= trace.formatDescriptors.length) {
+            throw new Error(`Event ${zoneIndex} has an invalid format`);
+        }
+    }
+    for (let blockIndex = 0;
+        blockIndex < trace.blocks.count; blockIndex++) {
+        if (trace.blocks.formatDescIds[blockIndex]
+            >= trace.formatDescriptors.length) {
+            throw new Error(`Block ${blockIndex} has an invalid format`);
+        }
+    }
 
-        const eventCount = buffer.readUInt32LE(offset); offset += 4;
-        totalEventsRead += eventCount;
+    for (let blockIndex = 0;
+        blockIndex < trace.blocks.count; blockIndex++) {
+        const sublaneEnds: number[] = [];
+        const zoneStart = trace.blocks.zonesStartIndices[blockIndex];
+        const zoneEnd = trace.blocks.zonesEndIndices[blockIndex];
+        const hoverSampleStride = Math.max(
+            1, Math.floor((zoneEnd - zoneStart) / 32));
 
-        const trackLabel = formatDescriptors[formatId].labelString
-            .replace('{lane}', laneId.toString());
-        const trackLabelWithParams = trackParams.length > 0
-            ? `${trackLabel} with params [${trackParams.join(', ')}]`
-            : trackLabel;
-        console.log(`  [${i}] Block ${blockDescId}, "${trackLabelWithParams}": ${eventCount} events`);
+        for (let zoneIndex = zoneStart;
+            zoneIndex < zoneEnd; zoneIndex++) {
+            const start = trace.zones.startsX[zoneIndex];
+            const end = trace.zones.endsX[zoneIndex];
+            const sublane = trace.zones.sublaneIndices[zoneIndex];
+            const row = trace.zones.smIndices[zoneIndex];
+            const track = trace.zones.trackIndices[zoneIndex];
 
-        // Read events
-        for (let j = 0; j < Math.min(2, eventCount); j++) {
-            const timeOffset = buffer.readUInt32LE(offset); offset += 4;
-            const duration = buffer.readUInt32LE(offset); offset += 4;
-            const eventFormatId = buffer.readUInt16LE(offset); offset += 2;
-
-            const eventParamCount = formatDescriptors[eventFormatId].paramCount;
-            const eventParams: number[] = [];
-            for (let k = 0; k < eventParamCount; k++) {
-                eventParams.push(buffer.readUInt32LE(offset)); offset += 4;
+            if (!Number.isFinite(start) || !Number.isFinite(end)
+                || end < start) {
+                throw new Error(
+                    `Event ${zoneIndex} has invalid bounds [${start}, ${end}]`);
             }
+            if (row >= trace.trackNames.length
+                || track >= trace.tracks.count) {
+                throw new Error(
+                    `Event ${zoneIndex} references an unknown row or track`);
+            }
+            if ((sublaneEnds[sublane] ?? Number.NEGATIVE_INFINITY) > start) {
+                throw new Error(
+                    `Block ${blockIndex} has overlapping zones on sublane `
+                    + `${sublane}`);
+            }
+            sublaneEnds[sublane] = end;
 
-            const eventLabel = formatDescriptors[eventFormatId].labelString;
-            console.log(`    Event ${j}: t=${timeOffset}ns, dur=${duration}ns, "${eventLabel}" with params [${eventParams.join(', ')}]`);
-        }
-
-        // Skip remaining events in this track
-        for (let j = 2; j < eventCount; j++) {
-            offset += 8; // time + duration
-            const eventFormatId = buffer.readUInt16LE(offset); offset += 2;
-            const eventParamCount = formatDescriptors[eventFormatId].paramCount;
-            offset += eventParamCount * 4; // params
-        }
-
-        if (eventCount > 2) {
-            console.log(`    ... (${eventCount - 2} more events)`);
-        }
-    }
-
-    // Skip remaining tracks
-    for (let i = 3; i < trackCount; i++) {
-        offset += 4; // block desc id
-        const formatId = buffer.readUInt16LE(offset); offset += 2;
-        offset += 4; // lane id
-        const trackParamCount = formatDescriptors[formatId].paramCount;
-        offset += trackParamCount * 4;
-        const eventCount = buffer.readUInt32LE(offset); offset += 4;
-        totalEventsRead += eventCount;
-
-        for (let j = 0; j < eventCount; j++) {
-            offset += 8; // time + duration
-            const eventFormatId = buffer.readUInt16LE(offset); offset += 2;
-            const eventParamCount = formatDescriptors[eventFormatId].paramCount;
-            offset += eventParamCount * 4;
+            if ((zoneIndex - zoneStart) % hoverSampleStride === 0) {
+                const midpoint = (start + end) / 2;
+                const foundZone = binarySearchZones(
+                    trace.zones, zoneStart, zoneEnd, midpoint, sublane);
+                if (foundZone !== zoneIndex) {
+                    throw new Error(
+                        `Hover lookup returned zone ${foundZone} instead of `
+                        + `${zoneIndex}`);
+                }
+            }
         }
     }
+}
 
-    if (trackCount > 3) {
-        console.log(`  ... (${trackCount - 3} more)`);
+function validateEventParents(trace: ParsedTraceData): Set<bigint> {
+    const zonesByEventId = new Map<bigint, number>();
+    const expandableEventIds = new Set<bigint>();
+
+    for (let zoneIndex = 0; zoneIndex < trace.zones.count; zoneIndex++) {
+        zonesByEventId.set(trace.zones.eventIds[zoneIndex], zoneIndex);
+        if (trace.zones.hasChildren[zoneIndex] !== 0) {
+            expandableEventIds.add(trace.zones.eventIds[zoneIndex]);
+        }
     }
 
-    // Check if we read all events
-    if (totalEventsRead === totalEventCount) {
-        console.log(`\n✓ All ${totalEventCount} events accounted for`);
-    } else {
-        console.log(`\n✗ Event count mismatch: expected ${totalEventCount}, read ${totalEventsRead}`);
-        return false;
+    for (let zoneIndex = 0; zoneIndex < trace.zones.count; zoneIndex++) {
+        const parentEventId = trace.zones.parentEventIds[zoneIndex];
+        if (parentEventId === 0n) continue;
+
+        const parentZoneIndex = zonesByEventId.get(parentEventId);
+        if (parentZoneIndex === undefined) {
+            throw new Error(
+                `Event ${zoneIndex} references unknown parent ${parentEventId}`);
+        }
+        if (trace.zones.startsX[zoneIndex]
+                < trace.zones.startsX[parentZoneIndex]
+            || trace.zones.endsX[zoneIndex]
+                > trace.zones.endsX[parentZoneIndex]) {
+            throw new Error(
+                `Event ${zoneIndex} lies outside parent ${parentEventId}`);
+        }
     }
 
-    // Check if we're at end of buffer
-    const remaining = buffer.length - offset;
-    if (remaining === 0) {
-        console.log('✓ Reached end of file cleanly');
-    } else {
-        console.log(`✗ ${remaining} unexpected bytes at end of file`);
-        return false;
+    return expandableEventIds;
+}
+
+function gpuTrackIds(trace: ParsedTraceData): Set<bigint> {
+    const ids = new Set<bigint>();
+
+    for (const hierarchy of trace.trackHierarchies) {
+        const gpu = hierarchy.find(node => node.kind === 2);
+        if (gpu) ids.add(gpu.id);
+    }
+    return ids;
+}
+
+async function validateNanotrace(filename: string): Promise<void> {
+    const contents = fs.readFileSync(filename);
+    const file = new File([contents], path.basename(filename));
+    const fullTrace = await parseTraceFile(file);
+    const expandableEventIds = validateEventParents(fullTrace);
+    const gpuIds = gpuTrackIds(fullTrace);
+    const collapsed = projectTraceData(
+        fullTrace, expandableEventIds, new Set<bigint>());
+    const expanded = projectTraceData(
+        fullTrace, expandableEventIds, gpuIds);
+
+    validateTrackOrder(collapsed);
+    validateProjection(collapsed);
+    validateTrackOrder(expanded);
+    validateProjection(expanded);
+
+    if (collapsed.tracks.count !== expanded.tracks.count
+        || collapsed.zones.count !== expanded.zones.count
+        || collapsed.blocks.count !== expanded.blocks.count) {
+        throw new Error('GPU expansion changed the materialized topology');
     }
 
-    console.log('\n✅ File is valid!');
-    return true;
+    const hierarchy = buildHierarchy(
+        expanded.kernelName,
+        [expanded.gridDimX, expanded.gridDimY, expanded.gridDimZ],
+        [expanded.clusterDimX, expanded.clusterDimY, expanded.clusterDimZ],
+        expanded.formatDescriptors,
+        expanded.tracks,
+        expanded.zones,
+        expanded.blocks,
+        expanded.trackNames,
+        expanded.trackDepths
+    );
+    if (!Number.isFinite(hierarchy.totalDurationNs)
+        || hierarchy.totalDurationNs <= 0) {
+        throw new Error('Trace has an invalid total duration');
+    }
+
+    console.log(`Session: ${expanded.kernelName}`);
+    console.log(`Rows: ${expanded.trackNames.length}`);
+    console.log(`Tracks: ${expanded.tracks.count}`);
+    console.log(`Events: ${expanded.zones.count}`);
+    console.log(`Expandable events: ${expandableEventIds.size}`);
+    console.log(`Duration: ${hierarchy.totalDurationNs} ns`);
+    console.log('Trace and all materialized projections validated');
 }
 
 const filename = process.argv[2];
 if (!filename) {
-    console.error('Usage: tsx validate.ts <trace_file.nanotrace>');
+    console.error('Usage: npm run validate -- <trace_file.nanotrace>');
     process.exit(1);
 }
 
-const success = validateNanotrace(filename);
-process.exit(success ? 0 : 1);
+try {
+    await validateNanotrace(filename);
+} catch (error) {
+    console.error((error as Error).message);
+    process.exit(1);
+}

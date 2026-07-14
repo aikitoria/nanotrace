@@ -9,8 +9,8 @@
 // UI DIMENSIONS & SPACING
 // =============================================================================
 
-/** Width of SM lane labels in pixels (left edge of viewport). */
-export const SM_LABEL_WIDTH = 50;
+/** Width of top-level track labels in pixels (left edge of viewport). */
+export const TRACK_LABEL_WIDTH = 120;
 
 /** Height of timeline bar in pixels (fixed at top of viewport). */
 export const TIMELINE_HEIGHT = 30;
@@ -67,7 +67,7 @@ export const VIEWPORT_MARGIN = 20;
  * Minimum width in pixels for rendering block labels.
  * Blocks narrower than this will not have their labels rendered.
  */
-export const MIN_BLOCK_LABEL_WIDTH = 100;
+export const MIN_BLOCK_LABEL_WIDTH = 25;
 
 /**
  * Minimum height in pixels for block padding area.
@@ -79,7 +79,7 @@ export const MIN_BLOCK_LABEL_PADDING_HEIGHT = 12;
  * Minimum width in pixels for rendering zone labels.
  * Zones narrower than this will not have their labels rendered.
  */
-export const MIN_ZONE_LABEL_WIDTH = 100;
+export const MIN_ZONE_LABEL_WIDTH = 25;
 
 /**
  * Minimum height in pixels for rendering zone labels.
@@ -131,25 +131,25 @@ export const LABEL_CLIP_MARGIN = 6;
  */
 
 /** Fixed height of each sublane (zone track) within a block. */
-export const SUBLANE_HEIGHT = 0.01;
+export const SUBLANE_HEIGHT = 0.014;
 
 /** Vertical spacing between SM lanes. */
-export const LANE_PADDING = 0.015;
+export const LANE_PADDING = 0.0015;
 
 /** Vertical spacing between sublanes within a block. */
 export const SUBLANE_PADDING = 0.002;
 
 /** Padding at top and bottom edges of each SM lane. */
-export const LANE_EDGE_PADDING = 0.003;
+export const LANE_EDGE_PADDING = 0.0015;
 
 /** Vertical spacing between block lanes within an SM lane. */
-export const BLOCK_LANE_PADDING = 0.01;
+export const BLOCK_LANE_PADDING = 0.0015;
 
 /** Horizontal gap between adjacent blocks (currently unused in layout). */
 export const BLOCK_PADDING = 0.00005;
 
 /** Vertical padding above blocks (reserved for block labels). */
-export const BLOCK_EDGE_PADDING = 0.008;
+export const BLOCK_EDGE_PADDING = 0;
 
 /** Horizontal gap between adjacent zones (currently unused in layout). */
 export const ZONE_GAP = 0.00001;
@@ -158,7 +158,7 @@ export const ZONE_GAP = 0.00001;
 export const BASE_TIME_RANGE = 1.0;
 
 /** Label color for all text labels (timeline, SM, blocks, zones). */
-export const LABEL_COLOR = '#f0f0f0';
+export const LABEL_COLOR = '#dedede';
 
 // =============================================================================
 // INTERACTION & NAVIGATION
@@ -210,7 +210,7 @@ export const SELECTION_EPSILON = 0.0000001;
  * Initial base zoom level for camera.
  * This is the starting zoom before X/Y multiplier adjustments.
  */
-export const INITIAL_BASE_ZOOM = 2.0;
+export const INITIAL_BASE_ZOOM = 1.75;
 
 /**
  * Initial Y offset for camera positioning (in world space units).
@@ -311,47 +311,56 @@ export const TIME_UNIT_MICROSECONDS_THRESHOLD = 0.001;
  * Base zone fill color brightness multiplier.
  * Zone base colors are multiplied by this factor for the fill.
  */
-export const ZONE_FILL_BRIGHTNESS = 0.55;
+export const ZONE_FILL_BRIGHTNESS = 1.0;
+
+/** Amount of the source event hue retained after neutral desaturation. */
+export const ZONE_COLOR_SATURATION = 0.95;
+
+/** White mixed into source event colors to produce Unreal-style pastel fills. */
+export const ZONE_PASTEL_MIX = 0.18;
+
+/** Text color drawn over the light pastel zone fills. */
+export const ZONE_LABEL_COLOR = '#171717';
 
 /**
  * Hover zone fill color RGB values (scaled by brightness).
  * Used when hovering over a zone. [R, G, B] in 0-1 range.
  */
-export const ZONE_HOVER_COLOR_R = 0.22;
-export const ZONE_HOVER_COLOR_G = 0.74;
-export const ZONE_HOVER_COLOR_B = 0.97;
+export const ZONE_HOVER_COLOR_R = 0.48;
+export const ZONE_HOVER_COLOR_G = 0.72;
+export const ZONE_HOVER_COLOR_B = 0.84;
 
 /**
  * Hover zone fill brightness multiplier.
  * Hover color is multiplied by this factor.
  */
-export const ZONE_HOVER_BRIGHTNESS = 0.95;
+export const ZONE_HOVER_BRIGHTNESS = 1.0;
 
 /**
  * Selection highlight brightness multiplier.
  * Zones fully within selection are brightened by this factor.
  */
-export const SELECTION_BRIGHTNESS_BOOST = 1.55;
+export const SELECTION_BRIGHTNESS_BOOST = 1.18;
 
 /**
  * Zone outline color brightness multiplier.
  * Zone base colors are multiplied by this factor for the outline.
  */
-export const ZONE_OUTLINE_BRIGHTNESS = 0.98;
+export const ZONE_OUTLINE_BRIGHTNESS = 0.5;
 
 /**
  * Hover zone outline color RGB values (scaled by brightness).
  * Used for zone outlines when hovering. [R, G, B] in 0-1 range.
  */
-export const ZONE_HOVER_OUTLINE_COLOR_R = 0.38;
+export const ZONE_HOVER_OUTLINE_COLOR_R = 0.64;
 export const ZONE_HOVER_OUTLINE_COLOR_G = 0.82;
-export const ZONE_HOVER_OUTLINE_COLOR_B = 1.0;
+export const ZONE_HOVER_OUTLINE_COLOR_B = 0.92;
 
 /**
  * Hover zone outline brightness multiplier.
  * Hover outline color is multiplied by this factor.
  */
-export const ZONE_HOVER_OUTLINE_BRIGHTNESS = 1.15;
+export const ZONE_HOVER_OUTLINE_BRIGHTNESS = 1.0;
 
 /**
  * Y-axis zoom threshold for disabling adaptive outlines.
@@ -369,75 +378,75 @@ export const OUTLINE_THICKNESS_MULTIPLIER = 1.0;
  * Block border base color RGB values.
  * Default border color when not hovered. [R, G, B] in 0-1 range.
  */
-export const BLOCK_BORDER_COLOR_R = 0.45;
-export const BLOCK_BORDER_COLOR_G = 0.50;
-export const BLOCK_BORDER_COLOR_B = 0.62;
+export const BLOCK_BORDER_COLOR_R = 0.39;
+export const BLOCK_BORDER_COLOR_G = 0.39;
+export const BLOCK_BORDER_COLOR_B = 0.39;
 
 /**
  * Block border hover color RGB values (scaled by brightness).
  * Used for block borders when hovering. [R, G, B] in 0-1 range.
  */
-export const BLOCK_BORDER_HOVER_COLOR_R = 0.22;
-export const BLOCK_BORDER_HOVER_COLOR_G = 0.74;
-export const BLOCK_BORDER_HOVER_COLOR_B = 0.97;
+export const BLOCK_BORDER_HOVER_COLOR_R = 0.48;
+export const BLOCK_BORDER_HOVER_COLOR_G = 0.72;
+export const BLOCK_BORDER_HOVER_COLOR_B = 0.84;
 
 /**
  * Block border hover brightness multiplier.
  * Hover border color is multiplied by this factor.
  */
-export const BLOCK_BORDER_HOVER_BRIGHTNESS = 1.3;
+export const BLOCK_BORDER_HOVER_BRIGHTNESS = 1.0;
 
 /**
  * Block border selection brightness additive boost.
  * This value is added to RGB components for selected block borders.
  */
-export const BLOCK_BORDER_SELECTION_BOOST = 0.55;
+export const BLOCK_BORDER_SELECTION_BOOST = 0.12;
 
 /**
  * Block border opacity (alpha channel, 0.0-1.0).
  * Allows partial transparency for block borders.
  */
-export const BLOCK_BORDER_OPACITY = 0.7;
+export const BLOCK_BORDER_OPACITY = 0.65;
 
 /**
  * Lane background color RGB values.
  * SM lane backgrounds. [R, G, B] in 0-1 range.
  */
-export const LANE_BG_COLOR_R = 0.071;
-export const LANE_BG_COLOR_G = 0.071;
-export const LANE_BG_COLOR_B = 0.078;
+export const LANE_BG_COLOR_R = 0.227;
+export const LANE_BG_COLOR_G = 0.231;
+export const LANE_BG_COLOR_B = 0.235;
 
 /**
  * Block lane background color RGB values.
  * Block lane backgrounds (lighter than lanes). [R, G, B] in 0-1 range.
  */
-export const BLOCK_LANE_BG_COLOR_R = 0.086;
-export const BLOCK_LANE_BG_COLOR_G = 0.086;
-export const BLOCK_LANE_BG_COLOR_B = 0.094;
+export const BLOCK_LANE_BG_COLOR_R = 0.243;
+export const BLOCK_LANE_BG_COLOR_G = 0.247;
+export const BLOCK_LANE_BG_COLOR_B = 0.251;
 
 /**
  * Block background color RGB values.
  * Individual block backgrounds (darker than block lanes). [R, G, B] in 0-1 range.
  */
-export const BLOCK_BG_COLOR_R = 0.055;
-export const BLOCK_BG_COLOR_G = 0.055;
-export const BLOCK_BG_COLOR_B = 0.063;
+export const BLOCK_BG_COLOR_R = 0.216;
+export const BLOCK_BG_COLOR_G = 0.220;
+export const BLOCK_BG_COLOR_B = 0.224;
 
 /**
  * Full-screen background color RGB values.
  * Canvas background behind all trace elements. [R, G, B] in 0-1 range.
  */
-export const CANVAS_BG_COLOR_R = 0.039;
-export const CANVAS_BG_COLOR_G = 0.039;
-export const CANVAS_BG_COLOR_B = 0.047;
+export const CANVAS_BG_COLOR_R = 0.157;
+export const CANVAS_BG_COLOR_G = 0.161;
+export const CANVAS_BG_COLOR_B = 0.165;
 
 /**
  * Render pass clear color RGB values.
  * Used to clear the framebuffer at the start of each frame. [R, G, B] in 0-1 range.
  */
-export const CLEAR_COLOR_R = 0.102;
-export const CLEAR_COLOR_G = 0.102;
-export const CLEAR_COLOR_B = 0.110;
+export const CLEAR_COLOR_R = 0.157;
+export const CLEAR_COLOR_G = 0.161;
+export const CLEAR_COLOR_B = 0.165;
 
 // =============================================================================
 // TEXT RENDERING
@@ -446,11 +455,17 @@ export const CLEAR_COLOR_B = 0.110;
 /** Font size in pixels for all text labels (blocks, zones, timeline). */
 export const LABEL_FONT_SIZE = 10;
 
+/** Labels disappear when vertical scaling would make the font smaller. */
+export const MIN_LABEL_FONT_SIZE = 1;
+
+/** Vertical zoom below which all trace labels are hidden. */
+export const MIN_LABEL_ZOOM_Y = 0.5;
+
 /**
  * Font family for all text labels.
- * Monospace fonts for consistent character width.
+ * UI sans-serif stack for compact, readable trace labels.
  */
-export const LABEL_FONT_FAMILY = 'Consolas, Monaco, monospace';
+export const LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
 // =============================================================================
 // TIMING & PERFORMANCE
@@ -505,9 +520,10 @@ export const MIN_GPU_BUFFER_SIZE = 16;
 /**
  * Uniform buffer size in bytes for main uniforms.
  * Contains view-projection matrix, hover/selection state, camera double-single, scales.
- * Layout: 64 (mat4x4) + 32 (8 int/float) + 20 (5 float camera/scale) = 112 bytes
+ * Layout: 64-byte matrix followed by camera, interaction, scale, and viewport
+ * values. WGSL struct alignment rounds the allocation to 128 bytes.
  */
-export const UNIFORM_BUFFER_SIZE = 112;
+export const UNIFORM_BUFFER_SIZE = 128;
 
 /**
  * Uniform buffer size in bytes for background uniforms.
@@ -530,15 +546,17 @@ export const BLOCK_BUFFER_FLOATS = 8;
 
 /**
  * Number of floats per lane in GPU storage buffer.
- * Layout: 1 vec4 = 4 floats (y, height, width_high, width_low)
+ * Layout: 2 vec4s = 8 floats (y, height, padding, padding,
+ * start_high, start_low, end_high, end_low)
  */
-export const LANE_BUFFER_FLOATS = 4;
+export const LANE_BUFFER_FLOATS = 8;
 
 /**
  * Number of floats per block lane in GPU storage buffer.
- * Layout: 1 vec4 = 4 floats (y, height, width_high, width_low)
+ * Layout: 2 vec4s = 8 floats (y, height, padding, padding,
+ * start_high, start_low, end_high, end_low)
  */
-export const BLOCK_LANE_BUFFER_FLOATS = 4;
+export const BLOCK_LANE_BUFFER_FLOATS = 8;
 
 /**
  * Number of vertices per quad (two triangles).

@@ -16,12 +16,14 @@ struct format_descriptor {
     const char* tooltip_string;
     uint16_t id;
     uint8_t param_count;
+    const char* const* param_names;
 
     bool operator==(const format_descriptor& other) const {
         return id == other.id &&
                param_count == other.param_count &&
                label_string == other.label_string &&
-               tooltip_string == other.tooltip_string;
+               tooltip_string == other.tooltip_string &&
+               param_names == other.param_names;
     }
 };
 
@@ -37,7 +39,20 @@ struct format_descriptor {
         static constexpr uint8_t param_count = pcount; \
         static constexpr nanotrace::lane_type usage = lane_usage; \
         static inline const nanotrace::format_descriptor descriptor = { \
-            label_string, tooltip_string, id, param_count \
+            label_string, tooltip_string, id, param_count, nullptr \
+        }; \
+    }
+
+#define NANOTRACE_DEFINE_TRACE_TYPE_WITH_PARAMETERS(name, label_str, tooltip_str, lane_usage, ...) \
+    struct name { \
+        static constexpr uint16_t id = __COUNTER__; \
+        static constexpr const char* label_string = label_str; \
+        static constexpr const char* tooltip_string = tooltip_str; \
+        static constexpr const char* param_names[] = { __VA_ARGS__ }; \
+        static constexpr uint8_t param_count = sizeof(param_names) / sizeof(param_names[0]); \
+        static constexpr nanotrace::lane_type usage = lane_usage; \
+        static inline const nanotrace::format_descriptor descriptor = { \
+            label_string, tooltip_string, id, param_count, param_names \
         }; \
     }
 
@@ -49,7 +64,7 @@ struct format_descriptor {
         static constexpr uint8_t param_count = 0; \
         static constexpr bool is_block_type = true; \
         static inline const nanotrace::format_descriptor descriptor = { \
-            label_string, tooltip_string, id, param_count \
+            label_string, tooltip_string, id, param_count, nullptr \
         }; \
     }
 
@@ -61,7 +76,7 @@ struct format_descriptor {
         static constexpr uint8_t param_count = pcount; \
         static constexpr bool is_track_type = true; \
         static inline const nanotrace::format_descriptor descriptor = { \
-            label_string, tooltip_string, id, param_count \
+            label_string, tooltip_string, id, param_count, nullptr \
         }; \
     }
 
@@ -187,11 +202,12 @@ private:
 public:
     static constexpr uint32_t max_event_width = MaxEventWidth;
     static constexpr uint32_t max_event_width_bytes = MaxEventWidth << 2;
+    static constexpr uint32_t header_bytes = 4 * sizeof(uint32_t);
 
     __device__ __forceinline__
     lane_context_static(uint32_t base_offset_bytes, bool enabled = true)
         : base_offset_bytes_(base_offset_bytes)
-        , write_offset_bytes_(base_offset_bytes + max_event_width_bytes)  // Skip first event slot for header
+        , write_offset_bytes_(base_offset_bytes + header_bytes)
         , enabled_(enabled)
     {}
 
@@ -221,11 +237,12 @@ private:
 public:
     static constexpr uint32_t event_width = 8;
     static constexpr uint32_t event_width_bytes = 8 << 2;
+    static constexpr uint32_t header_bytes = 4 * sizeof(uint32_t);
 
     __device__ __forceinline__
     lane_context_dynamic(uint32_t base_offset_bytes, bool enabled = true)
         : base_offset_bytes_(base_offset_bytes)
-        , write_offset_bytes_(base_offset_bytes + event_width_bytes)  // Skip first event slot for header
+        , write_offset_bytes_(base_offset_bytes + header_bytes)
         , enabled_(enabled)
     {}
 
@@ -258,6 +275,12 @@ __device__ __forceinline__ start_token start() {
 
 __device__ __forceinline__ start_token start_zero() {
     return start_token(0);
+}
+
+__device__ __forceinline__ uint64_t read_global_timer() {
+    uint64_t time;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(time));
+    return time;
 }
 
 // ============================================================================
@@ -717,10 +740,15 @@ __device__ __forceinline__ void finish_lane(
     // Write raw byte offset - host will calculate event count later
     uint32_t write_offset_bytes = lane.write_offset_bytes();
 
-    // Header: [sm_id, write_offset_bytes]
-    asm volatile("st.global.cs.v2.u32 [%0], {%1, %2};"
+    uint64_t anchor_time = read_global_timer();
+    uint32_t anchor_low = static_cast<uint32_t>(anchor_time);
+    uint32_t anchor_high = static_cast<uint32_t>(anchor_time >> 32);
+
+    // Header: [sm_id, write_offset_bytes, anchor_low, anchor_high]
+    asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
                  :: "l"(handle.buffer + lane.base_offset_bytes()),
-                    "r"(sm_id), "r"(write_offset_bytes)
+                    "r"(sm_id), "r"(write_offset_bytes),
+                    "r"(anchor_low), "r"(anchor_high)
                  : "memory");
 }
 
@@ -737,10 +765,15 @@ __device__ __forceinline__ void finish_lane(
     // Write raw byte offset - host will calculate event count later
     uint32_t write_offset_bytes = lane.write_offset_bytes();
 
-    // Header: [sm_id, write_offset_bytes]
-    asm volatile("st.global.cs.v2.u32 [%0], {%1, %2};"
+    uint64_t anchor_time = read_global_timer();
+    uint32_t anchor_low = static_cast<uint32_t>(anchor_time);
+    uint32_t anchor_high = static_cast<uint32_t>(anchor_time >> 32);
+
+    // Header: [sm_id, write_offset_bytes, anchor_low, anchor_high]
+    asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
                  :: "l"(handle.buffer + lane.base_offset_bytes()),
-                    "r"(sm_id), "r"(write_offset_bytes)
+                    "r"(sm_id), "r"(write_offset_bytes),
+                    "r"(anchor_low), "r"(anchor_high)
                  : "memory");
 }
 

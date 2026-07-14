@@ -1,72 +1,23 @@
 #include "nanotrace/nanotrace_host.h"
-#include <fstream>
-#include <cstring>
 #include <cstdio>
 #include <map>
 #include <unordered_map>
-#include <unordered_set>
 #include <algorithm>
-#include <stdexcept>
 
 #ifdef NANOTRACE_WITH_MINIZ
 #include "miniz.h"
 #endif
 
+#if !defined(NANOTRACE_DISABLED)
+
 namespace nanotrace {
-
-// Hash functions for unordered containers with composite keys
-struct pair_hash {
-    template <typename T1, typename T2>
-    std::size_t operator()(const std::pair<T1, T2>& p) const {
-        auto h1 = std::hash<T1>{}(p.first);
-        auto h2 = std::hash<T2>{}(p.second);
-        return h1 ^ (h2 << 1);
-    }
-};
-
-struct tuple3_hash {
-    template <typename T1, typename T2, typename T3>
-    std::size_t operator()(const std::tuple<T1, T2, T3>& t) const {
-        auto h1 = std::hash<T1>{}(std::get<0>(t));
-        auto h2 = std::hash<T2>{}(std::get<1>(t));
-        auto h3 = std::hash<T3>{}(std::get<2>(t));
-        return h1 ^ (h2 << 1) ^ (h3 << 2);
-    }
-};
 
 trace_writer::trace_writer(const char* kernel_name)
     : kernel_name(kernel_name)
-    , default_block_format_id(0)  // Must call set_block_type<>() before write()
-    , total_lanes_so_far(0)
+    , default_block_format_id(UINT16_MAX)
 {}
 
 trace_writer::~trace_writer() = default;
-
-void trace_writer::write_uint8(std::vector<uint8_t>& buf, uint8_t val) {
-    buf.push_back(val);
-}
-
-void trace_writer::write_uint16(std::vector<uint8_t>& buf, uint16_t val) {
-    buf.push_back(val & 0xFF);
-    buf.push_back((val >> 8) & 0xFF);
-}
-
-void trace_writer::write_uint32(std::vector<uint8_t>& buf, uint32_t val) {
-    buf.push_back(val & 0xFF);
-    buf.push_back((val >> 8) & 0xFF);
-    buf.push_back((val >> 16) & 0xFF);
-    buf.push_back((val >> 24) & 0xFF);
-}
-
-void trace_writer::write_uint64(std::vector<uint8_t>& buf, uint64_t val) {
-    write_uint32(buf, val & 0xFFFFFFFF);
-    write_uint32(buf, (val >> 32) & 0xFFFFFFFF);
-}
-
-void trace_writer::write_string(std::vector<uint8_t>& buf, const std::string& str) {
-    write_uint16(buf, str.length());
-    buf.insert(buf.end(), str.begin(), str.end());
-}
 
 // Parse all events from all tensors into a single vector
 std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
@@ -79,7 +30,7 @@ std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
             if (tensors[i].grid_dims.x != reference_grid.x ||
                 tensors[i].grid_dims.y != reference_grid.y ||
                 tensors[i].grid_dims.z != reference_grid.z) {
-                throw std::runtime_error("All tensors must have the same grid dimensions for lane stacking");
+                Fail("All tensors must have identical grid dimensions");
             }
         }
     }
@@ -94,6 +45,10 @@ std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
 
                 uint16_t sm_id = tensor.host_buffer[base_offset];
                 uint32_t write_offset_bytes = tensor.host_buffer[base_offset + 1];
+                uint64_t anchor_time = tensor.host_buffer[base_offset + 2]
+                    | (static_cast<uint64_t>(tensor.host_buffer[base_offset + 3]) << 32);
+
+                if (write_offset_bytes == 0) continue;
 
                 // Compute event count from byte offset (device writes raw offset to avoid division)
                 uint32_t base_offset_bytes = base_offset * 4;
@@ -103,20 +58,17 @@ std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
 
                 // Check for overflow
                 if (write_offset_bytes > max_offset_bytes) {
-                    throw std::runtime_error(
-                        "Overflow detected in block " + std::to_string(block_id) +
-                        ", lane " + std::to_string(lane_id) + " (SM " + std::to_string(sm_id) + "): " +
-                        "write_offset=" + std::to_string(write_offset_bytes) + " bytes exceeds " +
-                        "allocated capacity=" + std::to_string(max_offset_bytes) + " bytes. " +
-                        "Allocated " + std::to_string((row_stride_bytes - event_width_bytes) / event_width_bytes) + " events, " +
-                        "attempted " + std::to_string((write_offset_bytes - base_offset_bytes - event_width_bytes) / event_width_bytes) + " events.");
+                    Fail("Trace lane write exceeded its allocated capacity");
                 }
 
-                uint32_t event_count = (write_offset_bytes - base_offset_bytes - event_width_bytes) / event_width_bytes;
+                constexpr uint32_t HEADER_BYTES = 4 * sizeof(uint32_t);
+                uint32_t event_count =
+                    (write_offset_bytes - base_offset_bytes - HEADER_BYTES)
+                    / event_width_bytes;
 
                 if (event_count == 0) continue;
 
-                uint32_t event_offset = base_offset + tensor.event_width;
+                uint32_t event_offset = base_offset + 4;
 
                 for (uint32_t event_idx = 0; event_idx < event_count; ++event_idx) {
                     uint32_t start_time = tensor.host_buffer[event_offset];
@@ -127,12 +79,21 @@ std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
 
                     parsed_event evt;
                     evt.block_id = block_id;  // Same block ID across tensors
-                    evt.cluster_id = 0;  // TODO: Compute from cluster dims when available
                     evt.lane_id = global_lane_offset + lane_id;  // Offset lane ID by tensor
-                    evt.time_offset = start_time;  // Will fix wraparound later
+                    evt.anchor_time = anchor_time;
+                    evt.time_offset = anchor_time
+                        - static_cast<uint32_t>(
+                            static_cast<uint32_t>(anchor_time) - start_time);
                     evt.duration = duration;
                     evt.sm_id = sm_id;
                     evt.param_count = 0;
+                    const std::unordered_map<uint32_t, uint16_t>::const_iterator
+                        track_override =
+                            tensor.lane_track_format_ids.find(lane_id);
+                    evt.track_format_id = track_override
+                            != tensor.lane_track_format_ids.end()
+                        ? track_override->second
+                        : tensor.default_track_format_id;
 
                     // Extract format ID and params
                     if (tensor.lane_format_ids[lane_id] == 0xFFFF) {
@@ -175,372 +136,344 @@ std::vector<trace_writer::parsed_event> trace_writer::parse_all_events() {
     return events;
 }
 
-// Detect and fix timer wraparound (32-bit timer wraps every ~4.3 seconds)
-void trace_writer::fix_timer_wraparound(std::vector<parsed_event>& events) {
-    if (events.empty()) return;
+static std::string ReplaceAll(std::string value,
+    const std::string& pattern, const std::string& replacement)
+{
+    size_t offset = 0;
 
-    // Sort by raw time to detect wraparound
-    std::sort(events.begin(), events.end(), [](const parsed_event& a, const parsed_event& b) {
-        return a.time_offset < b.time_offset;
-    });
-
-    // After sorting, if there was a wraparound:
-    // - Post-wrap events (small values like 100, 200) come first
-    // - Pre-wrap events (large values like 0xFFFFFFF0) come later
-    // Detect large FORWARD jump from small to large (crossing from post-wrap to pre-wrap)
-    const uint64_t WRAP_THRESHOLD = 0x80000000ULL;  // 2^31
-
-    size_t wrap_point = 0;
-    bool found_wrap = false;
-
-    for (size_t i = 1; i < events.size(); ++i) {
-        uint32_t prev_time = static_cast<uint32_t>(events[i - 1].time_offset);
-        uint32_t curr_time = static_cast<uint32_t>(events[i].time_offset);
-
-        if (curr_time > prev_time) {
-            uint32_t jump = curr_time - prev_time;
-
-            // Detect large forward jump (post-wrap to pre-wrap transition)
-            if (jump > WRAP_THRESHOLD) {
-                wrap_point = i;
-                found_wrap = true;
-                break;
-            }
-        }
+    while ((offset = value.find(pattern, offset)) != std::string::npos)
+    {
+        value.replace(offset, pattern.size(), replacement);
+        offset += replacement.size();
     }
 
-    if (found_wrap) {
-        // Events before wrap_point are post-wrap (need 2^32 added)
-        // Events from wrap_point onward are pre-wrap (no adjustment)
-        for (size_t i = 0; i < wrap_point; ++i) {
-            events[i].time_offset = static_cast<uint32_t>(events[i].time_offset) + 0x100000000ULL;
-        }
-    }
+    return value;
 }
 
-// Find the earliest timestamp (kernel start time)
-uint64_t trace_writer::find_kernel_start_time(const std::vector<parsed_event>& events) {
-    uint64_t min_time = UINT64_MAX;
-    for (const auto& evt : events) {
-        if (evt.time_offset < min_time) {
-            min_time = evt.time_offset;
+static const format_descriptor* FindFormat(
+    const std::vector<format_descriptor>& formats, uint16_t format_id)
+{
+    for (const format_descriptor& format : formats)
+    {
+        if (format.id == format_id)
+        {
+            return &format;
         }
     }
-    return min_time;
+
+    return nullptr;
 }
 
-// Convert absolute timestamps to offsets from kernel start
-void trace_writer::convert_to_offsets(std::vector<parsed_event>& events, uint64_t kernel_start_time) {
-    for (auto& evt : events) {
-        uint64_t absolute_time = evt.time_offset;
-        uint64_t offset = absolute_time - kernel_start_time;
-        evt.time_offset = offset;
-
-        // Check for overflow (kernel ran longer than 4.3 seconds)
-        if (offset > UINT32_MAX) {
-            throw std::runtime_error("Timestamp overflow detected (kernel duration > 4.3s)");
-        }
+static std::string FormatBlockName(const format_descriptor* format,
+    uint32_t block_id, dim3 grid_dims, dim3 cluster_dims)
+{
+    if (!format || !format->label_string)
+    {
+        return "Block " + std::to_string(block_id);
     }
+
+    uint32_t block_x = block_id % grid_dims.x;
+    uint32_t block_y = (block_id / grid_dims.x) % grid_dims.y;
+    uint32_t block_z = block_id / (grid_dims.x * grid_dims.y);
+    uint32_t cluster_size_x = cluster_dims.x == 0 ? 1 : cluster_dims.x;
+    uint32_t cluster_size_y = cluster_dims.y == 0 ? 1 : cluster_dims.y;
+    uint32_t cluster_size_z = cluster_dims.z == 0 ? 1 : cluster_dims.z;
+    uint32_t cluster_x = block_x / cluster_size_x;
+    uint32_t cluster_y = block_y / cluster_size_y;
+    uint32_t cluster_z = block_z / cluster_size_z;
+    uint32_t cluster_count_x =
+        (grid_dims.x + cluster_size_x - 1) / cluster_size_x;
+    uint32_t cluster_count_y =
+        (grid_dims.y + cluster_size_y - 1) / cluster_size_y;
+    uint32_t cluster_id = cluster_x
+        + cluster_count_x * (cluster_y + cluster_count_y * cluster_z);
+    std::string name = format->label_string;
+    name = ReplaceAll(std::move(name), "{blockX}", std::to_string(block_x));
+    name = ReplaceAll(std::move(name), "{blockY}", std::to_string(block_y));
+    name = ReplaceAll(std::move(name), "{blockZ}", std::to_string(block_z));
+    name = ReplaceAll(
+        std::move(name), "{blockLinear}", std::to_string(block_id));
+    name = ReplaceAll(
+        std::move(name), "{clusterX}", std::to_string(cluster_x));
+    name = ReplaceAll(
+        std::move(name), "{clusterY}", std::to_string(cluster_y));
+    name = ReplaceAll(
+        std::move(name), "{clusterZ}", std::to_string(cluster_z));
+    return ReplaceAll(
+        std::move(name), "{clusterLinear}", std::to_string(cluster_id));
 }
 
-void trace_writer::write(const char* filename, bool compress) {
-    // Step 1: Parse all events from all tensors
+static std::string FormatTrackName(const format_descriptor* format,
+    uint32_t lane_id)
+{
+    if (!format || !format->label_string)
+    {
+        return "Lane " + std::to_string(lane_id);
+    }
+
+    return ReplaceAll(format->label_string,
+        "{lane}", std::to_string(lane_id));
+}
+
+bool trace_writer::AppendToSession(TraceSession& session,
+    TrackId parent_track, ClockId gpu_clock, ClockId anchor_clock,
+    uint64_t reference_anchor_ns, EventId parent_event,
+    uint64_t uncertainty_ns,
+    const std::vector<event_parent_interval>* parent_intervals,
+    uint32_t displayed_block_count,
+    bool parents_indexed_by_block)
+{
     std::vector<parsed_event> events = parse_all_events();
 
-    if (events.empty()) {
+    if (events.empty())
+    {
 #ifndef NANOTRACE_NO_LOG
         fprintf(stderr, "Warning: No trace events found\n");
 #endif
+        return false;
+    }
+
+    uint64_t raw_anchor = 0;
+    for (const parsed_event& event : events)
+    {
+        raw_anchor = std::max(raw_anchor, event.anchor_time);
+    }
+
+    std::vector<EventId> resolved_parent_events(events.size(), parent_event);
+    std::vector<uint64_t> resolved_time_offsets;
+    resolved_time_offsets.reserve(events.size());
+    for (const parsed_event& event : events)
+    {
+        resolved_time_offsets.push_back(event.time_offset);
+    }
+
+    if (parent_intervals)
+    {
+        for (size_t event_index = 0; event_index < events.size(); ++event_index)
+        {
+            const parsed_event& event = events[event_index];
+            uint64_t event_start_ns;
+            uint64_t event_end_ns;
+            const event_parent_interval* parent = nullptr;
+
+            if (parents_indexed_by_block)
+            {
+                if (event.block_id >= parent_intervals->size()
+                    || event.anchor_time < event.time_offset + event.duration)
+                {
+#ifndef NANOTRACE_NO_LOG
+                    fprintf(stderr, "Nanotrace block has no indexed parent\n");
+#endif
+                    return false;
+                }
+
+                parent = &(*parent_intervals)[event.block_id];
+                uint64_t start_to_anchor =
+                    event.anchor_time - event.time_offset;
+                uint64_t end_to_anchor = event.anchor_time
+                    - (event.time_offset + event.duration);
+                if (parent->end_ns < start_to_anchor)
+                {
+#ifndef NANOTRACE_NO_LOG
+                    fprintf(stderr, "Nanotrace event predates its parent\n");
+#endif
+                    return false;
+                }
+
+                event_start_ns = parent->end_ns - start_to_anchor;
+                event_end_ns = parent->end_ns - end_to_anchor;
+                resolved_time_offsets[event_index] = event_start_ns
+                    <= reference_anchor_ns
+                    ? raw_anchor - (reference_anchor_ns - event_start_ns)
+                    : raw_anchor + (event_start_ns - reference_anchor_ns);
+            }
+            else
+            {
+                event_start_ns = event.time_offset <= raw_anchor
+                    ? reference_anchor_ns - (raw_anchor - event.time_offset)
+                    : reference_anchor_ns + (event.time_offset - raw_anchor);
+                event_end_ns = event_start_ns + event.duration;
+                std::vector<event_parent_interval>::const_iterator position =
+                    std::upper_bound(parent_intervals->begin(),
+                        parent_intervals->end(), event_start_ns,
+                        [](uint64_t timestamp,
+                            const event_parent_interval& interval)
+                        {
+                            return timestamp < interval.start_ns;
+                        });
+
+                if (position == parent_intervals->begin())
+                {
+#ifndef NANOTRACE_NO_LOG
+                    fprintf(stderr, "Nanotrace event has no enclosing parent\n");
+#endif
+                    return false;
+                }
+
+                parent = &*--position;
+            }
+
+            if (event_start_ns + uncertainty_ns < parent->start_ns
+                || event_end_ns > parent->end_ns + uncertainty_ns)
+            {
+#ifndef NANOTRACE_NO_LOG
+                fprintf(stderr,
+                    "Nanotrace event block %u lane %u [%llu, %llu] falls "
+                    "outside parent [%llu, %llu], anchor %llu -> %llu\n",
+                    event.block_id, event.lane_id,
+                    static_cast<unsigned long long>(event_start_ns),
+                    static_cast<unsigned long long>(event_end_ns),
+                    static_cast<unsigned long long>(parent->start_ns),
+                    static_cast<unsigned long long>(parent->end_ns),
+                    static_cast<unsigned long long>(raw_anchor),
+                    static_cast<unsigned long long>(reference_anchor_ns));
+#endif
+                return false;
+            }
+
+            resolved_parent_events[event_index] = parent->event_id;
+        }
+    }
+
+    session.AddClockSnapshot(gpu_clock, anchor_clock,
+        raw_anchor, reference_anchor_ns, uncertainty_ns);
+
+    TrackId kernel_track = session.AddTrack(kernel_name.c_str(),
+        TrackKind::Kernel, gpu_clock, parent_track, 0);
+    std::unordered_map<uint16_t, TrackId> sm_tracks;
+    std::map<std::pair<uint16_t, uint32_t>, TrackId> block_tracks;
+    std::map<std::tuple<uint16_t, uint32_t, uint32_t>, TrackId> lane_tracks;
+    const format_descriptor* block_format = FindFormat(
+        formats, default_block_format_id);
+    dim3 grid_dims = tensors.front().grid_dims;
+    dim3 cluster_dims = tensors.front().cluster_dims;
+
+    std::unordered_map<uint16_t, bool> registered_event_formats;
+    for (const parsed_event& event : events)
+    {
+        if (!registered_event_formats.emplace(event.format_id, true).second)
+        {
+            continue;
+        }
+
+        const format_descriptor* format = FindFormat(formats, event.format_id);
+        if (format)
+        {
+            session.RegisterEventFormat(format->label_string,
+                format->tooltip_string, format->param_count);
+        }
+    }
+
+    for (size_t event_index = 0; event_index < events.size(); ++event_index)
+    {
+        const parsed_event& event = events[event_index];
+        uint32_t displayed_block_id = displayed_block_count == 0
+            ? event.block_id : event.block_id % displayed_block_count;
+        TrackId sm_track;
+        const std::unordered_map<uint16_t, TrackId>::const_iterator sm =
+            sm_tracks.find(event.sm_id);
+        if (sm == sm_tracks.end())
+        {
+            std::string name = "SM " + std::to_string(event.sm_id);
+            sm_track = session.AddTrack(name.c_str(),
+                TrackKind::StreamingMultiprocessor, gpu_clock,
+                kernel_track, event.sm_id, event.sm_id);
+            sm_tracks.emplace(event.sm_id, sm_track);
+        }
+        else
+        {
+            sm_track = sm->second;
+        }
+
+        std::pair<uint16_t, uint32_t> block_key{
+            event.sm_id, displayed_block_id };
+        TrackId block_track;
+        const std::map<std::pair<uint16_t, uint32_t>, TrackId>::const_iterator
+            block = block_tracks.find(block_key);
+        if (block == block_tracks.end())
+        {
+            std::string name = FormatBlockName(
+                block_format, displayed_block_id, grid_dims, cluster_dims);
+            block_track = session.AddTrack(name.c_str(),
+                TrackKind::ThreadBlock, gpu_clock, sm_track,
+                static_cast<int32_t>(displayed_block_id), displayed_block_id);
+            block_tracks.emplace(block_key, block_track);
+        }
+        else
+        {
+            block_track = block->second;
+        }
+
+        std::tuple<uint16_t, uint32_t, uint32_t> lane_key{
+            event.sm_id, displayed_block_id, event.lane_id };
+        TrackId lane_track;
+        const std::map<std::tuple<uint16_t, uint32_t, uint32_t>,
+            TrackId>::const_iterator
+            lane = lane_tracks.find(lane_key);
+        if (lane == lane_tracks.end())
+        {
+            std::string name = FormatTrackName(
+                FindFormat(formats, event.track_format_id), event.lane_id);
+            lane_track = session.AddTrack(name.c_str(), TrackKind::Warp,
+                gpu_clock, block_track, static_cast<int32_t>(event.lane_id),
+                event.lane_id);
+            lane_tracks.emplace(lane_key, lane_track);
+        }
+        else
+        {
+            lane_track = lane->second;
+        }
+
+        const format_descriptor* format = FindFormat(
+            formats, event.format_id);
+        const char* event_name = format && format->label_string
+            ? format->label_string : "GPU event";
+        uint64_t event_duration = event.duration == 0 ? 32 : event.duration;
+        uint64_t event_start = resolved_time_offsets[event_index];
+        if (!parent_intervals && parent_event != INVALID_EVENT_ID
+            && event_start + event_duration > reference_anchor_ns)
+        {
+            event_start = reference_anchor_ns >= event_duration
+                ? reference_anchor_ns - event_duration : 0;
+        }
+        EventId event_id = session.AddSlice(lane_track, event_name,
+            event_start, event_duration,
+            0, resolved_parent_events[event_index], 0);
+        for (uint8_t i = 0; i < event.param_count; ++i)
+        {
+            std::string fallback_name = "parameter_" + std::to_string(i);
+            const char* argument_name = format && format->param_names
+                ? format->param_names[i] : fallback_name.c_str();
+            session.AddUnsignedArgument(
+                event_id, argument_name, event.params[i]);
+        }
+    }
+
+    return true;
+}
+
+void trace_writer::write(const char* filename, bool compress)
+{
+    static_cast<void>(compress);
+    TraceSession session{ kernel_name.c_str() };
+    ClockId gpu_clock = session.AddClock(
+        "GPU global timer", ClockKind::GpuGlobalTimer);
+
+    if (!AppendToSession(session, INVALID_TRACK_ID, gpu_clock,
+        session.ReferenceClock(), 0))
+    {
         return;
     }
 
-    // Step 2: Fix timer wraparound
-    fix_timer_wraparound(events);
-
-    // Step 3: Find kernel start time
-    uint64_t kernel_start_time = find_kernel_start_time(events);
-
-    // Step 4: Convert to offsets from kernel start
-    convert_to_offsets(events, kernel_start_time);
-
-    // Step 5: Build format ID mapping (original TraceType::id -> file index)
-    std::unordered_map<uint16_t, uint16_t> format_id_map;
-    for (size_t i = 0; i < formats.size(); ++i) {
-        format_id_map[formats[i].id] = static_cast<uint16_t>(i);
-    }
-
-    // Translate default block and track format IDs to file indices
-    auto block_it = format_id_map.find(default_block_format_id);
-    if (block_it != format_id_map.end()) {
-        default_block_format_id = block_it->second;
-    } else {
-        throw std::runtime_error("Default block type not registered");
-    }
-
-    // Translate per-tensor track format IDs to file indices
-    for (auto& tensor : tensors) {
-        // Translate default track format ID
-        if (tensor.default_track_format_id != 0) {
-            auto track_it = format_id_map.find(tensor.default_track_format_id);
-            if (track_it != format_id_map.end()) {
-                tensor.default_track_format_id = track_it->second;
-            } else {
-                throw std::runtime_error("Tensor track type not registered");
-            }
-        }
-
-        // Translate per-lane overrides
-        for (auto& [lane, format_id] : tensor.lane_track_format_ids) {
-            auto it = format_id_map.find(format_id);
-            if (it != format_id_map.end()) {
-                format_id = it->second;
-            } else {
-                throw std::runtime_error("Lane track type not registered");
-            }
-        }
-    }
-
-    // Step 6: Translate event format IDs to file indices
-    for (auto& evt : events) {
-        auto it = format_id_map.find(evt.format_id);
-        if (it != format_id_map.end()) {
-            evt.format_id = it->second;
-        } else {
-            throw std::runtime_error("Event references unregistered format ID");
-        }
-    }
-
-    // Step 7: Group events by (block_id, lane_id) for writing
-    // Use map (not unordered_map) to ensure tracks are written in sorted order
-    std::map<std::pair<uint32_t, uint32_t>, std::vector<parsed_event*>> tracks;
-    for (auto& evt : events) {
-        tracks[{evt.block_id, evt.lane_id}].push_back(&evt);
-    }
-
-    // Step 8: Collect unique block descriptors (block_id, cluster_id, sm_id tuples)
-    struct block_desc { uint32_t block_id; uint32_t cluster_id; uint16_t sm_id; };
-    std::vector<block_desc> block_descriptors;
-    std::unordered_set<std::tuple<uint32_t, uint32_t, uint16_t>, tuple3_hash> seen_blocks;
-
-    for (const auto& evt : events) {
-        auto key = std::make_tuple(evt.block_id, evt.cluster_id, evt.sm_id);
-        if (seen_blocks.insert(key).second) {
-            block_descriptors.push_back({evt.block_id, evt.cluster_id, evt.sm_id});
-        }
-    }
-
-    // Sort block descriptors by grid ID (required by visualizer parser)
-    std::sort(block_descriptors.begin(), block_descriptors.end(),
-        [](const block_desc& a, const block_desc& b) {
-            return a.block_id < b.block_id;
-        });
-
-    // Build block descriptor ID map after sorting
-    std::unordered_map<std::tuple<uint32_t, uint32_t, uint16_t>, uint32_t, tuple3_hash> block_id_map;
-    for (size_t i = 0; i < block_descriptors.size(); ++i) {
-        const auto& desc = block_descriptors[i];
-        block_id_map[std::make_tuple(desc.block_id, desc.cluster_id, desc.sm_id)] = static_cast<uint32_t>(i);
-    }
-
-    // Step 7: Write binary file
-    std::vector<uint8_t> header;
-    std::vector<uint8_t> payload;
-
-    // Write magic number and version (uncompressed)
-    const char* magic = "nanotrace";
-    for (int i = 0; i < 10; ++i) {
-        write_uint8(header, magic[i]);
-    }
-    write_uint8(header, 1);  // Format version
-
-    // Check if compression is actually available
-    bool can_compress = false;
-#ifdef NANOTRACE_WITH_MINIZ
-    can_compress = compress;
-#endif
-    write_uint8(header, can_compress ? 1 : 0);
-
-    // Write kernel name
-    write_string(payload, kernel_name);
-
-    // Write grid dimensions (use first tensor's grid, all should be the same)
-    if (!tensors.empty()) {
-        write_uint32(payload, tensors[0].grid_dims.x);
-        write_uint32(payload, tensors[0].grid_dims.y);
-        write_uint32(payload, tensors[0].grid_dims.z);
-    } else {
-        write_uint32(payload, 0);
-        write_uint32(payload, 0);
-        write_uint32(payload, 0);
-    }
-
-    // Write cluster dimensions (use first tensor's cluster dims, all should be the same)
-    if (!tensors.empty()) {
-        write_uint32(payload, tensors[0].cluster_dims.x);
-        write_uint32(payload, tensors[0].cluster_dims.y);
-        write_uint32(payload, tensors[0].cluster_dims.z);
-    } else {
-        write_uint32(payload, 0);
-        write_uint32(payload, 0);
-        write_uint32(payload, 0);
-    }
-
-    // Write counts
-    write_uint32(payload, formats.size());
-    write_uint32(payload, block_descriptors.size());
-    write_uint32(payload, tracks.size());
-    write_uint64(payload, events.size());
-
-    // Write format descriptors with both label and tooltip strings
-    for (const auto& fmt : formats) {
-        write_string(payload, fmt.label_string);
-        write_string(payload, fmt.tooltip_string);
-        write_uint8(payload, fmt.param_count);
-    }
-
-    // Write block descriptors
-    // Format: [block_id (uint32), cluster_id (uint32), sm_id (uint16), format_id (uint16)]
-    for (const auto& desc : block_descriptors) {
-        write_uint32(payload, desc.block_id);
-        write_uint32(payload, desc.cluster_id);
-        write_uint16(payload, desc.sm_id);
-        write_uint16(payload, default_block_format_id);
-    }
-
-    // Write event tracks
-    for (const auto& [key, event_ptrs] : tracks) {
-        auto [block_id, lane_id] = key;
-
-        if (event_ptrs.empty()) continue;
-
-        // Get sm_id and cluster_id from first event
-        uint16_t sm_id = event_ptrs[0]->sm_id;
-        uint32_t cluster_id = event_ptrs[0]->cluster_id;
-
-        // Determine which tensor this lane belongs to and get track format ID
-        uint16_t track_format_id = 0;
-        uint32_t lane_offset = 0;
-        for (const auto& tensor : tensors) {
-            if (lane_id >= lane_offset && lane_id < lane_offset + tensor.num_lanes) {
-                // This lane belongs to this tensor
-                uint32_t tensor_relative_lane = lane_id - lane_offset;
-
-                // Check for per-lane override first
-                auto track_it = tensor.lane_track_format_ids.find(tensor_relative_lane);
-                if (track_it != tensor.lane_track_format_ids.end()) {
-                    track_format_id = track_it->second;
-                } else {
-                    track_format_id = tensor.default_track_format_id;
-                }
-                break;
-            }
-            lane_offset += tensor.num_lanes;
-        }
-
-        if (track_format_id == 0) {
-            throw std::runtime_error("Track format ID not set for lane " + std::to_string(lane_id));
-        }
-
-        // Write track header
-        write_uint32(payload, block_id_map[std::make_tuple(block_id, cluster_id, sm_id)]);  // Block descriptor ID
-        write_uint16(payload, track_format_id);  // Track format ID (from tensor)
-        write_uint32(payload, lane_id);  // Lane ID (for {lane} placeholder expansion)
-        // No track parameters (track format has 0 params, lane_id is metadata not a param)
-        write_uint32(payload, event_ptrs.size());
-
-        // Write events
-        for (const auto* evt : event_ptrs) {
-            write_uint32(payload, static_cast<uint32_t>(evt->time_offset));
-            // Clamp duration to minimum 32ns (global timer resolution)
-            uint32_t duration = (evt->duration == 0) ? 32 : evt->duration;
-            write_uint32(payload, duration);
-            write_uint16(payload, evt->format_id);
-
-            for (uint8_t p = 0; p < evt->param_count; ++p) {
-                write_uint32(payload, evt->params[p]);
-            }
-        }
-    }
-
-    // Compress payload if requested and available
-    std::vector<uint8_t> final_payload;
-    if (can_compress) {
-#ifdef NANOTRACE_WITH_MINIZ
-        mz_ulong compressed_size = mz_compressBound(payload.size());
-        final_payload.resize(compressed_size);
-
-        int result = mz_compress(final_payload.data(), &compressed_size,
-                                 payload.data(), payload.size());
-
-        if (result == MZ_OK) {
-            final_payload.resize(compressed_size);
-        } else {
-            // Compression failed, fall back to uncompressed
-            final_payload = std::move(payload);
-            header[11] = 0;
-        }
-#endif
-    } else {
-        final_payload = std::move(payload);
-    }
-
-    // Calculate and log statistics per tensor
-    uint32_t min_duration = UINT32_MAX;
-    uint32_t max_duration = 0;
-    uint64_t min_time = UINT64_MAX;
-    uint64_t max_time = 0;
-
-    for (const auto& evt : events) {
-        uint32_t duration = (evt.duration == 0) ? 32 : evt.duration;
-        if (duration < min_duration) min_duration = duration;
-        if (duration > max_duration) max_duration = duration;
-
-        uint64_t evt_end = evt.time_offset + evt.duration;
-        if (evt.time_offset < min_time) min_time = evt.time_offset;
-        if (evt_end > max_time) max_time = evt_end;
-    }
-
-    uint64_t total_duration_ns = (events.empty()) ? 0 : (max_time - min_time);
-
+    if (!session.Write(filename))
+    {
 #ifndef NANOTRACE_NO_LOG
-    // Log per-tensor statistics
-    printf("Nanotrace: %zu tensors, %zu blocks, %zu total events\n",
-            tensors.size(), block_descriptors.size(), events.size());
-
-    uint32_t lane_offset = 0;
-    for (size_t tensor_idx = 0; tensor_idx < tensors.size(); ++tensor_idx) {
-        const auto& tensor = tensors[tensor_idx];
-
-        // Calculate max events per lane for this tensor
-        uint32_t max_events_this_tensor = 0;
-        for (uint32_t lane_id = lane_offset; lane_id < lane_offset + tensor.num_lanes; ++lane_id) {
-            for (const auto& [key, event_ptrs] : tracks) {
-                if (key.second == lane_id && event_ptrs.size() > max_events_this_tensor) {
-                    max_events_this_tensor = static_cast<uint32_t>(event_ptrs.size());
-                }
-            }
-        }
-
-        printf("  Tensor %zu: %u lanes, max %u events/lane\n",
-                tensor_idx, tensor.num_lanes, max_events_this_tensor);
-
-        lane_offset += tensor.num_lanes;
-    }
-
-    if (!events.empty()) {
-        printf("  Duration: %.6f us total, events %u-%u ns\n",
-                total_duration_ns / 1e3, min_duration, max_duration);
-    }
-    printf("  Output: %s (%zu bytes uncompressed, %zu compressed = %.1f%%)\n",
-            filename, payload.size(), final_payload.size(),
-            (payload.size() > 0) ? (100.0 * final_payload.size() / payload.size()) : 0.0);
+        fprintf(stderr, "Nanotrace write failed: %s\n",
+            session.LastError().c_str());
 #endif
-
-    // Write to file
-    std::ofstream file(filename, std::ios::binary);
-    file.write(reinterpret_cast<const char*>(header.data()), header.size());
-    file.write(reinterpret_cast<const char*>(final_payload.data()), final_payload.size());
-    file.close();
+    }
 }
 
 } // namespace nanotrace
+
+#endif

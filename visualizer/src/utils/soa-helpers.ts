@@ -3,7 +3,7 @@
  * Provides convenient accessors and utilities for the TypedArray-based memory layout.
  */
 
-import { ZonesSoA, BlocksSoA } from './types';
+import { ZonesSoA, BlocksSoA } from './types.js';
 
 // ============================================================================
 // Constants
