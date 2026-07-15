@@ -8,7 +8,7 @@
 
 import { Camera } from '../utils/camera.js';
 import { HierarchyData } from '../utils/types.js';
-import { NS_TO_MS } from '../utils/soa-helpers.js';
+import { formatDuration, NS_TO_MS } from '../utils/soa-helpers.js';
 import {
     SUBLANE_HEIGHT,
     LABEL_COLOR,
@@ -159,7 +159,6 @@ export class LabelRenderer {
     private hierarchy: HierarchyData;
     private zoneIndex: TemporalWidthIndex;
     private blockIndex: TemporalWidthIndex;
-    private durationFormatter = new Intl.NumberFormat();
 
     private dirty = true;
     private lastCameraX = Number.NaN;
@@ -333,7 +332,7 @@ export class LabelRenderer {
                 const duration = blocks.endsX[blockIndex]
                     - blocks.startsX[blockIndex];
                 const label = this.fitLabel(
-                    `${name} (${this.durationFormatter.format(duration)} ns)`,
+                    `${name} (${formatDuration(duration)})`,
                     visibleWidth - horizontalPadding
                         - LABEL_CLIP_MARGIN * fontScale);
                 if (label !== null) {
@@ -410,8 +409,7 @@ export class LabelRenderer {
                         ? '\u25be ' : '\u25b8 ')
                     : '';
                 const label = this.fitLabel(
-                    `${disclosure}${name} (`
-                        + `${this.durationFormatter.format(duration)} ns)`,
+                    `${disclosure}${name} (${formatDuration(duration)})`,
                     visibleWidth - horizontalPadding
                         - LABEL_CLIP_MARGIN * fontScale);
                 if (label !== null) {

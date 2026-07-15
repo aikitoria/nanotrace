@@ -17,7 +17,8 @@ import {
 } from './utils/types.js';
 import {
     binarySearchBlocksIndirect,
-    binarySearchZones
+    binarySearchZones,
+    formatDuration
 } from './utils/soa-helpers.js';
 import {
     LANE_EDGE_PADDING,
@@ -301,7 +302,7 @@ export class InteractionManager {
      * and displays tooltip with formatted zone information:
      * - Zone name (from format descriptor)
      * - Hierarchy (warp/sublane / block)
-     * - Timing (start, end, duration in nanoseconds)
+     * - Timing (absolute nanosecond timestamps and an adaptive duration)
      *
      * Tooltip appears offset 10px right and down from cursor.
      */
@@ -383,7 +384,7 @@ export class InteractionManager {
                 ${EscapeHtml(hierarchyName)}<br>
                 Start: ${startNs.toLocaleString()} ns<br>
                 End: ${endNs.toLocaleString()} ns<br>
-                Duration: ${durNs.toLocaleString()} ns${details}${expansionHint}
+                Duration: ${formatDuration(durNs)}${details}${expansionHint}
             `;
             this.canvas.style.cursor = zones.hasChildren[result.zoneIdx] !== 0
                 ? 'pointer' : 'default';
@@ -401,8 +402,8 @@ export class InteractionManager {
      * Updates selection UI elements (region, lines, label) based on current selection bounds.
      *
      * Transforms world-space selection coordinates to screen space for rendering.
-     * Only displays UI if width > 1px. Label shows start/end/duration in nanoseconds
-     * with appropriate precision (decimal for sub-10ns, integer with commas otherwise).
+     * Only displays UI if width > 1px. Absolute endpoints remain in nanoseconds,
+     * while the selected duration uses an adaptive unit.
      */
     updateSelection(): void {
         if (!this.isSelecting && !this.hasSelection) return;
@@ -443,21 +444,19 @@ export class InteractionManager {
             const endNs = worldRightX * MS_TO_NS;
             const durNs = endNs - startNs;
 
-            let startText: string, endText: string, durText: string;
+            let startText: string, endText: string;
             if (durNs < TIME_DECIMAL_THRESHOLD) {
                 startText = startNs.toFixed(TIME_DECIMAL_PLACES);
                 endText = endNs.toFixed(TIME_DECIMAL_PLACES);
-                durText = durNs.toFixed(2);
             } else {
                 startText = Math.round(startNs).toLocaleString();
                 endText = Math.round(endNs).toLocaleString();
-                durText = Math.round(durNs).toLocaleString();
             }
 
             this.selectionLabel.textContent =
                 `Start: ${startText} ns\n` +
                 `End: ${endText} ns\n` +
-                `Len: ${durText} ns`;
+                `Len: ${formatDuration(durNs)}`;
 
             this.selectionLabel.style.left = `${screenLeft + SELECTION_LABEL_OFFSET}px`;
             this.selectionLabel.style.display = 'block';
@@ -476,21 +475,19 @@ export class InteractionManager {
             const endNs = worldRightX * MS_TO_NS;
             const durNs = endNs - startNs;
 
-            let startText: string, endText: string, durText: string;
+            let startText: string, endText: string;
             if (durNs < TIME_DECIMAL_THRESHOLD) {
                 startText = startNs.toFixed(TIME_DECIMAL_PLACES);
                 endText = endNs.toFixed(TIME_DECIMAL_PLACES);
-                durText = durNs.toFixed(2);
             } else {
                 startText = Math.round(startNs).toLocaleString();
                 endText = Math.round(endNs).toLocaleString();
-                durText = Math.round(durNs).toLocaleString();
             }
 
             this.selectionLabel.textContent =
                 `Start: ${startText} ns\n` +
                 `End: ${endText} ns\n` +
-                `Len: ${durText} ns`;
+                `Len: ${formatDuration(durNs)}`;
 
             this.selectionLabel.style.left = `${centerX + SELECTION_LABEL_OFFSET}px`;
             this.selectionLabel.style.display = 'block';

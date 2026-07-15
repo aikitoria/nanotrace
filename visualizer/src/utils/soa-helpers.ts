@@ -190,24 +190,21 @@ export function binarySearchZones(
 // Time Formatting
 // ============================================================================
 
-/**
- * Format nanoseconds as human-readable time string.
- * Automatically chooses appropriate units (s/ms/μs/ns).
- */
-export function formatTime(ns: number): string {
-    if (ns >= 1e9) return `${(ns / 1e9).toFixed(2)} s`;
-    if (ns >= 1e6) return `${(ns / 1e6).toFixed(2)} ms`;
-    if (ns >= 1e3) return `${(ns / 1e3).toFixed(2)} μs`;
-    return `${ns.toFixed(0)} ns`;
-}
+const durationFormatter = new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 3
+});
 
-/**
- * Format nanoseconds as locale string with units.
- * Uses toLocaleString() for thousands separators.
- */
-export function formatTimeLocale(ns: number): string {
-    if (ns >= 1e9) return `${(ns / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })} s`;
-    if (ns >= 1e6) return `${(ns / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 })} ms`;
-    if (ns >= 1e3) return `${(ns / 1e3).toLocaleString(undefined, { maximumFractionDigits: 2 })} μs`;
-    return `${ns.toLocaleString()} ns`;
+/** Formats a time span using the largest practical unit. */
+export function formatDuration(ns: number): string {
+    const magnitude = Math.abs(ns);
+    if (magnitude >= 1e9) {
+        return `${durationFormatter.format(ns / 1e9)} s`;
+    }
+    if (magnitude >= 1e6) {
+        return `${durationFormatter.format(ns / 1e6)} ms`;
+    }
+    if (magnitude >= 1e3) {
+        return `${durationFormatter.format(ns / 1e3)} μs`;
+    }
+    return `${durationFormatter.format(ns)} ns`;
 }

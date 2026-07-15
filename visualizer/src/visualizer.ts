@@ -22,6 +22,7 @@ import { InteractionManager } from './interaction-manager.js';
 import {
     HierarchyData
 } from './utils/types.js';
+import { formatDuration } from './utils/soa-helpers.js';
 import {
     BASE_TIME_RANGE,
     ZOOM_FACTOR,
@@ -1832,7 +1833,7 @@ export class ZoneVisualizer {
 
         // Update stats overlay with trace info and performance metrics
         const durationNs = Math.round(this.TIME_RANGE * MS_TO_NS);
-        const formattedDuration = durationNs.toLocaleString();
+        const formattedDuration = formatDuration(durationNs);
         const fpsStr = String(fps).padStart(FPS_PADDING_WIDTH, ' ');
 
         // Only update stats if they don't exist yet (avoid recreating links every frame)
@@ -1843,7 +1844,7 @@ export class ZoneVisualizer {
         // Update only the dynamic content
         const dynamicStats = this.stats.querySelector('.stats-dynamic');
         if (dynamicStats && this.hierarchy) {
-            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>Rows: ${this.hierarchy.lanes.count.toLocaleString()} | Groups: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
+            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration}<br>Rows: ${this.hierarchy.lanes.count.toLocaleString()} | Groups: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
         }
         this.lastTime = now;
 
