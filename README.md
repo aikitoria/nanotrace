@@ -6,7 +6,7 @@ interactive view.
 
 Use it to answer questions such as:
 
-- What was each CPU thread doing while the GPUs were running?
+- What was each of the 256 CPU threads doing while the GPUs were running?
 - When did each CUDA kernel actually execute?
 - Which blocks, lanes, or application-defined stages were active inside a
   kernel?
@@ -33,6 +33,26 @@ Nanotrace records three complementary event sources:
 The WebGPU viewer handles large traces locally in the browser. Tracks can be
 grouped into an application-defined hierarchy, and detailed GPU rows remain
 collapsed until you need them.
+
+## Dense CPU tracing without a profiler in the hot path
+
+Each CPU thread records into its own fixed-capacity `CpuThreadContext`. Opening
+and closing a zone reads the monotonic clock and appends a small record to that
+thread's preallocated buffer. It does not allocate memory, acquire a global
+trace lock, serialize data, or call into an attached profiling tool. Threads
+flush their completed buffers later, outside the work being measured.
+
+This gives CPU tracing very low and predictable overhead even across hundreds
+of busy worker threads. The recorder is not literally free—the timestamp reads
+and local writes still have a cost—but it is designed for much denser tracing
+than a tool-facing annotation stream.
+
+Unlike profiler-collected annotations such as NVTX, Nanotrace keeps the hot
+recording path entirely in application-owned memory.
+
+Choose the per-thread capacity up front and check `DroppedEventCount()` after
+capture if losing events would matter. No dynamic allocation occurs when a
+buffer fills; additional events are counted and dropped.
 
 ## Quick start
 
