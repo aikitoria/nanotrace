@@ -48,6 +48,7 @@ interface ClockSnapshotRecord {
 }
 
 interface TrackRecord {
+    index: number;
     id: bigint;
     parentId: bigint;
     clockId: number;
@@ -58,12 +59,11 @@ interface TrackRecord {
 }
 
 interface EventRecord {
-    id: bigint;
-    parentId: bigint;
-    trackId: bigint;
+    id: number;
+    parentId: number;
+    trackIndex: number;
     timestamp: bigint;
     duration: bigint;
-    correlationId: bigint;
     nameId: number;
     firstArgument: number;
     argumentCount: number;
@@ -121,103 +121,7 @@ export interface TraceTrackNode {
     sourceId: bigint;
 }
 
-interface ProjectionIndex {
-    rootZonesByTrack: Uint32Array[];
-    parentZoneIndices: Int32Array;
-    childOffsets: Uint32Array;
-    childZoneIndices: Uint32Array;
-    expandableEventZoneIndices: Map<bigint, number>;
-    streamCountsByGpu: Map<bigint, Set<bigint>>;
-}
-
-const projectionIndices = new WeakMap<ParsedTraceData, ProjectionIndex>();
-
-function buildProjectionIndex(source: ParsedTraceData): ProjectionIndex {
-    const eventZoneIndices = new Map<bigint, number>();
-    for (let zoneIndex = 0; zoneIndex < source.zones.count; zoneIndex++) {
-        eventZoneIndices.set(source.zones.eventIds[zoneIndex], zoneIndex);
-    }
-
-    const rootZonesByTrack = new Array<number[]>(source.tracks.count);
-    for (let trackIndex = 0;
-        trackIndex < source.tracks.count; trackIndex++) {
-        rootZonesByTrack[trackIndex] = [];
-    }
-    const parentZoneIndices = new Int32Array(source.zones.count);
-    parentZoneIndices.fill(-1);
-    const childOffsets = new Uint32Array(source.zones.count + 1);
-    const parentEventIds = new Set<bigint>();
-
-    for (let zoneIndex = 0; zoneIndex < source.zones.count; zoneIndex++) {
-        const parentEventId = source.zones.parentEventIds[zoneIndex];
-        if (parentEventId === 0n) {
-            rootZonesByTrack[source.zones.trackIndices[zoneIndex]].push(
-                zoneIndex);
-            continue;
-        }
-
-        parentEventIds.add(parentEventId);
-        const parentZoneIndex = eventZoneIndices.get(parentEventId);
-        if (parentZoneIndex !== undefined) {
-            parentZoneIndices[zoneIndex] = parentZoneIndex;
-            childOffsets[parentZoneIndex + 1]++;
-        }
-    }
-
-    const expandableEventZoneIndices = new Map<bigint, number>();
-    for (const parentEventId of parentEventIds) {
-        const parentZoneIndex = eventZoneIndices.get(parentEventId);
-        if (parentZoneIndex !== undefined) {
-            expandableEventZoneIndices.set(parentEventId, parentZoneIndex);
-        }
-    }
-    eventZoneIndices.clear();
-    for (let zoneIndex = 1; zoneIndex < childOffsets.length; zoneIndex++) {
-        childOffsets[zoneIndex] += childOffsets[zoneIndex - 1];
-    }
-
-    const childZoneIndices = new Uint32Array(
-        childOffsets[source.zones.count]);
-    const nextChildOffsets = childOffsets.slice(0, source.zones.count);
-    for (let zoneIndex = 0; zoneIndex < source.zones.count; zoneIndex++) {
-        const parentZoneIndex = parentZoneIndices[zoneIndex];
-        if (parentZoneIndex >= 0) {
-            childZoneIndices[nextChildOffsets[parentZoneIndex]++] = zoneIndex;
-        }
-    }
-
-    const streamCountsByGpu = new Map<bigint, Set<bigint>>();
-    for (let trackIndex = 0; trackIndex < source.tracks.count; trackIndex++) {
-        const hierarchy = source.trackHierarchies[trackIndex];
-        const gpuNode = hierarchy.find(node => node.kind === 2);
-        const streamNode = hierarchy.find(node => node.kind === 3);
-        if (!gpuNode || !streamNode) continue;
-
-        const streams = streamCountsByGpu.get(gpuNode.id)
-            ?? new Set<bigint>();
-        streams.add(streamNode.id);
-        streamCountsByGpu.set(gpuNode.id, streams);
-    }
-
-    return {
-        rootZonesByTrack: rootZonesByTrack.map(
-            zoneIndices => Uint32Array.from(zoneIndices)),
-        parentZoneIndices,
-        childOffsets,
-        childZoneIndices,
-        expandableEventZoneIndices,
-        streamCountsByGpu
-    };
-}
-
-function getProjectionIndex(source: ParsedTraceData): ProjectionIndex {
-    const cached = projectionIndices.get(source);
-    if (cached) return cached;
-
-    const index = buildProjectionIndex(source);
-    projectionIndices.set(source, index);
-    return index;
-}
+const textDecoder = new TextDecoder();
 
 class Reader {
     constructor(
@@ -275,7 +179,7 @@ class Reader {
         const bytes = new Uint8Array(
             this.view.buffer, this.view.byteOffset + this.offset, length);
         this.offset += length;
-        return new TextDecoder().decode(bytes);
+        return textDecoder.decode(bytes);
     }
 }
 
@@ -285,18 +189,6 @@ const COLOR_PALETTE: [number, number, number][] = [
     [128, 191, 102], [217, 102, 140], [115, 179, 230], [191, 140, 89],
     [140, 115, 217], [89, 209, 166], [235, 153, 89], [153, 209, 179]
 ];
-
-function unpackColor(color: number, fallbackIndex: number): [number, number, number] {
-    if (color === 0) {
-        return COLOR_PALETTE[fallbackIndex % COLOR_PALETTE.length];
-    }
-
-    return [
-        (color >> 16) & 0xff,
-        (color >> 8) & 0xff,
-        color & 0xff
-    ];
-}
 
 function buildTrackPath(
     track: TrackRecord,
@@ -438,16 +330,17 @@ function mapTimestamp(
     referenceClock: number,
     clocks: Map<number, ClockRecord>,
     snapshots: Map<number, ClockSnapshotRecord[]>,
-    visitedClocks: Set<number> = new Set<number>()
+    visitedClocks?: Set<number>
 ): bigint {
     if (clockId === referenceClock) {
         return timestamp;
     }
 
-    if (visitedClocks.has(clockId)) {
+    const visited = visitedClocks ?? new Set<number>();
+    if (visited.has(clockId)) {
         throw new Error(`Clock correlation cycle at clock ${clockId}`);
     }
-    visitedClocks.add(clockId);
+    visited.add(clockId);
 
     const clockSnapshots = snapshots.get(clockId);
     if (!clockSnapshots || clockSnapshots.length === 0) {
@@ -482,7 +375,7 @@ function mapTimestamp(
 
     return mapTimestamp(
         first.referenceClock, parentTimestamp, referenceClock,
-        clocks, snapshots, visitedClocks);
+        clocks, snapshots, visited);
 }
 
 export async function parseTraceFile(
@@ -492,7 +385,7 @@ export async function parseTraceFile(
     if (onProgress) onProgress('Parsing unified trace...');
     const fileBuffer = await file.arrayBuffer();
     const headerView = new DataView(fileBuffer);
-    const magic = new TextDecoder().decode(new Uint8Array(fileBuffer, 0, 7));
+    const magic = textDecoder.decode(new Uint8Array(fileBuffer, 0, 7));
     if (magic !== MAGIC) {
         throw new Error(`Unsupported trace magic: ${magic}`);
     }
@@ -546,6 +439,7 @@ export async function parseTraceFile(
     const eventRecords: EventRecord[] = [];
     const argumentRecords: ArgumentRecord[] = [];
     const eventFormatRecords: EventFormatRecord[] = [];
+    const trackIndicesById = new Map<bigint, number>();
     while (offset + CHUNK_HEADER_SIZE <= buffer.byteLength) {
         const chunkHeader = new Reader(view, offset);
         const chunkType = chunkHeader.u32();
@@ -593,35 +487,42 @@ export async function parseTraceFile(
                 const sortOrder = reader.i32();
                 reader.u32();
                 const sourceId = reader.u64();
+                const index = trackRecords.length;
                 trackRecords.push({
-                    id, parentId, clockId, nameId, kind, sortOrder, sourceId
+                    index, id, parentId, clockId, nameId, kind, sortOrder,
+                    sourceId
                 });
+                trackIndicesById.set(id, index);
             }
         } else if (chunkType === ChunkType.Events) {
             const eventCount = Number(reader.varUint());
-            const previousTimestamps = new Map<bigint, bigint>();
+            const previousTimestamps = new Array<bigint>(
+                trackRecords.length).fill(0n);
 
             for (let eventIndex = 0; eventIndex < eventCount; eventIndex++) {
                 const trackId = reader.varUint();
+                const trackIndex = trackIndicesById.get(trackId);
+                if (trackIndex === undefined) {
+                    throw new Error(`Event references unknown track ${trackId}`);
+                }
                 const encodedTimestampDelta = reader.varUint();
                 const timestampDelta = (encodedTimestampDelta >> 1n)
                     ^ -(encodedTimestampDelta & 1n);
-                const timestamp = (previousTimestamps.get(trackId) ?? 0n)
+                const timestamp = previousTimestamps[trackIndex]
                     + timestampDelta;
 
                 if (timestamp < 0n) {
                     throw new Error('Event timestamp underflow');
                 }
 
-                previousTimestamps.set(trackId, timestamp);
+                previousTimestamps[trackIndex] = timestamp;
                 const duration = reader.varUint();
                 const nameId = Number(reader.varUint());
                 const flags = reader.u8();
                 const kind = flags & 0x03;
                 const parentId = (flags & 0x04) !== 0
-                    ? reader.varUint() : 0n;
-                const correlationId = (flags & 0x08) !== 0
-                    ? reader.varUint() : 0n;
+                    ? Number(reader.varUint()) : 0;
+                if ((flags & 0x08) !== 0) reader.varUint();
                 const firstArgument = (flags & 0x10) !== 0
                     ? Number(reader.varUint()) : 0;
                 const argumentCount = (flags & 0x10) !== 0
@@ -630,9 +531,9 @@ export async function parseTraceFile(
                     ? Number(reader.varUint()) : 0;
 
                 eventRecords.push({
-                    id: BigInt(eventRecords.length + 1), parentId, trackId,
-                    timestamp, duration, correlationId, nameId, firstArgument,
-                    argumentCount, color, kind
+                    id: eventRecords.length + 1, parentId, trackIndex,
+                    timestamp, duration, nameId, firstArgument, argumentCount,
+                    color, kind
                 });
             }
 
@@ -684,25 +585,31 @@ export async function parseTraceFile(
 
     const tracksById = new Map<bigint, TrackRecord>();
     for (const track of trackRecords) tracksById.set(track.id, track);
-    const eventsByTrack = new Map<bigint, EventRecord[]>();
+    const eventsByTrack = new Array<EventRecord[]>(trackRecords.length);
+    for (let trackIndex = 0;
+        trackIndex < eventsByTrack.length; trackIndex++) {
+        eventsByTrack[trackIndex] = [];
+    }
     let origin: bigint | undefined;
     for (const event of eventRecords) {
-        const track = tracksById.get(event.trackId);
-        if (!track) continue;
-        const mapped = mapTimestamp(
+        const track = trackRecords[event.trackIndex];
+        const mappedStart = mapTimestamp(
             track.clockId, event.timestamp, referenceClock, clocks, snapshotsByClock);
-        if (origin === undefined || mapped < origin) origin = mapped;
+        const mappedEnd = mapTimestamp(
+            track.clockId, event.timestamp + event.duration,
+            referenceClock, clocks, snapshotsByClock);
+        event.timestamp = mappedStart;
+        event.duration = mappedEnd - mappedStart;
+        if (origin === undefined || mappedStart < origin) origin = mappedStart;
         if (event.kind !== EVENT_KIND_BOOKMARK) {
-            const records = eventsByTrack.get(event.trackId) ?? [];
-            records.push(event);
-            eventsByTrack.set(event.trackId, records);
+            eventsByTrack[event.trackIndex].push(event);
         }
     }
     const traceOrigin = origin ?? 0n;
 
     const naturalOrder = new Intl.Collator(undefined, { numeric: true });
     const visibleTracks = trackRecords
-        .filter(track => (eventsByTrack.get(track.id)?.length ?? 0) > 0)
+        .filter(track => eventsByTrack[track.index].length > 0)
         .sort((a, b) => {
             const gpuOrder = Number(isGpuTrack(b, tracksById))
                 - Number(isGpuTrack(a, tracksById));
@@ -723,10 +630,12 @@ export async function parseTraceFile(
     const trackHierarchies = visibleTracks.map(track => buildTrackHierarchy(
         track, tracksById, strings));
 
-    const eventNameIds = new Map<number, number>();
-    const eventFormatsByLabel = new Map<number, EventFormatRecord>();
+    const eventNameIds = new Int32Array(strings.length);
+    eventNameIds.fill(-1);
+    const eventFormatsByLabel = new Array<EventFormatRecord | undefined>(
+        strings.length);
     for (const format of eventFormatRecords) {
-        eventFormatsByLabel.set(format.labelId, format);
+        eventFormatsByLabel[format.labelId] = format;
     }
     const formatDescriptors: FormatDescriptor[] = [];
     const trackFormatIds: number[] = [];
@@ -739,10 +648,10 @@ export async function parseTraceFile(
         });
     }
     for (const event of eventRecords) {
-        if (!eventNameIds.has(event.nameId)) {
+        if (eventNameIds[event.nameId] < 0) {
             const name = strings[event.nameId] ?? `Event ${event.nameId}`;
-            const metadata = eventFormatsByLabel.get(event.nameId);
-            eventNameIds.set(event.nameId, formatDescriptors.length);
+            const metadata = eventFormatsByLabel[event.nameId];
+            eventNameIds[event.nameId] = formatDescriptors.length;
             formatDescriptors.push({
                 labelString: name,
                 tooltipString: metadata
@@ -756,13 +665,8 @@ export async function parseTraceFile(
     for (const event of eventRecords) {
         if (event.kind !== EVENT_KIND_BOOKMARK) continue;
 
-        const track = tracksById.get(event.trackId);
-        if (!track) continue;
-        const mappedTimestamp = mapTimestamp(
-            track.clockId, event.timestamp,
-            referenceClock, clocks, snapshotsByClock);
         bookmarks.push({
-            timestampNs: Number(mappedTimestamp - traceOrigin),
+            timestampNs: Number(event.timestamp - traceOrigin),
             label: strings[event.nameId] ?? `Bookmark ${event.nameId}`
         });
     }
@@ -770,7 +674,9 @@ export async function parseTraceFile(
         first.timestampNs - second.timestampNs);
 
     let zoneCount = 0;
-    for (const track of visibleTracks) zoneCount += eventsByTrack.get(track.id)!.length;
+    for (const track of visibleTracks) {
+        zoneCount += eventsByTrack[track.index].length;
+    }
     const tracks = new TracksSoA();
     tracks.count = visibleTracks.length;
     tracks.formatDescIds = new Uint16Array(tracks.count);
@@ -802,17 +708,17 @@ export async function parseTraceFile(
     let zoneParameterCount = 0;
     for (const event of eventRecords) {
         if (event.kind === EVENT_KIND_BOOKMARK) continue;
-        const descriptorId = eventNameIds.get(event.nameId);
-        zoneParameterCount += descriptorId === undefined ? 0
+        const descriptorId = eventNameIds[event.nameId];
+        zoneParameterCount += descriptorId < 0 ? 0
             : Math.min(formatDescriptors[descriptorId].placeholderCount,
                 event.argumentCount);
     }
     zones.paramsPool = new Uint32Array(zoneParameterCount);
 
-    const parentEventIds = new Set<bigint>();
+    const parentEvents = new Uint8Array(eventRecords.length + 1);
     for (const event of eventRecords) {
         if (event.kind === EVENT_KIND_BOOKMARK) continue;
-        if (event.parentId !== 0n) parentEventIds.add(event.parentId);
+        if (event.parentId !== 0) parentEvents[event.parentId] = 1;
     }
 
     const blocks = new BlocksSoA();
@@ -837,7 +743,7 @@ export async function parseTraceFile(
     let zoneIndex = 0;
     let zoneParameterIndex = 0;
     visibleTracks.forEach((track, trackIndex) => {
-        const trackEvents = eventsByTrack.get(track.id)!;
+        const trackEvents = eventsByTrack[track.index];
         trackEvents.sort((a, b) => a.timestamp < b.timestamp ? -1 : 1);
         tracks.formatDescIds[trackIndex] = trackFormatIds[trackIndex];
         tracks.blockIndices[trackIndex] = trackIndex;
@@ -852,27 +758,22 @@ export async function parseTraceFile(
         const sublaneEnds: number[] = [];
 
         for (const event of trackEvents) {
-            const mappedStart = mapTimestamp(
-                track.clockId, event.timestamp,
-                referenceClock, clocks, snapshotsByClock);
-            const mappedEnd = mapTimestamp(
-                track.clockId, event.timestamp + event.duration,
-                referenceClock, clocks, snapshotsByClock);
-            const start = Number(mappedStart - traceOrigin);
+            const start = Number(event.timestamp - traceOrigin);
             const duration = Math.max(
-                Number(mappedEnd - mappedStart), MIN_EVENT_DURATION_NS);
+                Number(event.duration), MIN_EVENT_DURATION_NS);
             zones.startsX[zoneIndex] = start;
             zones.endsX[zoneIndex] = start + duration;
-            zones.eventIds[zoneIndex] = event.id;
-            zones.parentEventIds[zoneIndex] = event.parentId;
-            zones.hasChildren[zoneIndex] = parentEventIds.has(event.id) ? 1 : 0;
-            zones.disclosureKeys[zoneIndex] = parentEventIds.has(event.id)
+            zones.eventIds[zoneIndex] = BigInt(event.id);
+            zones.parentEventIds[zoneIndex] = BigInt(event.parentId);
+            zones.hasChildren[zoneIndex] = parentEvents[event.id];
+            zones.disclosureKeys[zoneIndex] = parentEvents[event.id] !== 0
                 ? `event:${event.id}` : '';
-            const details: string[] = [];
-            const descriptorId = eventNameIds.get(event.nameId)!;
+            const descriptorId = eventNameIds[event.nameId];
             const placeholderCount =
                 formatDescriptors[descriptorId].placeholderCount;
             zones.paramsOffsets[zoneIndex] = zoneParameterIndex;
+            const details = event.argumentCount === 0
+                ? null : new Array<string>();
             for (let argumentIndex = 0;
                 argumentIndex < event.argumentCount; argumentIndex++) {
                 const argument = argumentRecords[
@@ -903,24 +804,32 @@ export async function parseTraceFile(
                 } else {
                     argumentValue = argument.value.toString();
                 }
-                details.push(`${argumentName}: ${argumentValue}`);
+                details!.push(`${argumentName}: ${argumentValue}`);
                 if (argumentIndex < placeholderCount && argument.kind !== 3) {
                     zones.paramsPool[zoneParameterIndex++] = Number(
                         BigInt.asUintN(32, argument.value));
                     zones.paramsCounts[zoneIndex]++;
                 }
             }
-            zones.details[zoneIndex] = details.join('\n');
+            zones.details[zoneIndex] = details?.join('\n') ?? '';
             zones.formatDescIds[zoneIndex] = descriptorId;
             zones.trackIndices[zoneIndex] = trackIndex;
             zones.smIndices[zoneIndex] = trackIndex;
             zones.blockIndices[zoneIndex] = trackIndex;
             zones.sublaneIndices[zoneIndex] = assignIntervalSublane(
                 sublaneEnds, start, start + duration);
-            const color = unpackColor(event.color, event.nameId);
-            zones.colors[zoneIndex * 3] = color[0];
-            zones.colors[zoneIndex * 3 + 1] = color[1];
-            zones.colors[zoneIndex * 3 + 2] = color[2];
+            const colorOffset = zoneIndex * 3;
+            if (event.color === 0) {
+                const color = COLOR_PALETTE[
+                    event.nameId % COLOR_PALETTE.length];
+                zones.colors[colorOffset] = color[0];
+                zones.colors[colorOffset + 1] = color[1];
+                zones.colors[colorOffset + 2] = color[2];
+            } else {
+                zones.colors[colorOffset] = (event.color >> 16) & 0xff;
+                zones.colors[colorOffset + 1] = (event.color >> 8) & 0xff;
+                zones.colors[colorOffset + 2] = event.color & 0xff;
+            }
             blocks.startsX[trackIndex] = Math.min(blocks.startsX[trackIndex], start);
             blocks.endsX[trackIndex] = Math.max(
                 blocks.endsX[trackIndex], start + duration);
@@ -963,7 +872,6 @@ export async function parseTraceFile(
 
 export function projectTraceData(
     source: ParsedTraceData,
-    expandedEventIds: ReadonlySet<bigint>,
     expandedTrackIds: ReadonlySet<bigint> = new Set<bigint>()
 ): ParsedTraceData {
     interface ProjectedRow {
@@ -984,59 +892,31 @@ export function projectTraceData(
 
     const rows: ProjectedRow[] = [];
     const groupedRows = new Map<string, ProjectedRow>();
-    const projectionIndex = getProjectionIndex(source);
-    const streamCountsByGpu = projectionIndex.streamCountsByGpu;
     const visibleZonesByTrack = new Array<number[] | undefined>(
         source.tracks.count);
+    const streamCountsByGpu = new Map<bigint, Set<bigint>>();
     for (let trackIndex = 0;
         trackIndex < source.tracks.count; trackIndex++) {
-        const rootZones = projectionIndex.rootZonesByTrack[trackIndex];
-        if (rootZones.length > 0) {
-            visibleZonesByTrack[trackIndex] = Array.from(rootZones);
+        const hierarchy = source.trackHierarchies[trackIndex];
+        const gpuNode = hierarchy.find(node => node.kind === 2);
+        const streamNode = hierarchy.find(node => node.kind === 3);
+        if (gpuNode && streamNode) {
+            const streams = streamCountsByGpu.get(gpuNode.id)
+                ?? new Set<bigint>();
+            streams.add(streamNode.id);
+            streamCountsByGpu.set(gpuNode.id, streams);
         }
-    }
 
-    const visibility = new Map<number, boolean>();
-    const isZoneVisible = (zoneIndex: number): boolean => {
-        const cached = visibility.get(zoneIndex);
-        if (cached !== undefined) return cached;
-
-        const parentZoneIndex = projectionIndex.parentZoneIndices[zoneIndex];
-        const visible = parentZoneIndex < 0
-            ? source.zones.parentEventIds[zoneIndex] === 0n
-            : expandedEventIds.has(source.zones.eventIds[parentZoneIndex])
-                && isZoneVisible(parentZoneIndex);
-        visibility.set(zoneIndex, visible);
-        return visible;
-    };
-
-    const changedTrackIndices = new Set<number>();
-    for (const expandedEventId of expandedEventIds) {
-        const parentZoneIndex =
-            projectionIndex.expandableEventZoneIndices.get(expandedEventId);
-        if (parentZoneIndex === undefined
-            || !isZoneVisible(parentZoneIndex)) continue;
-
-        const childStart = projectionIndex.childOffsets[parentZoneIndex];
-        const childEnd = projectionIndex.childOffsets[parentZoneIndex + 1];
-        for (let childOffset = childStart;
-            childOffset < childEnd; childOffset++) {
-            const childZoneIndex =
-                projectionIndex.childZoneIndices[childOffset];
-            const trackIndex = source.zones.trackIndices[childZoneIndex];
-            let visibleZones = visibleZonesByTrack[trackIndex];
-            if (!visibleZones) {
-                visibleZones = [];
-                visibleZonesByTrack[trackIndex] = visibleZones;
-            }
-            visibleZones.push(childZoneIndex);
-            changedTrackIndices.add(trackIndex);
+        const blockIndex = source.tracks.blockIndices[trackIndex];
+        const zoneStart = source.blocks.zonesStartIndices[blockIndex];
+        const zoneEnd = source.blocks.zonesEndIndices[blockIndex];
+        if (zoneEnd === zoneStart) continue;
+        const visibleZones = new Array<number>(zoneEnd - zoneStart);
+        for (let zoneIndex = zoneStart;
+            zoneIndex < zoneEnd; zoneIndex++) {
+            visibleZones[zoneIndex - zoneStart] = zoneIndex;
         }
-    }
-
-    for (const trackIndex of changedTrackIndices) {
-        visibleZonesByTrack[trackIndex]?.sort(
-            (first, second) => first - second);
+        visibleZonesByTrack[trackIndex] = visibleZones;
     }
 
     const AddRow = (
@@ -1194,7 +1074,7 @@ export function projectTraceData(
     interface ProjectedBlockLayout {
         rowIndex: number;
         zoneIndices: number[];
-        sublaneIndices: number[];
+        sublaneIndices: Uint8Array;
         sourceTrackIndices: number[];
         formatDescId: number;
         sourceId: number;
@@ -1206,6 +1086,7 @@ export function projectTraceData(
     }
 
     const projectedBlocks: ProjectedBlockLayout[] = [];
+    const projectedSublanes = new Uint8Array(source.zones.count);
     const formatDescriptors = [...source.formatDescriptors];
     const physicalBlockFormatIds = new Map<string, number>();
 
@@ -1233,7 +1114,6 @@ export function projectTraceData(
             }
 
             const sublaneEnds: number[] = [];
-            const sublaneBySourceZone = new Map<number, number>();
             for (const sourceZoneIndex of row.sourceZoneIndices) {
                 const sublane = assignIntervalSublane(
                     sublaneEnds,
@@ -1242,22 +1122,28 @@ export function projectTraceData(
                 if (sublane > 255) {
                     throw new Error('Track nesting exceeds 256 sublanes');
                 }
-                sublaneBySourceZone.set(sourceZoneIndex, sublane);
+                projectedSublanes[sourceZoneIndex] = sublane;
             }
 
             if (sublaneEnds.length > 1) {
                 row.sourceZoneIndices.sort((first, second) =>
-                    (sublaneBySourceZone.get(first) ?? 0)
-                        - (sublaneBySourceZone.get(second) ?? 0)
+                    projectedSublanes[first] - projectedSublanes[second]
                     || source.zones.startsX[first]
                         - source.zones.startsX[second]);
+            }
+
+            const sublaneIndices = new Uint8Array(
+                row.sourceZoneIndices.length);
+            for (let zoneIndex = 0;
+                zoneIndex < row.sourceZoneIndices.length; zoneIndex++) {
+                sublaneIndices[zoneIndex] = projectedSublanes[
+                    row.sourceZoneIndices[zoneIndex]];
             }
 
             projectedBlocks.push({
                 rowIndex,
                 zoneIndices: row.sourceZoneIndices,
-                sublaneIndices: row.sourceZoneIndices.map(
-                    zoneIndex => sublaneBySourceZone.get(zoneIndex) ?? 0),
+                sublaneIndices,
                 sourceTrackIndices: new Array<number>(sublaneEnds.length)
                     .fill(row.sourceTrackIndex),
                 formatDescId:
@@ -1302,7 +1188,6 @@ export function projectTraceData(
 
         for (const block of physicalBlocks) {
             const zoneIndices: number[] = [];
-            const sublaneBySourceZone = new Map<number, number>();
             const sourceTrackIndices: number[] = [];
             const trackGroups = Array.from(block.zonesByTrack.entries());
             trackGroups.sort((first, second) => {
@@ -1327,7 +1212,7 @@ export function projectTraceData(
                     if (sublane > 255) {
                         throw new Error('Block exceeds 256 sublanes');
                     }
-                    sublaneBySourceZone.set(sourceZoneIndex, sublane);
+                    projectedSublanes[sourceZoneIndex] = sublane;
                     zoneIndices.push(sourceZoneIndex);
                 }
 
@@ -1338,14 +1223,18 @@ export function projectTraceData(
             }
 
             zoneIndices.sort((first, second) =>
-                (sublaneBySourceZone.get(first) ?? 0)
-                    - (sublaneBySourceZone.get(second) ?? 0)
+                projectedSublanes[first] - projectedSublanes[second]
                 || source.zones.startsX[first] - source.zones.startsX[second]);
+            const sublaneIndices = new Uint8Array(zoneIndices.length);
+            for (let zoneIndex = 0;
+                zoneIndex < zoneIndices.length; zoneIndex++) {
+                sublaneIndices[zoneIndex] = projectedSublanes[
+                    zoneIndices[zoneIndex]];
+            }
             projectedBlocks.push({
                 rowIndex,
                 zoneIndices,
-                sublaneIndices: zoneIndices.map(
-                    zoneIndex => sublaneBySourceZone.get(zoneIndex) ?? 0),
+                sublaneIndices,
                 sourceTrackIndices,
                 formatDescId: physicalBlockFormatId(block.node.name),
                 sourceId: Number(block.node.sourceId)
@@ -1461,8 +1350,7 @@ export function projectTraceData(
                     source.zones.hasChildren[sourceZoneIndex];
                 zones.disclosureKeys[targetZoneIndex] =
                     source.zones.disclosureKeys[sourceZoneIndex];
-                zones.expanded[targetZoneIndex] = expandedEventIds.has(
-                    source.zones.eventIds[sourceZoneIndex]) ? 1 : 0;
+                zones.expanded[targetZoneIndex] = 0;
             }
             zones.details[targetZoneIndex] =
                 source.zones.details[sourceZoneIndex];

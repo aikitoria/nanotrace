@@ -264,19 +264,18 @@ export class LabelRenderer {
         this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
         this.labelCtx.textAlign = 'left';
         this.labelCtx.textBaseline = 'middle';
-        const glyphWidth = this.labelCtx.measureText('0').width;
         const fontScale = fontSize / LABEL_FONT_SIZE;
 
         this.renderBlockLabels(
             rowOffsets, rowVisible, zoneVisibility,
             nanosecondsToPixels, xOffset, yScale, yOffset,
             visibleStartNs, visibleEndNs, height,
-            fontScale, glyphWidth);
+            fontScale);
         this.renderZoneLabels(
             rowOffsets, rowVisible, zoneVisibility,
             nanosecondsToPixels, xOffset, yScale, yOffset,
             visibleStartNs, visibleEndNs, height,
-            zoneScreenHeight, fontSize, fontScale, glyphWidth);
+            zoneScreenHeight, fontSize, fontScale);
 
         this.labelCtx.restore();
     }
@@ -292,8 +291,7 @@ export class LabelRenderer {
         visibleStartNs: number,
         visibleEndNs: number,
         height: number,
-        fontScale: number,
-        glyphWidth: number
+        fontScale: number
     ): void {
         const blocks = this.hierarchy.blocks;
         const minDurationNs = MIN_BLOCK_LABEL_WIDTH
@@ -337,8 +335,7 @@ export class LabelRenderer {
                 const label = this.fitLabel(
                     `${name} (${this.durationFormatter.format(duration)} ns)`,
                     visibleWidth - horizontalPadding
-                        - LABEL_CLIP_MARGIN * fontScale,
-                    glyphWidth);
+                        - LABEL_CLIP_MARGIN * fontScale);
                 if (label !== null) {
                     this.labelCtx.fillText(
                         label,
@@ -361,8 +358,7 @@ export class LabelRenderer {
         height: number,
         zoneScreenHeight: number,
         fontSize: number,
-        fontScale: number,
-        glyphWidth: number
+        fontScale: number
     ): void {
         const zones = this.hierarchy.zones;
         const minRenderableWidth = Math.min(
@@ -417,8 +413,7 @@ export class LabelRenderer {
                     `${disclosure}${name} (`
                         + `${this.durationFormatter.format(duration)} ns)`,
                     visibleWidth - horizontalPadding
-                        - LABEL_CLIP_MARGIN * fontScale,
-                    glyphWidth);
+                        - LABEL_CLIP_MARGIN * fontScale);
                 if (label !== null) {
                     this.labelCtx.fillText(
                         label, visibleLeft + horizontalPadding,
@@ -454,15 +449,24 @@ export class LabelRenderer {
         return result;
     }
 
-    /** Monospace labels can be clipped directly without measurement searches. */
-    private fitLabel(
-        text: string,
-        maxWidth: number,
-        glyphWidth: number
-    ): string | null {
-        const maxCharacters = Math.floor(maxWidth / glyphWidth);
-        if (maxCharacters >= text.length) return text;
-        if (maxCharacters <= ELLIPSIS.length) return null;
-        return `${text.slice(0, maxCharacters - ELLIPSIS.length)}${ELLIPSIS}`;
+    /** Returns the longest exact prefix that fits without scaling the text. */
+    private fitLabel(text: string, maxWidth: number): string | null {
+        if (maxWidth <= 0) return null;
+        if (this.labelCtx.measureText(text).width <= maxWidth) return text;
+        if (this.labelCtx.measureText(ELLIPSIS).width > maxWidth) return null;
+
+        let low = 0;
+        let high = text.length;
+        while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            const candidate = `${text.slice(0, middle)}${ELLIPSIS}`;
+            if (this.labelCtx.measureText(candidate).width <= maxWidth) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        return `${text.slice(0, low)}${ELLIPSIS}`;
     }
 }

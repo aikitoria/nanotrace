@@ -158,9 +158,9 @@ async function validateNanotrace(filename: string): Promise<void> {
     const expandableEventIds = validateEventParents(fullTrace);
     const gpuIds = gpuTrackIds(fullTrace);
     const collapsed = projectTraceData(
-        fullTrace, expandableEventIds, new Set<bigint>());
+        fullTrace, new Set<bigint>());
     const expanded = projectTraceData(
-        fullTrace, expandableEventIds, gpuIds);
+        fullTrace, gpuIds);
 
     validateTrackOrder(collapsed);
     validateProjection(collapsed);

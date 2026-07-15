@@ -3,7 +3,7 @@
 Nanotrace is a CUDA and CPU timeline tracer for studying kernels below the
 resolution and overhead limits of conventional software tracing.
 
-![Nsight Systems view](docs/img0.png)
+![TMA intra-kernel tracing in the Nanotrace viewer](docs/img0.png)
 
 ## Components
 
@@ -14,6 +14,8 @@ resolution and overhead limits of conventional software tracing.
 - `docs/nanotrace.md`: the nanotrace v4 binary format specification.
 
 ## Unified timeline
+
+![Unified CPU, GPU, and intra-kernel tracing](docs/img1.png)
 
 Nanotrace v4 uses `CLOCK_MONOTONIC_RAW` as its session reference clock. CUPTI
 HES timestamps are correlated to that clock with bracketing snapshots. Explicit

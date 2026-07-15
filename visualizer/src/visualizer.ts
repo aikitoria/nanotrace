@@ -633,8 +633,7 @@ export class ZoneVisualizer {
             }
         }
         const parsedData = projectTraceData(
-            this.fullTraceData, this.materializedEventIds,
-            this.expandedTrackIds);
+            this.fullTraceData, this.expandedTrackIds);
         await this.applyTraceProjection(parsedData);
 
         performance.mark('loadTraceFile:end');
@@ -1112,8 +1111,7 @@ export class ZoneVisualizer {
         } : null;
 
         const projection = projectTraceData(
-            this.fullTraceData, this.materializedEventIds,
-            this.expandedTrackIds);
+            this.fullTraceData, this.expandedTrackIds);
         await this.applyTraceProjection(projection);
         await this.initVisualization();
 
