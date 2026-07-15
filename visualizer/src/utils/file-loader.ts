@@ -1198,13 +1198,10 @@ export function projectTraceData(
         sourceTrackIndices: number[];
         formatDescId: number;
         sourceId: number;
-        startNs?: number;
-        endNs?: number;
     }
 
     interface PhysicalBlockGroup {
         node: TraceTrackNode;
-        parentEventId: bigint;
         zonesByTrack: Map<number, number[]>;
     }
 
@@ -1285,7 +1282,6 @@ export function projectTraceData(
             if (!block) {
                 block = {
                     node: blockNode,
-                    parentEventId,
                     zonesByTrack: new Map()
                 };
                 blocksById.set(blockKey, block);
@@ -1352,13 +1348,7 @@ export function projectTraceData(
                     zoneIndex => sublaneBySourceZone.get(zoneIndex) ?? 0),
                 sourceTrackIndices,
                 formatDescId: physicalBlockFormatId(block.node.name),
-                sourceId: Number(block.node.sourceId),
-                startNs: source.zones.startsX[
-                    projectionIndex.expandableEventZoneIndices.get(
-                        block.parentEventId) ?? zoneIndices[0]],
-                endNs: source.zones.endsX[
-                    projectionIndex.expandableEventZoneIndices.get(
-                        block.parentEventId) ?? zoneIndices[zoneIndices.length - 1]]
+                sourceId: Number(block.node.sourceId)
             });
         }
     }
@@ -1507,12 +1497,6 @@ export function projectTraceData(
             blocks.sublanesMaxWidths[blockIndex] = Math.max(
                 blocks.sublanesMaxWidths[blockIndex], duration);
             targetZoneIndex++;
-        }
-
-        if (projectedBlock.startNs !== undefined
-            && projectedBlock.endNs !== undefined) {
-            blocks.startsX[blockIndex] = projectedBlock.startNs;
-            blocks.endsX[blockIndex] = projectedBlock.endNs;
         }
 
         const sublaneCount = projectedBlock.sourceTrackIndices.length;

@@ -5,12 +5,6 @@
  */
 
 import { initApp } from './visualizer.js';
-import avatarUrl from './assets/avatar.png?format=webp&quality=85';
-
-const avatarImg = document.querySelector('.avatar') as HTMLImageElement;
-if (avatarImg) {
-    avatarImg.src = avatarUrl;
-}
 
 // Initialize the visualizer with WebGPU setup
 // Any initialization errors are displayed in the loading element

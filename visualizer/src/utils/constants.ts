@@ -136,8 +136,11 @@ export const SUBLANE_HEIGHT = 0.014;
 /** Vertical spacing between SM lanes. */
 export const LANE_PADDING = 0.0015;
 
-/** Vertical spacing between sublanes within a block. */
-export const SUBLANE_PADDING = 0.002;
+/** Extra vertical spacing between GPU and CPU track groups. */
+export const TRACK_GROUP_PADDING = 0.02;
+
+/** Sublanes stack directly without vertical spacing. */
+export const SUBLANE_PADDING = 0;
 
 /** Padding at top and bottom edges of each SM lane. */
 export const LANE_EDGE_PADDING = 0.0015;
@@ -165,8 +168,7 @@ export const LABEL_COLOR = '#dedede';
 // =============================================================================
 
 /**
- * Zoom factor multiplier for scroll wheel zoom operations.
- * Each scroll step multiplies/divides zoom by this factor.
+ * Zoom factor applied per 100 pixels of normalized wheel movement.
  */
 export const ZOOM_FACTOR = 1.1;
 
@@ -487,8 +489,6 @@ export const BROWSER_YIELD_DELAY = 0;
  * Maximum kernel name length for stats display.
  * Longer names are truncated with ellipsis.
  */
-export const MAX_KERNEL_NAME_LENGTH = 30;
-
 /**
  * Number of spaces for FPS padding in stats display.
  * Ensures consistent alignment in monospace stats text.

@@ -8,7 +8,8 @@
 </head>
 <body>
     <canvas id="canvas"></canvas>
-    <div id="track-frame"></div>
+    <div id="gpu-track-frame" class="track-frame"></div>
+    <div id="cpu-track-frame" class="track-frame"></div>
     <div id="kernel-frames"></div>
     <canvas id="labelCanvas" class="overlay-full"></canvas>
     <div id="tooltip" class="mono"></div>
@@ -28,7 +29,6 @@
 
     <div id="file-selector" class="overlay-full">
         <div class="file-selector-content" id="file-selector-content">
-            <img src="" alt="aikitoria" class="avatar">
             <h2><a href="https://github.com/aikitoria/nanotrace" target="_blank">Nanotrace</a> Viewer</h2>
             <div class="subtitle">by <a href="https://github.com/aikitoria" target="_blank">aikitoria</a></div>
             <div class="file-select-area">

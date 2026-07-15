@@ -37,29 +37,33 @@ import {
     INITIAL_BASE_ZOOM,
     MIN_SELECTION_DISTANCE,
     MIN_ZONE_LABEL_HEIGHT,
-    MIN_ZONE_LABEL_WIDTH,
     LABEL_FONT_SIZE,
     MIN_LABEL_FONT_SIZE,
     MIN_LABEL_ZOOM_Y,
     SUBLANE_HEIGHT,
     LOADING_OVERLAY_DELAY,
-    MAX_KERNEL_NAME_LENGTH,
     FPS_PADDING_WIDTH,
     MS_TO_NS,
     LANE_PADDING,
-    BLOCK_LANE_PADDING
+    BLOCK_LANE_PADDING,
+    TRACK_GROUP_PADDING
 } from './utils/constants.js';
 
 // Git commit hash injected at build time by Vite
 declare const __GIT_HASH__: string;
 
 const VERSION = `0.1-${__GIT_HASH__}`;
+const WHEEL_GESTURE_TIMEOUT_MS = 120;
+const HORIZONTAL_WHEEL_DOMINANCE = 1.5;
+const WHEEL_ZOOM_REFERENCE_PIXELS = 100;
+
+type WheelGestureMode = 'panX' | 'zoomX' | 'zoomY' | 'zoomBoth';
 
 interface ExpandedKernelGroup {
     startNs: number;
     endNs: number;
-    topTrackIndex: number;
-    bottomTrackIndex: number;
+    parentZoneIndex: number;
+    blockIndices: number[];
 }
 
 /**
@@ -79,7 +83,8 @@ export class ZoneVisualizer {
     private tooltip: HTMLElement;
     private loading: HTMLElement;
     private stats: HTMLElement;
-    private trackFrame: HTMLElement;
+    private gpuTrackFrame: HTMLElement;
+    private cpuTrackFrame: HTMLElement;
     private kernelFramesContainer: HTMLElement;
     private laneLabelsContainer: HTMLElement;
     private timelineContainer: HTMLElement;
@@ -116,6 +121,7 @@ export class ZoneVisualizer {
     private rowBaseYs = new Float32Array();
     private rowOffsets = new Float32Array();
     private rowVisible = new Uint8Array();
+    private rowIsGpu = new Uint8Array();
     private rowVisibleZoneCounts = new Uint32Array();
     private rowLayout = new Float32Array();
     private zoneVisibility = new Uint32Array();
@@ -135,12 +141,6 @@ export class ZoneVisualizer {
     // Trace metadata
     private TIME_RANGE: number = BASE_TIME_RANGE;
     private kernelName: string = '';
-    private gridDimX: number = 0;
-    private gridDimY: number = 0;
-    private gridDimZ: number = 0;
-    private clusterDimX: number = 0;
-    private clusterDimY: number = 0;
-    private clusterDimZ: number = 0;
     private worldHeight: number = 0;
 
     // Rendering subsystems (null until initVisualization)
@@ -155,6 +155,8 @@ export class ZoneVisualizer {
     private isRendering: boolean = false;
     private lastTime: number = 0;
     private numZones: number = 0;
+    private wheelGestureMode: WheelGestureMode = 'zoomX';
+    private lastWheelEventTime: number = Number.NEGATIVE_INFINITY;
 
     // Preallocated buffers to avoid per-frame allocations (GC pressure reduction)
     private uniformData = new ArrayBuffer(128);
@@ -180,7 +182,8 @@ export class ZoneVisualizer {
         this.tooltip = this.getElement('tooltip');
         this.loading = this.getElement('loading');
         this.stats = this.getElement('stats');
-        this.trackFrame = this.getElement('track-frame');
+        this.gpuTrackFrame = this.getElement('gpu-track-frame');
+        this.cpuTrackFrame = this.getElement('cpu-track-frame');
         this.kernelFramesContainer = this.getElement('kernel-frames');
         this.laneLabelsContainer = this.getElement('lane-labels');
         this.timelineContainer = this.getElement('timeline');
@@ -355,7 +358,8 @@ export class ZoneVisualizer {
 
         // Create rendering subsystems with loaded trace data
         this.camera = new Camera(this.worldHeight, this.TIME_RANGE);
-        this.labelRenderer = new LabelRenderer(this.labelCtx, this.canvas, this.camera);
+        this.labelRenderer = new LabelRenderer(
+            this.labelCtx, this.camera, this.hierarchy);
         this.timelineRenderer = new TimelineRenderer(this.timelineContainer, this.canvas, this.camera);
         this.interactionManager = new InteractionManager(
             this.camera,
@@ -639,17 +643,7 @@ export class ZoneVisualizer {
 
     /** Rebuilds the visible track projection without reparsing the trace file. */
     private async applyTraceProjection(parsedData: ParsedTraceData): Promise<void> {
-        // Truncate long kernel names for stats display
-        this.kernelName = parsedData.kernelName.length > MAX_KERNEL_NAME_LENGTH
-            ? parsedData.kernelName.substring(0, MAX_KERNEL_NAME_LENGTH) + '...'
-            : parsedData.kernelName;
-        this.gridDimX = parsedData.gridDimX;
-        this.gridDimY = parsedData.gridDimY;
-        this.gridDimZ = parsedData.gridDimZ;
-        this.clusterDimX = parsedData.clusterDimX;
-        this.clusterDimY = parsedData.clusterDimY;
-        this.clusterDimZ = parsedData.clusterDimZ;
-
+        this.kernelName = parsedData.kernelName;
         // Create labels for generic CPU, GPU stream, and intra-kernel tracks.
         this.laneLabelsContainer.innerHTML = '';
         this.laneLabels = [];
@@ -664,9 +658,12 @@ export class ZoneVisualizer {
             parsedData.trackNames.length);
         this.treeTrackIds = new Array<bigint>(
             parsedData.trackNames.length).fill(0n);
+        this.rowIsGpu = new Uint8Array(parsedData.trackNames.length);
         const rowByTrackId = new Map<bigint, number>();
         for (let i = 0; i < parsedData.trackHierarchies.length; i++) {
             const hierarchy = parsedData.trackHierarchies[i];
+            this.rowIsGpu[i] = hierarchy.some(node => node.kind === 2)
+                ? 1 : 0;
             const track = hierarchy[hierarchy.length - 1];
             if (track) {
                 this.treeTrackIds[i] = track.id;
@@ -947,6 +944,8 @@ export class ZoneVisualizer {
     private recalculateRowLayout(updateGpu: boolean): void {
         if (!this.hierarchy) return;
 
+        this.labelRenderer?.invalidate();
+
         const lanes = this.hierarchy.lanes;
         const visibleAbove = new Int32Array(lanes.count);
         let previousVisibleRow = -1;
@@ -973,6 +972,10 @@ export class ZoneVisualizer {
             if (!visible) continue;
             currentY += lanes.heights[rowIndex] + rowPadding;
             const aboveRow = visibleAbove[rowIndex];
+            if (aboveRow >= 0
+                && this.rowIsGpu[rowIndex] !== this.rowIsGpu[aboveRow]) {
+                currentY += TRACK_GROUP_PADDING;
+            }
             if (lanes.depths[rowIndex] === 0 && aboveRow >= 0
                 && lanes.depths[aboveRow] > 0) {
                 currentY += rowPadding * 2;
@@ -1029,23 +1032,18 @@ export class ZoneVisualizer {
             const children = this.childZoneIndices.get(eventId);
             if (parentZoneIndex === undefined || !children) continue;
 
-            let topTrackIndex = zones.smIndices[parentZoneIndex];
-            let bottomTrackIndex = topTrackIndex;
-            let hasVisibleChild = false;
+            const blockIndices = new Set<number>();
             for (const childZoneIndex of children) {
                 if (this.zoneVisibility[childZoneIndex] === 0) continue;
-                const rowIndex = zones.smIndices[childZoneIndex];
-                topTrackIndex = Math.min(topTrackIndex, rowIndex);
-                bottomTrackIndex = Math.max(bottomTrackIndex, rowIndex);
-                hasVisibleChild = true;
+                blockIndices.add(zones.blockIndices[childZoneIndex]);
             }
-            if (!hasVisibleChild) continue;
+            if (blockIndices.size === 0) continue;
 
             this.expandedKernelGroups.push({
                 startNs: zones.startsX[parentZoneIndex],
                 endNs: zones.endsX[parentZoneIndex],
-                topTrackIndex,
-                bottomTrackIndex
+                parentZoneIndex,
+                blockIndices: Array.from(blockIndices)
             });
         }
 
@@ -1345,59 +1343,70 @@ export class ZoneVisualizer {
             const ndcX = (mouseX / rect.width) * 2 - 1;
             const ndcY = -((mouseY / rect.height) * 2 - 1);
             const aspect = rect.width / rect.height;
+            const isCtrlPressed = e.ctrlKey || e.metaKey;
+            const isShiftPressed = e.shiftKey;
+            const deltaScale = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+                ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+                    ? rect.height : 1;
+            const deltaX = e.deltaX * deltaScale;
+            const deltaY = e.deltaY * deltaScale;
+            const modifierMode: WheelGestureMode | null = isCtrlPressed
+                ? 'zoomBoth' : isShiftPressed ? 'zoomY' : null;
+            const modifierModeChanged = modifierMode !== null
+                ? this.wheelGestureMode !== modifierMode
+                : this.wheelGestureMode === 'zoomY'
+                    || this.wheelGestureMode === 'zoomBoth';
+            const newGesture = e.timeStamp - this.lastWheelEventTime
+                > WHEEL_GESTURE_TIMEOUT_MS;
 
-            if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-                const panSpeed = PAN_SPEED;
-                this.camera.x -= e.deltaX * panSpeed / this.camera.zoomX * aspect;
+            if (newGesture || modifierModeChanged) {
+                if (modifierMode !== null) {
+                    this.wheelGestureMode = modifierMode;
+                } else if (Math.abs(deltaX)
+                    > Math.abs(deltaY) * HORIZONTAL_WHEEL_DOMINANCE) {
+                    this.wheelGestureMode = 'panX';
+                } else {
+                    this.wheelGestureMode = 'zoomX';
+                }
+            }
+            this.lastWheelEventTime = e.timeStamp;
+
+            if (this.wheelGestureMode === 'panX') {
+                this.camera.x -= deltaX * PAN_SPEED
+                    / this.camera.zoomX * aspect;
                 return;
             }
 
-            const zoomFactor = ZOOM_FACTOR;
-            const isCtrlPressed = e.ctrlKey || e.metaKey;
-            const isShiftPressed = e.shiftKey;
+            const oldZoomX = this.camera.zoomX;
+            const oldZoomY = this.camera.zoomY;
+            const boundedDeltaY = Math.max(-1000, Math.min(1000, deltaY));
+            const zoomFactor = Math.exp(
+                -boundedDeltaY * Math.log(ZOOM_FACTOR)
+                    / WHEEL_ZOOM_REFERENCE_PIXELS);
 
-            if (isCtrlPressed) {
-                const oldZoomX = this.camera.zoomX;
-                const oldZoomY = this.camera.zoomY;
-
-                if (e.deltaY < 0) {
-                    this.camera.zoom *= zoomFactor;
-                } else {
-                    this.camera.zoom /= zoomFactor;
-                }
-                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.min(MAX_ZOOM_Y, this.camera.zoom));
-
-                const newZoomX = this.camera.zoomX;
-                const newZoomY = this.camera.zoomY;
-                this.camera.x += ndcX * aspect * (1/newZoomX - 1/oldZoomX);
-                this.camera.y += ndcY * (1/newZoomY - 1/oldZoomY);
-            } else if (isShiftPressed) {
-                const oldZoomY = this.camera.zoomY;
-                const oldZoom = this.camera.zoom;
-
-                if (e.deltaY < 0) {
-                    this.camera.zoom *= zoomFactor;
-                } else {
-                    this.camera.zoom /= zoomFactor;
-                }
-                this.camera.zoom = Math.max(MIN_ZOOM_Y, Math.min(MAX_ZOOM_Y, this.camera.zoom));
-
-                this.camera.xZoomMultiplier *= (oldZoom / this.camera.zoom);
-
-                const newZoomY = this.camera.zoomY;
-                this.camera.y += ndcY * (1/newZoomY - 1/oldZoomY);
+            if (this.wheelGestureMode === 'zoomBoth') {
+                this.camera.zoom = Math.max(
+                    MIN_ZOOM_Y,
+                    Math.min(MAX_ZOOM_Y, this.camera.zoom * zoomFactor));
+            } else if (this.wheelGestureMode === 'zoomY') {
+                this.camera.zoom = Math.max(
+                    MIN_ZOOM_Y,
+                    Math.min(MAX_ZOOM_Y, this.camera.zoom * zoomFactor));
+                this.camera.xZoomMultiplier = oldZoomX / this.camera.zoom;
             } else {
-                const oldZoomX = this.camera.zoomX;
+                this.camera.xZoomMultiplier = Math.max(
+                    MIN_ZOOM_X,
+                    Math.min(MAX_ZOOM_X,
+                        this.camera.xZoomMultiplier * zoomFactor));
+            }
 
-                if (e.deltaY < 0) {
-                    this.camera.xZoomMultiplier *= zoomFactor;
-                } else {
-                    this.camera.xZoomMultiplier /= zoomFactor;
-                }
-                this.camera.xZoomMultiplier = Math.max(MIN_ZOOM_X, Math.min(MAX_ZOOM_X, this.camera.xZoomMultiplier));
-
-                const newZoomX = this.camera.zoomX;
-                this.camera.x += ndcX * aspect * (1/newZoomX - 1/oldZoomX);
+            if (this.wheelGestureMode !== 'zoomY') {
+                this.camera.x += ndcX * aspect
+                    * (1 / this.camera.zoomX - 1 / oldZoomX);
+            }
+            if (this.wheelGestureMode !== 'zoomX') {
+                this.camera.y += ndcY
+                    * (1 / this.camera.zoomY - 1 / oldZoomY);
             }
         }, { passive: false });
 
@@ -1573,10 +1582,7 @@ export class ZoneVisualizer {
      */
     renderZoneLabels(): void {
         if (!this.camera || !this.labelRenderer || !this.hierarchy) return;
-        this.labelRenderer.renderZoneLabels(
-            this.hierarchy,
-            this.formatString.bind(this),
-            this.formatBlockString.bind(this),
+        this.labelRenderer.render(
             this.rowOffsets,
             this.rowVisible,
             this.zoneVisibility);
@@ -1600,13 +1606,7 @@ export class ZoneVisualizer {
         }
 
         const rect = this.canvas.getBoundingClientRect();
-        const aspect = rect.width / rect.height;
-
-        const ndcX = this.camera.x * this.camera.zoomX / aspect;
-        const laneStartScreenX = (ndcX + 1) * rect.width / 2;
-
         const labelWidth = TRACK_LABEL_WIDTH;
-        const labelX = Math.max(0, laneStartScreenX - labelWidth);
 
         const timelineHeight = TIMELINE_HEIGHT;
         const screenZoneHeight = SUBLANE_HEIGHT * this.camera.zoomY
@@ -1654,34 +1654,7 @@ export class ZoneVisualizer {
             if (laneVisible) {
                 const clampedTopY = Math.max(timelineHeight, screenTopY);
                 const clampedHeight = Math.max(0, screenBottomY - clampedTopY);
-                // Root track labels belong to the viewport, not trace time.
-                // Keep them pinned to the left when time zero is on-screen.
-                let currentLabelX = lanes.depths[i] === 0 ? 0 : labelX;
-                let currentLabelWidth = labelWidth;
-
-                const physicalSmRow = lanes.names[i]?.startsWith('SM ') ?? false;
-                const treeChild = this.treeParentRows[i] >= 0;
-                if (lanes.depths[i] > 0 && !physicalSmRow && !treeChild) {
-                    const startMs = lanes.startsX[i] / MS_TO_NS;
-                    const endMs = lanes.widths[i] / MS_TO_NS;
-                    const startNdc = (startMs + this.camera.x)
-                        * this.camera.zoomX / aspect;
-                    const endNdc = (endMs + this.camera.x)
-                        * this.camera.zoomX / aspect;
-                    const startScreenX = (startNdc + 1) * rect.width / 2;
-                    const endScreenX = (endNdc + 1) * rect.width / 2;
-                    currentLabelX = Math.max(0, startScreenX);
-                    currentLabelWidth = Math.max(
-                        0, Math.min(rect.width, endScreenX) - currentLabelX);
-                }
-
-                const childLabelTooSmall = lanes.depths[i] > 0
-                    && !physicalSmRow
-                    && !treeChild
-                    && (currentLabelWidth < MIN_ZONE_LABEL_WIDTH
-                        || clampedHeight < MIN_LABEL_FONT_SIZE);
-                if (clampedHeight === 0 || currentLabelWidth < 1
-                    || childLabelTooSmall) {
+                if (clampedHeight < MIN_LABEL_FONT_SIZE) {
                     this.laneLabels[i].style.display = 'none';
                     continue;
                 }
@@ -1690,8 +1663,8 @@ export class ZoneVisualizer {
                 this.laneLabels[i].style.fontSize = `${labelFontSize}px`;
                 this.laneLabels[i].style.gap = `${5 * labelScale}px`;
                 this.laneLabels[i].style.top = `${clampedTopY}px`;
-                this.laneLabels[i].style.left = `${currentLabelX}px`;
-                this.laneLabels[i].style.width = `${currentLabelWidth}px`;
+                this.laneLabels[i].style.left = '0';
+                this.laneLabels[i].style.width = `${labelWidth}px`;
                 this.laneLabels[i].style.height = `${clampedHeight}px`;
             } else {
                 this.laneLabels[i].style.display = 'none';
@@ -1699,8 +1672,8 @@ export class ZoneVisualizer {
         }
     }
 
-    /** Positions one frame ten pixels outside the complete visible track group. */
-    private updateTrackFrame(): void {
+    /** Positions separate frames around the visible GPU and CPU track groups. */
+    private updateTrackFrames(): void {
         if (!this.camera || !this.hierarchy
             || this.hierarchy.lanes.count === 0) return;
 
@@ -1708,48 +1681,86 @@ export class ZoneVisualizer {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
         const lanes = this.hierarchy.lanes;
-        const topWorld = lanes.ys[0] + lanes.heights[0];
-        const bottomWorld = lanes.ys[lanes.count - 1];
+        const topWorld = [
+            Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY
+        ];
+        const bottomWorld = [
+            Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY
+        ];
+        for (let rowIndex = 0; rowIndex < lanes.count; rowIndex++) {
+            if (this.rowVisible[rowIndex] === 0) continue;
+
+            const groupIndex = this.rowIsGpu[rowIndex] !== 0 ? 0 : 1;
+            topWorld[groupIndex] = Math.max(
+                topWorld[groupIndex],
+                lanes.ys[rowIndex] + lanes.heights[rowIndex]);
+            bottomWorld[groupIndex] = Math.min(
+                bottomWorld[groupIndex], lanes.ys[rowIndex]);
+        }
 
         const leftNdc = this.camera.x * this.camera.zoomX / aspect;
         const rightNdc = (this.TIME_RANGE + this.camera.x)
             * this.camera.zoomX / aspect;
-        const topNdc = (topWorld + this.camera.y) * this.camera.zoomY;
-        const bottomNdc = (bottomWorld + this.camera.y) * this.camera.zoomY;
-
         const left = (leftNdc + 1) * rect.width / 2 - framePadding;
         const right = (rightNdc + 1) * rect.width / 2 + framePadding;
-        const top = rect.height / 2 - topNdc * rect.height / 2 - framePadding;
-        const bottom = rect.height / 2
-            - bottomNdc * rect.height / 2 + framePadding;
+        const frames = [this.gpuTrackFrame, this.cpuTrackFrame];
+        for (let groupIndex = 0; groupIndex < frames.length; groupIndex++) {
+            if (!Number.isFinite(topWorld[groupIndex])
+                || !Number.isFinite(bottomWorld[groupIndex])) {
+                frames[groupIndex].style.display = 'none';
+                continue;
+            }
 
-        this.positionClippedFrame(
-            this.trackFrame, left, right, top, bottom, rect.width, 4);
+            const topNdc = (topWorld[groupIndex] + this.camera.y)
+                * this.camera.zoomY;
+            const bottomNdc = (bottomWorld[groupIndex] + this.camera.y)
+                * this.camera.zoomY;
+            const top = rect.height / 2
+                - topNdc * rect.height / 2 - framePadding;
+            const bottom = rect.height / 2
+                - bottomNdc * rect.height / 2 + framePadding;
+
+            this.positionClippedFrame(
+                frames[groupIndex], left, right, top, bottom, rect.width,
+                framePadding);
+        }
     }
 
-    /** Positions rounded frames around each expanded kernel's child rows. */
+    /** Positions dark grouping backdrops around expanded kernels and blocks. */
     private updateKernelFrames(): void {
         if (!this.camera || !this.hierarchy) return;
 
-        const framePadding = 2;
+        const framePadding = 0;
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
-        const lanes = this.hierarchy.lanes;
+        const zones = this.hierarchy.zones;
+        const blocks = this.hierarchy.blocks;
 
         for (let i = 0; i < this.expandedKernelGroups.length; i++) {
             const group = this.expandedKernelGroups[i];
             const frame = this.kernelFrames[i];
-            const topLane = lanes.ys[group.topTrackIndex]
-                + lanes.heights[group.topTrackIndex];
-            const bottomLane = lanes.ys[group.bottomTrackIndex];
+            const parentRowIndex = zones.smIndices[group.parentZoneIndex];
+            const parentZoneY = zones.ys[group.parentZoneIndex]
+                + this.rowOffsets[parentRowIndex];
+            let topWorld = parentZoneY + SUBLANE_HEIGHT / 2;
+            let bottomWorld = parentZoneY - SUBLANE_HEIGHT / 2;
+            for (const blockIndex of group.blockIndices) {
+                const blockRowIndex = blocks.smIndices[blockIndex];
+                const blockBottom = blocks.ys[blockIndex]
+                    + this.rowOffsets[blockRowIndex];
+                topWorld = Math.max(
+                    topWorld, blockBottom + blocks.heights[blockIndex]);
+                bottomWorld = Math.min(bottomWorld, blockBottom);
+            }
             const startMs = group.startNs / MS_TO_NS;
             const endMs = group.endNs / MS_TO_NS;
             const leftNdc = (startMs + this.camera.x)
                 * this.camera.zoomX / aspect;
             const rightNdc = (endMs + this.camera.x)
                 * this.camera.zoomX / aspect;
-            const topNdc = (topLane + this.camera.y) * this.camera.zoomY;
-            const bottomNdc = (bottomLane + this.camera.y) * this.camera.zoomY;
+            const topNdc = (topWorld + this.camera.y) * this.camera.zoomY;
+            const bottomNdc = (bottomWorld + this.camera.y)
+                * this.camera.zoomY;
 
             const left = (leftNdc + 1) * rect.width / 2 - framePadding;
             const right = (rightNdc + 1) * rect.width / 2 + framePadding;
@@ -1759,7 +1770,7 @@ export class ZoneVisualizer {
                 - bottomNdc * rect.height / 2 + framePadding;
 
             this.positionClippedFrame(
-                frame, left, right, top, bottom, rect.width, 1);
+                frame, left, right, top, bottom, rect.width, 0);
         }
     }
 
@@ -1834,12 +1845,12 @@ export class ZoneVisualizer {
         // Update only the dynamic content
         const dynamicStats = this.stats.querySelector('.stats-dynamic');
         if (dynamicStats && this.hierarchy) {
-            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>Grid: (${this.gridDimX}, ${this.gridDimY}, ${this.gridDimZ}) | Cluster: (${this.clusterDimX}, ${this.clusterDimY}, ${this.clusterDimZ})<br>Rows: ${this.hierarchy.lanes.count.toLocaleString()} | Groups: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
+            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration} ns<br>Rows: ${this.hierarchy.lanes.count.toLocaleString()} | Groups: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
         }
         this.lastTime = now;
 
         // Update 2D overlays (labels, timeline, selection UI)
-        this.updateTrackFrame();
+        this.updateTrackFrames();
         this.updateKernelFrames();
         this.updateLaneLabels();
         this.timelineRenderer!.updateTimeline(
@@ -1922,13 +1933,37 @@ export class ZoneVisualizer {
             }]
         });
 
-        renderPass.setPipeline(this.gpuResources.passes.lane.pipeline);
-        renderPass.setBindGroup(0, this.gpuResources.passes.lane.bindGroup);
-        renderPass.draw(6, this.hierarchy.lanes.count, 0, 0);
+        const labelGutterWidth = Math.min(
+            this.canvas.width - 1,
+            Math.round(TRACK_LABEL_WIDTH * devicePixelRatio));
+        const traceLeftNdc = this.camera.x * scale_x;
+        const traceRightNdc = (this.TIME_RANGE + this.camera.x) * scale_x;
+        const laneBackgroundLeft = Math.max(
+            labelGutterWidth,
+            Math.floor((traceLeftNdc + 1) * this.canvas.width / 2));
+        const laneBackgroundRight = Math.min(
+            this.canvas.width,
+            Math.ceil((traceRightNdc + 1) * this.canvas.width / 2));
 
-        renderPass.setPipeline(this.gpuResources.passes.blockLane.pipeline);
-        renderPass.setBindGroup(0, this.gpuResources.passes.blockLane.bindGroup);
-        renderPass.draw(6, this.hierarchy.blockLanes.count, 0, 0);
+        if (laneBackgroundRight > laneBackgroundLeft) {
+            renderPass.setScissorRect(
+                laneBackgroundLeft,
+                0,
+                laneBackgroundRight - laneBackgroundLeft,
+                this.canvas.height);
+
+            renderPass.setPipeline(this.gpuResources.passes.lane.pipeline);
+            renderPass.setBindGroup(0, this.gpuResources.passes.lane.bindGroup);
+            renderPass.draw(6, this.hierarchy.lanes.count, 0, 0);
+
+            renderPass.setPipeline(this.gpuResources.passes.blockLane.pipeline);
+            renderPass.setBindGroup(
+                0, this.gpuResources.passes.blockLane.bindGroup);
+            renderPass.draw(6, this.hierarchy.blockLanes.count, 0, 0);
+        }
+
+        renderPass.setScissorRect(
+            0, 0, this.canvas.width, this.canvas.height);
 
         renderPass.setPipeline(this.gpuResources.passes.blockBg.pipeline);
         renderPass.setBindGroup(0, this.gpuResources.passes.blockBg.bindGroup);

@@ -117,16 +117,16 @@ canvas {
     height: 100vh;
 }
 
-#track-frame {
+.track-frame {
     position: fixed;
     display: none;
     pointer-events: none;
     border: 1px solid var(--border-secondary);
-    border-radius: 4px;
+    border-radius: 10px;
     z-index: 10;
 }
 
-body.visualization-active #track-frame,
+body.visualization-active .track-frame,
 body.visualization-active #kernel-frames {
     display: block;
 }
@@ -141,8 +141,9 @@ body.visualization-active #kernel-frames {
 
 .kernel-frame {
     position: absolute;
-    border: 1px solid #282828;
-    border-radius: 1px;
+    background: rgba(8, 9, 10, 0.22);
+    border: 1px solid var(--border-secondary);
+    border-radius: 0;
 }
 
 #labelCanvas {
@@ -188,6 +189,8 @@ body.visualization-active #kernel-frames {
     position: fixed;
     right: 12px;
     bottom: 12px;
+    width: max-content;
+    max-width: calc(100vw - 24px);
     padding: 9px 11px;
     color: var(--text-secondary);
     background: rgba(37, 38, 39, 0.97);
@@ -196,6 +199,7 @@ body.visualization-active #kernel-frames {
     font-size: 10px;
     font-weight: 400;
     line-height: 1.55;
+    overflow-wrap: anywhere;
     white-space: pre-wrap;
     z-index: 1001;
 }
@@ -441,31 +445,16 @@ body.visualization-active #kernel-frames {
 
 .file-selector-content {
     position: relative;
-    width: min(400px, calc(100vw - 120px));
-    padding: 18px 22px;
+    width: min(330px, calc(100vw - 40px));
+    padding: 20px;
     background: var(--surface);
     border: 1px solid var(--border-secondary);
     border-radius: 12px;
-    text-align: left;
-    transform: translateX(-35px);
-}
-
-.file-selector-content > *:not(.avatar) {
-    transform: translateX(-24px);
-}
-
-.file-selector-content .avatar {
-    position: absolute;
-    top: 50%;
-    right: -70px;
-    width: 270px;
-    height: 270px;
-    border-radius: 50%;
-    transform: translateY(-50%);
+    text-align: center;
 }
 
 .file-selector-content h2 {
-    width: 230px;
+    width: auto;
     margin: 0 0 6px;
     color: var(--text-primary);
     font-size: 22px;
@@ -475,8 +464,8 @@ body.visualization-active #kernel-frames {
 }
 
 .file-selector-content .subtitle {
-    width: 230px;
-    margin: 0 0 18px;
+    width: auto;
+    margin: 0;
     color: var(--text-tertiary);
     font-size: 14px;
     text-align: center;
@@ -499,7 +488,8 @@ body.visualization-active #kernel-frames {
 
 .file-selector-content .file-select-area {
     display: flex;
-    width: 230px;
+    width: 100%;
+    margin-top: 18px;
     flex-direction: column;
     gap: 10px;
     align-items: center;
@@ -548,6 +538,10 @@ body.visualization-active #kernel-frames {
     padding: 24px;
     background: rgba(18, 18, 18, 0.82);
     z-index: 2002;
+}
+
+#sample-menu {
+    background: var(--bg-primary);
 }
 
 #help-overlay {
@@ -665,31 +659,12 @@ body.visualization-active #kernel-frames {
     }
 
     .file-selector-content {
-        display: flex;
-        width: min(360px, calc(100vw - 40px));
-        min-height: 0;
-        flex-direction: column;
-        align-items: center;
-        padding: 28px;
-        text-align: center;
-        transform: none;
-    }
-
-    .file-selector-content .avatar {
-        position: static;
-        order: -1;
-        width: 190px;
-        height: 190px;
-        margin-bottom: 18px;
-        transform: none;
+        width: min(330px, calc(100vw - 40px));
+        padding: 20px;
     }
 
     .file-selector-content h2 {
         margin-top: 0;
-    }
-
-    .file-selector-content > *:not(.avatar) {
-        transform: none;
     }
 
     .help-item {

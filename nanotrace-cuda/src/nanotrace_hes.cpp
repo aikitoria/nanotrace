@@ -43,6 +43,7 @@ namespace nanotrace
         std::string KernelDisplayName(const std::string& signature)
         {
             uint32_t depth = 0;
+            std::string name = signature;
 
             for (size_t i = signature.size(); i > 0; --i)
             {
@@ -56,12 +57,18 @@ namespace nanotrace
                     depth--;
                     if (depth == 0)
                     {
-                        return signature.substr(0, i - 1);
+                        name = signature.substr(0, i - 1);
+                        break;
                     }
                 }
             }
 
-            return signature;
+            constexpr std::string_view VOID_PREFIX{ "void " };
+            if (name.starts_with(VOID_PREFIX))
+            {
+                name.erase(0, VOID_PREFIX.size());
+            }
+            return name;
         }
 
         struct StreamKey

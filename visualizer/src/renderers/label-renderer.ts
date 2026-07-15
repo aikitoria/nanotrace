@@ -1,24 +1,13 @@
 /**
- * 2D canvas text renderer for block and zone labels.
+ * High-performance 2D canvas label renderer.
  *
- * Renders formatted names and durations on top of WebGPU visualization.
- * Implements performance culling:
- * - Viewport culling: Only renders visible elements
- * - Size culling: Only renders when zoomed in enough for readability
- * - Hierarchical max-width tracking: Pre-computes widest zones per block lane
- *
- * Label thresholds:
- * - Block labels: Min 100px width, min 12px padding height
- * - Zone labels: Min 100px width, min 15px height
- *
- * Labels are shortened with an ellipsis to fit available space.
- * Uses 10px monospace font (Consolas/Monaco) for consistent readability.
+ * Labels are indexed by duration and time. Duration is equivalent to the
+ * horizontal zoom at which a label becomes wide enough to draw, so a frame
+ * only visits events that can produce visible text at its current zoom.
  */
 
 import { Camera } from '../utils/camera.js';
-import {
-    HierarchyData
-} from '../utils/types.js';
+import { HierarchyData } from '../utils/types.js';
 import { NS_TO_MS } from '../utils/soa-helpers.js';
 import {
     SUBLANE_HEIGHT,
@@ -37,404 +26,443 @@ import {
     ZONE_LABEL_COLOR
 } from '../utils/constants.js';
 
-/**
- * Renders text labels for blocks and zones using Canvas 2D API (SoA version).
- *
- * Overlays on top of WebGPU rendering with viewport culling for performance.
- * Labels show formatted names (from format descriptors) and durations.
- */
-export class LabelRenderer {
-    private labelCtx: CanvasRenderingContext2D;
-    private canvas: HTMLCanvasElement;
-    private camera: Camera;
+const DURATION_BUCKET_COUNT = 54;
+const TIME_BUCKET_COUNT = 4096;
+const ELLIPSIS = '...';
 
-    /**
-     * Creates label renderer with 2D canvas context, canvas, and camera.
-     * Canvas is used for coordinate transformations and viewport queries.
-     */
-    constructor(labelCtx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, camera: Camera) {
-        this.labelCtx = labelCtx;
-        this.canvas = canvas;
-        this.camera = camera;
-    }
+type CandidateVisitor = (index: number) => void;
 
-    /** Updates camera reference when visualization is reinitialized. */
-    updateCamera(camera: Camera): void {
-        this.camera = camera;
-    }
+/** A compact CSR index over logarithmic duration and linear time buckets. */
+class TemporalWidthIndex {
+    private starts: Float64Array;
+    private ends: Float64Array;
+    private totalDurationNs: number;
+    private timeBucketScale: number;
+    private offsets: Uint32Array;
+    private indices: Uint32Array;
+    private activeDurationBuckets: number[] = [];
+    private maxDurationByBucket = new Float64Array(
+        DURATION_BUCKET_COUNT);
+    private maxDurationNs = 0;
 
-    /** Returns text that fits without allowing Canvas to horizontally scale it. */
-    private fitLabel(text: string, maxWidth: number): string | null {
-        if (maxWidth <= 0) return null;
-        if (this.labelCtx.measureText(text).width <= maxWidth) return text;
+    constructor(
+        starts: Float64Array,
+        ends: Float64Array,
+        count: number,
+        totalDurationNs: number
+    ) {
+        this.starts = starts;
+        this.ends = ends;
+        this.totalDurationNs = Math.max(1, totalDurationNs);
+        this.timeBucketScale = TIME_BUCKET_COUNT / this.totalDurationNs;
 
-        const ellipsis = '...';
-        if (this.labelCtx.measureText(ellipsis).width > maxWidth) return null;
-
-        let low = 0;
-        let high = text.length;
-        while (low < high) {
-            const middle = Math.ceil((low + high) / 2);
-            const candidate = `${text.slice(0, middle)}${ellipsis}`;
-            if (this.labelCtx.measureText(candidate).width <= maxWidth) {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
+        const cellCount = DURATION_BUCKET_COUNT * TIME_BUCKET_COUNT;
+        const counts = new Uint32Array(cellCount);
+        const durationCounts = new Uint32Array(DURATION_BUCKET_COUNT);
+        for (let index = 0; index < count; index++) {
+            const duration = Math.max(1, ends[index] - starts[index]);
+            const durationBucket = this.durationBucket(duration);
+            const timeBucket = this.timeBucket(starts[index]);
+            counts[durationBucket * TIME_BUCKET_COUNT + timeBucket]++;
+            durationCounts[durationBucket]++;
+            this.maxDurationByBucket[durationBucket] = Math.max(
+                this.maxDurationByBucket[durationBucket], duration);
+            this.maxDurationNs = Math.max(this.maxDurationNs, duration);
         }
 
-        return `${text.slice(0, low)}${ellipsis}`;
+        this.offsets = new Uint32Array(cellCount + 1);
+        for (let cell = 0; cell < cellCount; cell++) {
+            this.offsets[cell + 1] = this.offsets[cell] + counts[cell];
+        }
+
+        const cursors = this.offsets.slice(0, cellCount);
+        this.indices = new Uint32Array(count);
+        for (let index = 0; index < count; index++) {
+            const duration = Math.max(1, ends[index] - starts[index]);
+            const durationBucket = this.durationBucket(duration);
+            const timeBucket = this.timeBucket(starts[index]);
+            const cell = durationBucket * TIME_BUCKET_COUNT + timeBucket;
+            this.indices[cursors[cell]++] = index;
+        }
+
+        for (let bucket = 0; bucket < DURATION_BUCKET_COUNT; bucket++) {
+            if (durationCounts[bucket] !== 0) {
+                this.activeDurationBuckets.push(bucket);
+            }
+        }
     }
 
-    /**
-     * Renders block labels with performance culling (SoA version).
-     *
-     * Culling strategy (hierarchical early exit):
-     * 1. Global padding height check: Skip all labels if zoom too far out
-     * 2. Hierarchical max-width check: Pre-computed widest block per visible block lane
-     * 3. Per-block viewport culling: Only render visible blocks
-     * 4. Per-block size check: Only render if block is wide/tall enough for readability
-     *
-     * Minimum thresholds:
-     * - Block width: 25px at the reference font size
-     * - Padding height: 12px (space above block for label)
-     *
-     * Labels show: "Block Name (duration ns)" in gray (#a8a8a8)
-     * Long labels are shortened with an ellipsis to fit available space.
-     */
-    renderBlockLabels(
-        hierarchy: HierarchyData,
-        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string,
-        rowOffsets: Float32Array,
-        rowVisible: Uint8Array,
-        zoneVisibility: Uint32Array
+    visitCandidates(
+        minDurationNs: number,
+        visibleStartNs: number,
+        visibleEndNs: number,
+        visitor: CandidateVisitor
     ): void {
-        const rect = this.canvas.getBoundingClientRect();
-        const aspect = rect.width / rect.height;
-        const { blocks, blockLanes, formatDescriptors } = hierarchy;
-
-        const referenceWidth = MIN_BLOCK_LABEL_WIDTH;
-        const trackLabelWidth = TRACK_LABEL_WIDTH;
-        const headerScreenHeight = SUBLANE_HEIGHT * this.camera.zoomY
-            * (rect.height / 2);
-        const fontSize = LABEL_FONT_SIZE * headerScreenHeight
-            / MIN_ZONE_LABEL_HEIGHT;
-        if (fontSize < MIN_LABEL_FONT_SIZE) return;
-        const fontScale = fontSize / LABEL_FONT_SIZE;
-        const minWidth = referenceWidth;
-
-        const worldLeft = this.camera.screenToWorld(0, 0, this.canvas).x;
-        const worldRight = this.camera.screenToWorld(rect.width, 0, this.canvas).x;
-        const worldTop = this.camera.screenToWorld(0, 0, this.canvas).y;
-        const worldBottom = this.camera.screenToWorld(0, rect.height, this.canvas).y;
-
-        // Check max visible block width for early exit
-        let maxVisibleBlockWidth = 0;
-        for (let blIdx = 0; blIdx < blockLanes.count; blIdx++) {
-            const rowIndex = blockLanes.smIndices[blIdx];
-            if (rowVisible[rowIndex] === 0) continue;
-            const rowOffset = rowOffsets[rowIndex];
-            const blockLaneTop = blockLanes.ys[blIdx] + rowOffset
-                + blockLanes.heights[blIdx];
-            const blockLaneBottom = blockLanes.ys[blIdx] + rowOffset;
-            if (blockLaneBottom <= worldTop && blockLaneTop >= worldBottom) {
-                maxVisibleBlockWidth = Math.max(maxVisibleBlockWidth, blockLanes.maxBlockWidths[blIdx]);
-            }
+        if (minDurationNs > this.maxDurationNs
+            || visibleEndNs < 0
+            || visibleStartNs > this.totalDurationNs) {
+            return;
         }
 
-        if (maxVisibleBlockWidth > 0) {
-            const maxScreenWidth = (maxVisibleBlockWidth * NS_TO_MS) * this.camera.zoomX * (rect.width / 2) / aspect;
-            if (maxScreenWidth < minWidth) {
-                return;
-            }
-        }
+        const clampedEnd = Math.min(
+            this.totalDurationNs, Math.max(0, visibleEndNs));
+        const firstDurationBucket = this.durationBucket(
+            Math.max(1, minDurationNs));
 
-        this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
-        this.labelCtx.textAlign = 'left';
-        this.labelCtx.textBaseline = 'middle';
-        this.labelCtx.fillStyle = LABEL_COLOR;
+        for (const durationBucket of this.activeDurationBuckets) {
+            if (durationBucket < firstDurationBucket) continue;
 
-        // Iterate all blocks (not using indirection for blocks - direct iteration)
-        for (let i = 0; i < blocks.count; i++) {
-            const rowIndex = blocks.smIndices[i];
-            if (rowVisible[rowIndex] === 0) continue;
-            if (zoneVisibility[blocks.zonesStartIndices[i]] === 0) continue;
-            const rowOffset = rowOffsets[rowIndex];
-            // Convert block times from nanoseconds to milliseconds for comparison
-            const blockStartMs = blocks.startsX[i] * NS_TO_MS;
-            const blockEndMs = blocks.endsX[i] * NS_TO_MS;
+            const earliestStart = Math.max(
+                0,
+                visibleStartNs
+                    - this.maxDurationByBucket[durationBucket]);
+            const firstTimeBucket = this.timeBucket(earliestStart);
+            const lastTimeBucket = this.timeBucket(clampedEnd);
+            const bucketBase = durationBucket * TIME_BUCKET_COUNT;
 
-            if (blockEndMs < worldLeft || blockStartMs > worldRight) {
-                continue;
-            }
-
-            const blockTop = blocks.ys[i] + rowOffset + blocks.heights[i];
-            const blockBottom = blocks.ys[i] + rowOffset;
-            if (blockBottom > worldTop || blockTop < worldBottom) {
-                continue;
-            }
-
-            const ndcLeft = (blockStartMs + this.camera.x) * this.camera.zoomX / aspect;
-            const ndcRight = (blockEndMs + this.camera.x) * this.camera.zoomX / aspect;
-
-            const blockTopY = blocks.ys[i] + rowOffset + blocks.heights[i];
-            const ndcTop = (blockTopY + this.camera.y) * this.camera.zoomY;
-
-            const sublanesTopY = blocks.ys[i] + rowOffset + blocks.heights[i]
-                - blocks.headerHeights[i];
-            const ndcSublanesTop = (sublanesTopY + this.camera.y) * this.camera.zoomY;
-
-            const screenLeft = (ndcLeft + 1) * rect.width / 2;
-            const screenRight = (ndcRight + 1) * rect.width / 2;
-            const screenTop = rect.height / 2 - (ndcTop * rect.height / 2);
-            const screenSublanesTop = rect.height / 2 - (ndcSublanesTop * rect.height / 2);
-
-            const screenPaddingHeight = screenSublanesTop - screenTop;
-
-            const visibleLeft = Math.max(screenLeft, trackLabelWidth);
-            const visibleWidth = screenRight - visibleLeft;
-
-            if (visibleWidth >= minWidth
-                && screenPaddingHeight >= MIN_LABEL_FONT_SIZE) {
-                const horizontalPadding = BLOCK_LABEL_PADDING_X * fontScale;
-                const labelX = visibleLeft + horizontalPadding;
-                const labelY = screenTop + screenPaddingHeight / 2;
-                const durationNs = blocks.endsX[i] - blocks.startsX[i];
-
-                const blockName = formatDescriptors.length > 0
-                    ? formatBlockString(blocks.formatDescIds[i], blocks.gridIds[i], blocks.clusterIds[i])
-                    : `Block #${i}`;
-
-                const label = this.fitLabel(
-                    `${blockName} (${durationNs.toLocaleString()} ns)`,
-                    visibleWidth - horizontalPadding
-                        - LABEL_CLIP_MARGIN * fontScale);
-                if (label !== null) {
-                    this.labelCtx.fillText(label, labelX, labelY);
-                }
-            }
-        }
-    }
-
-    /**
-     * Renders zone labels with performance culling (SoA version).
-     *
-     * Called every frame. Clears canvas and renders both block and zone labels.
-     *
-     * Culling strategy (hierarchical early exit):
-     * 1. Global sublane height check: Skip if zoom too far out (< 15px height)
-     * 2. Hierarchical max-width check: Pre-computed widest zone per visible block lane
-     * 3. Per-lane/block lane/block/zone viewport culling: Nested checks at each level
-     * 4. Per-zone size check: Only render if zone is wide/tall enough for readability
-     *
-     * Minimum thresholds:
-     * - Zone width: 25px at the reference font size
-     * - Zone height: 15px
-     *
-     * Labels show: "Zone Name (duration ns)" in light gray (#d4d4d4)
-     * Long labels are shortened with an ellipsis to fit available space.
-     * Font: 10px Consolas/Monaco monospace with device pixel ratio scaling
-     */
-    renderZoneLabels(
-        hierarchy: HierarchyData,
-        formatString: (formatDescId: number, params: number[]) => string,
-        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string,
-        rowOffsets: Float32Array,
-        rowVisible: Uint8Array,
-        zoneVisibility: Uint32Array
-    ): void {
-        const rect = this.canvas.getBoundingClientRect();
-        const aspect = rect.width / rect.height;
-        const { lanes, blockLanes, blocks, zones, formatDescriptors } = hierarchy;
-
-        this.labelCtx.clearRect(0, 0, this.labelCtx.canvas.width, this.labelCtx.canvas.height);
-
-        if (this.camera.zoomY < MIN_LABEL_ZOOM_Y) return;
-
-        this.labelCtx.save();
-        this.labelCtx.scale(devicePixelRatio, devicePixelRatio);
-
-        // Render block labels first
-        this.renderBlockLabels(
-            hierarchy, formatBlockString, rowOffsets, rowVisible,
-            zoneVisibility);
-
-        const trackLabelWidth = TRACK_LABEL_WIDTH;
-
-        const maxZoneHeight = SUBLANE_HEIGHT;
-        const screenZoneHeight = maxZoneHeight * this.camera.zoomY
-            * (rect.height / 2);
-        const fontSize = LABEL_FONT_SIZE * screenZoneHeight
-            / MIN_ZONE_LABEL_HEIGHT;
-        const fontScale = fontSize / LABEL_FONT_SIZE;
-        const minWidth = MIN_ZONE_LABEL_WIDTH;
-        const horizontalPadding = ZONE_LABEL_PADDING_X * fontScale;
-        let canRenderLabels = fontSize >= MIN_LABEL_FONT_SIZE;
-
-        const worldTop = this.camera.screenToWorld(0, 0, this.canvas).y;
-        const worldBottom = this.camera.screenToWorld(0, rect.height, this.canvas).y;
-
-        // Check max visible zone width for early exit
-        let maxVisibleZoneWidth = 0;
-        for (let blIdx = 0; blIdx < blockLanes.count; blIdx++) {
-            const rowIndex = blockLanes.smIndices[blIdx];
-            if (rowVisible[rowIndex] === 0) continue;
-            const rowOffset = rowOffsets[rowIndex];
-            const blockLaneTop = blockLanes.ys[blIdx] + rowOffset
-                + blockLanes.heights[blIdx];
-            const blockLaneBottom = blockLanes.ys[blIdx] + rowOffset;
-            if (blockLaneBottom <= worldTop && blockLaneTop >= worldBottom) {
-                maxVisibleZoneWidth = Math.max(maxVisibleZoneWidth, blockLanes.maxZoneWidths[blIdx]);
-            }
-        }
-
-        if (maxVisibleZoneWidth > 0) {
-            const maxScreenWidth = (maxVisibleZoneWidth * NS_TO_MS) * this.camera.zoomX * (rect.width / 2) / aspect;
-            if (maxScreenWidth < minWidth) {
-                canRenderLabels = false;
-            }
-        }
-
-        this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
-        this.labelCtx.textAlign = 'left';
-        this.labelCtx.textBaseline = 'middle';
-        this.labelCtx.fillStyle = ZONE_LABEL_COLOR;
-
-        const worldLeft = this.camera.screenToWorld(0, 0, this.canvas).x;
-        const worldRight = this.camera.screenToWorld(rect.width, 0, this.canvas).x;
-
-        // Iterate through hierarchy: lanes → block lanes → blocks (via indirection) → zones
-        for (let laneIdx = 0; laneIdx < lanes.count; laneIdx++) {
-            if (rowVisible[laneIdx] === 0) continue;
-            const laneTopY = lanes.ys[laneIdx] + lanes.heights[laneIdx];
-            const laneBottomY = lanes.ys[laneIdx];
-            const ndcTopY = (laneTopY + this.camera.y) * this.camera.zoomY;
-            const ndcBottomY = (laneBottomY + this.camera.y) * this.camera.zoomY;
-            const screenTopY = rect.height / 2 - (ndcTopY * rect.height / 2);
-            const screenBottomY = rect.height / 2 - (ndcBottomY * rect.height / 2);
-
-            if (screenBottomY < -20 || screenTopY > rect.height + 20) {
-                continue;
-            }
-
-            const blockLaneStart = lanes.blockLanesStartIndices[laneIdx];
-            const blockLaneEnd = lanes.blockLanesEndIndices[laneIdx];
-
-            for (let blIdx = blockLaneStart; blIdx < blockLaneEnd; blIdx++) {
-                const rowOffset = rowOffsets[laneIdx];
-                const blockLaneTopY = blockLanes.ys[blIdx] + rowOffset
-                    + blockLanes.heights[blIdx];
-                const blockLaneBottomY = blockLanes.ys[blIdx] + rowOffset;
-                const ndcBlockLaneTopY = (blockLaneTopY + this.camera.y) * this.camera.zoomY;
-                const ndcBlockLaneBottomY = (blockLaneBottomY + this.camera.y) * this.camera.zoomY;
-                const screenBlockLaneTopY = rect.height / 2 - (ndcBlockLaneTopY * rect.height / 2);
-                const screenBlockLaneBottomY = rect.height / 2 - (ndcBlockLaneBottomY * rect.height / 2);
-
-                if (screenBlockLaneBottomY < -20 || screenBlockLaneTopY > rect.height + 20) {
-                    continue;
-                }
-
-                // Iterate blocks in this block lane using indirection
-                const blockIndicesOffset = blockLanes.blockIndicesOffsets[blIdx];
-                const blockIndicesCount = blockLanes.blockIndicesCounts[blIdx];
-
-                for (let bi = 0; bi < blockIndicesCount; bi++) {
-                    const blockIdx = blockLanes.blockIndices[blockIndicesOffset + bi];
-
-                    // Convert block times from nanoseconds to milliseconds
-                    const blockStartMs = blocks.startsX[blockIdx] * NS_TO_MS;
-                    const blockEndMs = blocks.endsX[blockIdx] * NS_TO_MS;
-
-                    if (blockEndMs < worldLeft || blockStartMs > worldRight) {
+            for (let timeBucket = firstTimeBucket;
+                timeBucket <= lastTimeBucket; timeBucket++) {
+                const cell = bucketBase + timeBucket;
+                const endOffset = this.offsets[cell + 1];
+                for (let offset = this.offsets[cell];
+                    offset < endOffset; offset++) {
+                    const index = this.indices[offset];
+                    const start = this.starts[index];
+                    const end = this.ends[index];
+                    if (end < visibleStartNs
+                        || start > visibleEndNs
+                        || end - start < minDurationNs) {
                         continue;
                     }
-
-                    // Iterate zones in this block
-                    const zoneStart = blocks.zonesStartIndices[blockIdx];
-                    const zoneEnd = blocks.zonesEndIndices[blockIdx];
-
-                    for (let zIdx = zoneStart; zIdx < zoneEnd; zIdx++) {
-                        if (zoneVisibility[zIdx] === 0) continue;
-                        // Convert zone times from nanoseconds to milliseconds
-                        const zoneStartMs = zones.startsX[zIdx] * NS_TO_MS;
-                        const zoneEndMs = zones.endsX[zIdx] * NS_TO_MS;
-
-                        if (zoneEndMs < worldLeft || zoneStartMs > worldRight) {
-                            continue;
-                        }
-
-                        const worldZoneLeft = zoneStartMs;
-                        const worldZoneRight = zoneEndMs;
-                        const worldZoneTop = zones.ys[zIdx] + rowOffset
-                            + SUBLANE_HEIGHT / 2;
-                        const worldZoneBottom = zones.ys[zIdx] + rowOffset
-                            - SUBLANE_HEIGHT / 2;
-
-                        const ndcLeft = (worldZoneLeft + this.camera.x) * this.camera.zoomX / aspect;
-                        const ndcRight = (worldZoneRight + this.camera.x) * this.camera.zoomX / aspect;
-                        const ndcTop = (worldZoneTop + this.camera.y) * this.camera.zoomY;
-                        const ndcBottom = (worldZoneBottom + this.camera.y) * this.camera.zoomY;
-
-                        const screenLeft = (ndcLeft + 1) * rect.width / 2;
-                        const screenRight = (ndcRight + 1) * rect.width / 2;
-                        const screenTop = rect.height / 2 - (ndcTop * rect.height / 2);
-                        const screenBottom = rect.height / 2 - (ndcBottom * rect.height / 2);
-
-                        const screenHeight = screenBottom - screenTop;
-
-                        const visibleLeft = Math.max(
-                            screenLeft, trackLabelWidth);
-                        const visibleWidth = screenRight - visibleLeft;
-                        const canRenderFullLabel = canRenderLabels
-                            && visibleWidth >= minWidth
-                            && screenHeight >= MIN_LABEL_FONT_SIZE;
-
-                        if (zones.hasChildren[zIdx] !== 0
-                            && canRenderLabels
-                            && !canRenderFullLabel
-                            && visibleWidth >= fontSize
-                            && screenHeight >= fontSize) {
-                            const disclosure = zones.expanded[zIdx] !== 0
-                                ? '\u25be' : '\u25b8';
-                            this.labelCtx.fillText(
-                                disclosure, visibleLeft + horizontalPadding,
-                                screenTop + screenHeight / 2);
-                        }
-
-                        if (canRenderFullLabel) {
-                            const labelX = visibleLeft + horizontalPadding;
-                            const labelY = screenTop + screenHeight / 2;
-                            const durationNs = zones.endsX[zIdx] - zones.startsX[zIdx];
-
-                            // Get zone params from pool (small temporary array for formatting)
-                            const paramsOffset = zones.paramsOffsets[zIdx];
-                            const paramsCount = zones.paramsCounts[zIdx];
-                            const params: number[] = [];
-                            for (let p = 0; p < paramsCount; p++) {
-                                params.push(zones.paramsPool[paramsOffset + p]);
-                            }
-
-                            const zoneName = formatDescriptors.length > 0
-                                ? formatString(zones.formatDescIds[zIdx], params)
-                                : `#${zIdx}`;
-                            const disclosure = zones.hasChildren[zIdx] !== 0
-                                ? (zones.expanded[zIdx] !== 0 ? '\u25be ' : '\u25b8 ')
-                                : '';
-
-                            const label = this.fitLabel(
-                                `${disclosure}${zoneName} (${durationNs.toLocaleString()} ns)`,
-                                visibleWidth - horizontalPadding
-                                    - LABEL_CLIP_MARGIN * fontScale);
-                            if (label !== null) {
-                                this.labelCtx.fillText(label, labelX, labelY);
-                            }
-                        }
-                    }
+                    visitor(index);
                 }
             }
         }
+    }
+
+    private durationBucket(duration: number): number {
+        return Math.min(
+            DURATION_BUCKET_COUNT - 1,
+            Math.max(0, Math.floor(Math.log2(duration))));
+    }
+
+    private timeBucket(timestamp: number): number {
+        return Math.min(
+            TIME_BUCKET_COUNT - 1,
+            Math.max(0, Math.floor(timestamp * this.timeBucketScale)));
+    }
+}
+
+export class LabelRenderer {
+    private labelCtx: CanvasRenderingContext2D;
+    private camera: Camera;
+    private hierarchy: HierarchyData;
+    private zoneIndex: TemporalWidthIndex;
+    private blockIndex: TemporalWidthIndex;
+    private durationFormatter = new Intl.NumberFormat();
+
+    private dirty = true;
+    private lastCameraX = Number.NaN;
+    private lastCameraY = Number.NaN;
+    private lastZoomX = Number.NaN;
+    private lastZoomY = Number.NaN;
+    private lastCanvasWidth = 0;
+    private lastCanvasHeight = 0;
+    private lastDevicePixelRatio = 0;
+
+    constructor(
+        labelCtx: CanvasRenderingContext2D,
+        camera: Camera,
+        hierarchy: HierarchyData
+    ) {
+        this.labelCtx = labelCtx;
+        this.camera = camera;
+        this.hierarchy = hierarchy;
+        this.zoneIndex = new TemporalWidthIndex(
+            hierarchy.zones.startsX,
+            hierarchy.zones.endsX,
+            hierarchy.zones.count,
+            hierarchy.totalDurationNs);
+        this.blockIndex = new TemporalWidthIndex(
+            hierarchy.blocks.startsX,
+            hierarchy.blocks.endsX,
+            hierarchy.blocks.count,
+            hierarchy.totalDurationNs);
+    }
+
+    updateCamera(camera: Camera): void {
+        this.camera = camera;
+        this.invalidate();
+    }
+
+    invalidate(): void {
+        this.dirty = true;
+    }
+
+    render(
+        rowOffsets: Float32Array,
+        rowVisible: Uint8Array,
+        zoneVisibility: Uint32Array
+    ): void {
+        const dpr = devicePixelRatio;
+        const canvasWidth = this.labelCtx.canvas.width;
+        const canvasHeight = this.labelCtx.canvas.height;
+        const zoomX = this.camera.zoomX;
+        const zoomY = this.camera.zoomY;
+
+        if (!this.dirty
+            && this.lastCameraX === this.camera.x
+            && this.lastCameraY === this.camera.y
+            && this.lastZoomX === zoomX
+            && this.lastZoomY === zoomY
+            && this.lastCanvasWidth === canvasWidth
+            && this.lastCanvasHeight === canvasHeight
+            && this.lastDevicePixelRatio === dpr) {
+            return;
+        }
+
+        this.dirty = false;
+        this.lastCameraX = this.camera.x;
+        this.lastCameraY = this.camera.y;
+        this.lastZoomX = zoomX;
+        this.lastZoomY = zoomY;
+        this.lastCanvasWidth = canvasWidth;
+        this.lastCanvasHeight = canvasHeight;
+        this.lastDevicePixelRatio = dpr;
+
+        this.labelCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+        if (zoomY < MIN_LABEL_ZOOM_Y || canvasWidth === 0
+            || canvasHeight === 0) {
+            return;
+        }
+
+        const width = canvasWidth / dpr;
+        const height = canvasHeight / dpr;
+        const aspect = width / height;
+        const nanosecondsToPixels = NS_TO_MS * zoomX
+            * (width / 2) / aspect;
+        if (nanosecondsToPixels <= 0) return;
+
+        const xOffset = (this.camera.x * zoomX / aspect + 1)
+            * width / 2;
+        const yScale = zoomY * height / 2;
+        const yOffset = height / 2 - this.camera.y * yScale;
+        const visibleStartNs = Math.max(
+            0, (TRACK_LABEL_WIDTH - xOffset) / nanosecondsToPixels);
+        const visibleEndNs = Math.min(
+            this.hierarchy.totalDurationNs,
+            (width - xOffset) / nanosecondsToPixels);
+        if (visibleEndNs < visibleStartNs) return;
+
+        const zoneScreenHeight = SUBLANE_HEIGHT * yScale;
+        const fontSize = LABEL_FONT_SIZE * zoneScreenHeight
+            / MIN_ZONE_LABEL_HEIGHT;
+        if (fontSize < MIN_LABEL_FONT_SIZE) return;
+
+        this.labelCtx.save();
+        this.labelCtx.scale(dpr, dpr);
+        this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
+        this.labelCtx.textAlign = 'left';
+        this.labelCtx.textBaseline = 'middle';
+        const glyphWidth = this.labelCtx.measureText('0').width;
+        const fontScale = fontSize / LABEL_FONT_SIZE;
+
+        this.renderBlockLabels(
+            rowOffsets, rowVisible, zoneVisibility,
+            nanosecondsToPixels, xOffset, yScale, yOffset,
+            visibleStartNs, visibleEndNs, height,
+            fontScale, glyphWidth);
+        this.renderZoneLabels(
+            rowOffsets, rowVisible, zoneVisibility,
+            nanosecondsToPixels, xOffset, yScale, yOffset,
+            visibleStartNs, visibleEndNs, height,
+            zoneScreenHeight, fontSize, fontScale, glyphWidth);
 
         this.labelCtx.restore();
     }
 
+    private renderBlockLabels(
+        rowOffsets: Float32Array,
+        rowVisible: Uint8Array,
+        zoneVisibility: Uint32Array,
+        nanosecondsToPixels: number,
+        xOffset: number,
+        yScale: number,
+        yOffset: number,
+        visibleStartNs: number,
+        visibleEndNs: number,
+        height: number,
+        fontScale: number,
+        glyphWidth: number
+    ): void {
+        const blocks = this.hierarchy.blocks;
+        const minDurationNs = MIN_BLOCK_LABEL_WIDTH
+            / nanosecondsToPixels;
+        const horizontalPadding = BLOCK_LABEL_PADDING_X * fontScale;
+        this.labelCtx.fillStyle = LABEL_COLOR;
+
+        this.blockIndex.visitCandidates(
+            minDurationNs, visibleStartNs, visibleEndNs, blockIndex => {
+                const rowIndex = blocks.smIndices[blockIndex];
+                const firstZone = blocks.zonesStartIndices[blockIndex];
+                if (rowVisible[rowIndex] === 0
+                    || zoneVisibility[firstZone] === 0) {
+                    return;
+                }
+
+                const rowOffset = rowOffsets[rowIndex];
+                const blockTop = blocks.ys[blockIndex] + rowOffset
+                    + blocks.heights[blockIndex];
+                const screenTop = yOffset - blockTop * yScale;
+                const headerHeight = blocks.headerHeights[blockIndex]
+                    * yScale;
+                if (headerHeight < MIN_LABEL_FONT_SIZE
+                    || screenTop + headerHeight < 0
+                    || screenTop > height) {
+                    return;
+                }
+
+                const screenLeft = blocks.startsX[blockIndex]
+                    * nanosecondsToPixels + xOffset;
+                const screenRight = blocks.endsX[blockIndex]
+                    * nanosecondsToPixels + xOffset;
+                const visibleLeft = Math.max(
+                    screenLeft, TRACK_LABEL_WIDTH);
+                const visibleWidth = screenRight - visibleLeft;
+                if (visibleWidth < MIN_BLOCK_LABEL_WIDTH) return;
+
+                const name = this.formatBlockName(blockIndex);
+                const duration = blocks.endsX[blockIndex]
+                    - blocks.startsX[blockIndex];
+                const label = this.fitLabel(
+                    `${name} (${this.durationFormatter.format(duration)} ns)`,
+                    visibleWidth - horizontalPadding
+                        - LABEL_CLIP_MARGIN * fontScale,
+                    glyphWidth);
+                if (label !== null) {
+                    this.labelCtx.fillText(
+                        label,
+                        visibleLeft + horizontalPadding,
+                        screenTop + headerHeight / 2);
+                }
+            });
+    }
+
+    private renderZoneLabels(
+        rowOffsets: Float32Array,
+        rowVisible: Uint8Array,
+        zoneVisibility: Uint32Array,
+        nanosecondsToPixels: number,
+        xOffset: number,
+        yScale: number,
+        yOffset: number,
+        visibleStartNs: number,
+        visibleEndNs: number,
+        height: number,
+        zoneScreenHeight: number,
+        fontSize: number,
+        fontScale: number,
+        glyphWidth: number
+    ): void {
+        const zones = this.hierarchy.zones;
+        const minRenderableWidth = Math.min(
+            MIN_ZONE_LABEL_WIDTH, fontSize);
+        const minDurationNs = minRenderableWidth / nanosecondsToPixels;
+        const horizontalPadding = ZONE_LABEL_PADDING_X * fontScale;
+        this.labelCtx.fillStyle = ZONE_LABEL_COLOR;
+
+        this.zoneIndex.visitCandidates(
+            minDurationNs, visibleStartNs, visibleEndNs, zoneIndex => {
+                if (zoneVisibility[zoneIndex] === 0) return;
+                const rowIndex = zones.smIndices[zoneIndex];
+                if (rowVisible[rowIndex] === 0) return;
+
+                const screenCenterY = yOffset
+                    - (zones.ys[zoneIndex] + rowOffsets[rowIndex]) * yScale;
+                if (screenCenterY + zoneScreenHeight / 2 < 0
+                    || screenCenterY - zoneScreenHeight / 2 > height) {
+                    return;
+                }
+
+                const screenLeft = zones.startsX[zoneIndex]
+                    * nanosecondsToPixels + xOffset;
+                const screenRight = zones.endsX[zoneIndex]
+                    * nanosecondsToPixels + xOffset;
+                const visibleLeft = Math.max(
+                    screenLeft, TRACK_LABEL_WIDTH);
+                const visibleWidth = screenRight - visibleLeft;
+                const fullLabel = visibleWidth >= MIN_ZONE_LABEL_WIDTH;
+
+                if (!fullLabel) {
+                    if (zones.hasChildren[zoneIndex] !== 0
+                        && visibleWidth >= fontSize
+                        && zoneScreenHeight >= fontSize) {
+                        this.labelCtx.fillText(
+                            zones.expanded[zoneIndex] !== 0
+                                ? '\u25be' : '\u25b8',
+                            visibleLeft + horizontalPadding,
+                            screenCenterY);
+                    }
+                    return;
+                }
+
+                const name = this.formatZoneName(zoneIndex);
+                const duration = zones.endsX[zoneIndex]
+                    - zones.startsX[zoneIndex];
+                const disclosure = zones.hasChildren[zoneIndex] !== 0
+                    ? (zones.expanded[zoneIndex] !== 0
+                        ? '\u25be ' : '\u25b8 ')
+                    : '';
+                const label = this.fitLabel(
+                    `${disclosure}${name} (`
+                        + `${this.durationFormatter.format(duration)} ns)`,
+                    visibleWidth - horizontalPadding
+                        - LABEL_CLIP_MARGIN * fontScale,
+                    glyphWidth);
+                if (label !== null) {
+                    this.labelCtx.fillText(
+                        label, visibleLeft + horizontalPadding,
+                        screenCenterY);
+                }
+            });
+    }
+
+    private formatZoneName(zoneIndex: number): string {
+        const zones = this.hierarchy.zones;
+        let result = this.hierarchy.formatDescriptors[
+            zones.formatDescIds[zoneIndex]]?.labelString ?? 'Event';
+        const parameterOffset = zones.paramsOffsets[zoneIndex];
+        const parameterCount = zones.paramsCounts[zoneIndex];
+        for (let parameterIndex = 0;
+            parameterIndex < parameterCount; parameterIndex++) {
+            result = result.replace(
+                `{${parameterIndex}}`,
+                zones.paramsPool[
+                    parameterOffset + parameterIndex].toString());
+        }
+        return result;
+    }
+
+    private formatBlockName(blockIndex: number): string {
+        const blocks = this.hierarchy.blocks;
+        let result = this.hierarchy.formatDescriptors[
+            blocks.formatDescIds[blockIndex]]?.labelString ?? 'Block';
+        result = result.replace(
+            '{blockLinear}', blocks.gridIds[blockIndex].toString());
+        result = result.replace(
+            '{clusterLinear}', blocks.clusterIds[blockIndex].toString());
+        return result;
+    }
+
+    /** Monospace labels can be clipped directly without measurement searches. */
+    private fitLabel(
+        text: string,
+        maxWidth: number,
+        glyphWidth: number
+    ): string | null {
+        const maxCharacters = Math.floor(maxWidth / glyphWidth);
+        if (maxCharacters >= text.length) return text;
+        if (maxCharacters <= ELLIPSIS.length) return null;
+        return `${text.slice(0, maxCharacters - ELLIPSIS.length)}${ELLIPSIS}`;
+    }
 }
