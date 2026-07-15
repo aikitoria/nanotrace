@@ -1,4 +1,4 @@
-#include "nanotrace/nanotrace_host.h"
+#include "nanotrace/trace_writer.h"
 #include <cstdio>
 #include <map>
 #include <unordered_map>
@@ -220,8 +220,7 @@ bool trace_writer::AppendToSession(TraceSession& session,
     uint64_t reference_anchor_ns, EventId parent_event,
     uint64_t uncertainty_ns,
     const std::vector<event_parent_interval>* parent_intervals,
-    uint32_t displayed_block_count,
-    bool parents_indexed_by_block)
+    uint32_t blocks_per_parent)
 {
     std::vector<parsed_event> events = parse_all_events();
 
@@ -256,9 +255,10 @@ bool trace_writer::AppendToSession(TraceSession& session,
             uint64_t event_end_ns;
             const event_parent_interval* parent = nullptr;
 
-            if (parents_indexed_by_block)
+            if (blocks_per_parent != 0)
             {
-                if (event.block_id >= parent_intervals->size()
+                size_t parent_index = event.block_id / blocks_per_parent;
+                if (parent_index >= parent_intervals->size()
                     || event.anchor_time < event.time_offset + event.duration)
                 {
 #ifndef NANOTRACE_NO_LOG
@@ -267,7 +267,7 @@ bool trace_writer::AppendToSession(TraceSession& session,
                     return false;
                 }
 
-                parent = &(*parent_intervals)[event.block_id];
+                parent = &(*parent_intervals)[parent_index];
                 uint64_t start_to_anchor =
                     event.anchor_time - event.time_offset;
                 uint64_t end_to_anchor = event.anchor_time
@@ -367,8 +367,8 @@ bool trace_writer::AppendToSession(TraceSession& session,
     for (size_t event_index = 0; event_index < events.size(); ++event_index)
     {
         const parsed_event& event = events[event_index];
-        uint32_t displayed_block_id = displayed_block_count == 0
-            ? event.block_id : event.block_id % displayed_block_count;
+        uint32_t displayed_block_id = blocks_per_parent == 0
+            ? event.block_id : event.block_id % blocks_per_parent;
         TrackId sm_track;
         const std::unordered_map<uint16_t, TrackId>::const_iterator sm =
             sm_tracks.find(event.sm_id);

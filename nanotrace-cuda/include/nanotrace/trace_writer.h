@@ -11,10 +11,10 @@
 #include <utility>
 #include <cuda_runtime.h>
 
-#include "nanotrace.cuh"
-#include "nanotrace_session.h"
+#include "device_trace.cuh"
+#include "session.h"
 
-// format_descriptor is now defined in nanotrace.cuh for NANOTRACE_DISABLED compatibility
+// format_descriptor is defined in device_trace.cuh for disabled builds too.
 
 namespace nanotrace {
 
@@ -371,8 +371,7 @@ public:
         EventId parent_event = INVALID_EVENT_ID,
         uint64_t uncertainty_ns = 0,
         const std::vector<event_parent_interval>* parent_intervals = nullptr,
-        uint32_t displayed_block_count = 0,
-        bool parents_indexed_by_block = false);
+        uint32_t blocks_per_parent = 0);
     void write(const char* filename, bool compress = true);
     const char* KernelName() const { return kernel_name.c_str(); }
 

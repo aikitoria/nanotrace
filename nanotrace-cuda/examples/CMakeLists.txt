@@ -1,25 +1,25 @@
 # Examples for nanotrace-cuda
 
 add_executable(simple_trace simple_trace.cu)
-target_link_libraries(simple_trace PRIVATE nanotrace_host)
+target_link_libraries(simple_trace PRIVATE nanotrace)
 
 add_executable(mixed_trace mixed_trace.cu)
-target_link_libraries(mixed_trace PRIVATE nanotrace_host)
+target_link_libraries(mixed_trace PRIVATE nanotrace)
 
 add_executable(unified_trace unified_trace.cu)
-target_link_libraries(unified_trace PRIVATE nanotrace_host)
+target_link_libraries(unified_trace PRIVATE nanotrace)
 
 add_executable(cpu_hierarchy_trace cpu_hierarchy_trace.cpp)
-target_link_libraries(cpu_hierarchy_trace PRIVATE nanotrace_host)
+target_link_libraries(cpu_hierarchy_trace PRIVATE nanotrace)
 
 add_executable(multistream_graph_trace multistream_graph_trace.cu)
-target_link_libraries(multistream_graph_trace PRIVATE nanotrace_host)
+target_link_libraries(multistream_graph_trace PRIVATE nanotrace)
 
 add_executable(grayscale_trace grayscale_trace.cu)
-target_link_libraries(grayscale_trace PRIVATE nanotrace_host)
+target_link_libraries(grayscale_trace PRIVATE nanotrace)
 
 add_executable(tma_bandwidth_bench_static tma_bandwidth_bench_static.cu)
-target_link_libraries(tma_bandwidth_bench_static PRIVATE nanotrace_host cuda)
+target_link_libraries(tma_bandwidth_bench_static PRIVATE nanotrace cuda)
 
 add_executable(tma_bandwidth_bench_atomic tma_bandwidth_bench_atomic.cu)
-target_link_libraries(tma_bandwidth_bench_atomic PRIVATE nanotrace_host cuda)
+target_link_libraries(tma_bandwidth_bench_atomic PRIVATE nanotrace cuda)

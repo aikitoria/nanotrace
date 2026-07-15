@@ -2,10 +2,11 @@
 
 #include <cuda_runtime.h>
 
-#include <nanotrace/nanotrace.cuh>
-#include <nanotrace/nanotrace_gpu.h>
-#include <nanotrace/nanotrace_host.h>
-#include <nanotrace/nanotrace_session.h>
+#include <nanotrace/cpu_thread_trace.h>
+#include <nanotrace/gpu_process_trace.h>
+#include <nanotrace/device_trace.cuh>
+#include <nanotrace/trace_writer.h>
+#include <nanotrace/session.h>
 
 NANOTRACE_DEFINE_TRACE_TYPE(UnifiedWork, "Work", "Kernel work", 0,
     nanotrace::lane_type::STATIC);
@@ -67,11 +68,13 @@ int main(int argc, char** argv)
 {
     const char* output_path = argc > 1
         ? argv[1] : "unified_trace.nanotrace";
-    nanotrace::GpuTrace gpu_trace{ "Unified CPU, HES, and kernel trace" };
-    if (!gpu_trace)
+    nanotrace::TraceSession session{
+        "Unified CPU, HES, and kernel trace" };
+    nanotrace::GpuProcessTrace gpu_process_trace{ session };
+    if (!gpu_process_trace)
     {
         std::fprintf(stderr, "GPU tracing initialization failed: %s\n",
-            gpu_trace.LastError().c_str());
+            gpu_process_trace.LastError().c_str());
         return 1;
     }
 
@@ -108,17 +111,16 @@ int main(int argc, char** argv)
     UnifiedKernel<<<BLOCK_COUNT, 32>>>(
         device_trace.get_handle(), device_output, false);
     if (!CheckCuda(cudaDeviceSynchronize(), "warm-up synchronize")
-        || !gpu_trace.Begin())
+        || !gpu_process_trace.Begin())
     {
         std::fprintf(stderr, "GPU capture begin failed: %s\n",
-            gpu_trace.LastError().c_str());
+            gpu_process_trace.LastError().c_str());
         cudaFree(device_output);
         return 1;
     }
 
     device_trace.reset();
-    nanotrace::CpuThreadContext cpu{
-        gpu_trace.Session(), "Main thread", 16 };
+    nanotrace::CpuThreadTrace cpu{ session, "Main thread", 16 };
     {
         nanotrace::CpuScope launch_scope{ cpu, "Launch preprocessing" };
         StageKernel<<<BLOCK_COUNT, 32>>>(device_output, 1);
@@ -149,11 +151,24 @@ int main(int argc, char** argv)
     kernel_trace.set_block_type<UnifiedBlock>();
     kernel_trace.add_tensor(device_trace);
 
-    cpu.Flush();
-    if (!gpu_trace.Write(output_path, kernel_trace))
+    if (!cpu.Flush())
+    {
+        std::fprintf(stderr, "CPU trace flush failed: %s\n",
+            session.LastError().c_str());
+        cudaFree(device_output);
+        return 1;
+    }
+    if (!gpu_process_trace.Finish(kernel_trace))
+    {
+        std::fprintf(stderr, "GPU trace finalization failed: %s\n",
+            gpu_process_trace.LastError().c_str());
+        cudaFree(device_output);
+        return 1;
+    }
+    if (!session.Write(output_path))
     {
         std::fprintf(stderr, "Trace write failed: %s\n",
-            gpu_trace.LastError().c_str());
+            session.LastError().c_str());
         cudaFree(device_output);
         return 1;
     }

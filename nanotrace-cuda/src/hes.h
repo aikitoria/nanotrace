@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "nanotrace_session.h"
+#include "nanotrace/session.h"
 
 namespace nanotrace
 {

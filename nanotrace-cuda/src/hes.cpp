@@ -10,7 +10,7 @@
 
 #include <cupti.h>
 
-#include "nanotrace/nanotrace_hes.h"
+#include "hes.h"
 
 namespace nanotrace
 {
@@ -492,7 +492,8 @@ namespace nanotrace
         const std::string& LastError() const { return _last_error; }
         const std::vector<HesKernelEvent>& KernelEvents() const
         {
-            return _kernel_events;
+            return _completed_kernel_events
+                ? *_completed_kernel_events : _kernel_events;
         }
 
     private:
@@ -741,36 +742,46 @@ namespace nanotrace
 
             if (!_graph_events.empty())
             {
+                std::shared_ptr<std::vector<GraphExecutionEvent>> events =
+                    std::make_shared<std::vector<GraphExecutionEvent>>(
+                        std::move(_graph_events));
+                std::shared_ptr<const void> owner = events;
                 EventId first_graph_event_id =
-                    _session->AddBufferedEventSource(_graph_events.data(),
-                        _graph_events.size(), ReadGraphExecutionEvent);
+                    _session->AddBufferedEventSource(std::move(owner),
+                        events->data(), events->size(),
+                        ReadGraphExecutionEvent);
                 if (first_graph_event_id == INVALID_EVENT_ID)
                 {
                     SetError(_session->LastError().c_str());
                     return false;
                 }
 
-                for (size_t i = 0; i < _graph_events.size(); ++i)
+                for (size_t i = 0; i < events->size(); ++i)
                 {
-                    _graph_events[i].event_id = first_graph_event_id + i;
+                    (*events)[i].event_id = first_graph_event_id + i;
                 }
             }
 
             if (!_kernel_events.empty())
             {
+                std::shared_ptr<std::vector<HesKernelEvent>> events =
+                    std::make_shared<std::vector<HesKernelEvent>>(
+                        std::move(_kernel_events));
+                std::shared_ptr<const void> owner = events;
                 EventId first_kernel_event_id =
-                    _session->AddBufferedEventSource(_kernel_events.data(),
-                        _kernel_events.size(), ReadHesEvent);
+                    _session->AddBufferedEventSource(std::move(owner),
+                        events->data(), events->size(), ReadHesEvent);
                 if (first_kernel_event_id == INVALID_EVENT_ID)
                 {
                     SetError(_session->LastError().c_str());
                     return false;
                 }
 
-                for (size_t i = 0; i < _kernel_events.size(); ++i)
+                for (size_t i = 0; i < events->size(); ++i)
                 {
-                    _kernel_events[i].event_id = first_kernel_event_id + i;
+                    (*events)[i].event_id = first_kernel_event_id + i;
                 }
+                _completed_kernel_events = std::move(events);
             }
 
             return true;
@@ -854,6 +865,8 @@ namespace nanotrace
         std::mutex _event_mutex;
         std::vector<HesKernelEvent> _raw_kernel_events;
         std::vector<HesKernelEvent> _kernel_events;
+        std::shared_ptr<std::vector<HesKernelEvent>>
+            _completed_kernel_events;
         std::vector<GraphExecutionEvent> _graph_events;
         KernelNameMap _kernel_names;
         static inline std::atomic<Implementation*> _active{ nullptr };

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -126,16 +127,6 @@ namespace nanotrace
         uint32_t color = 0;
     };
 
-    struct BufferedCpuEvent
-    {
-        const char* name = nullptr;
-        uint64_t timestamp = 0;
-        uint64_t duration = 0;
-        uint64_t correlation_id = 0;
-        uint32_t color = 0;
-        EventKind kind = EventKind::Slice;
-    };
-
     struct BufferedEventArgument
     {
         const char* name = nullptr;
@@ -187,8 +178,8 @@ namespace nanotrace
         void AddUnsignedArgument(EventId event_id, const char* name, uint64_t value);
         void AddSignedArgument(EventId event_id, const char* name, int64_t value);
         void AddStringArgument(EventId event_id, const char* name, const char* value);
-        EventId AddBufferedEventSource(const void* source, size_t event_count,
-            BufferedEventReader reader,
+        EventId AddBufferedEventSource(std::shared_ptr<const void> owner,
+            const void* source, size_t event_count, BufferedEventReader reader,
             TrackId fixed_track_id = INVALID_TRACK_ID);
 
         bool Write(const char* filename);
@@ -206,11 +197,17 @@ namespace nanotrace
 
         struct BufferedEventSourceDescriptor
         {
+            std::shared_ptr<const void> owner;
             const void* source;
             size_t event_count;
+            size_t argument_count;
             BufferedEventReader reader;
             TrackId fixed_track_id;
             EventId first_event_id;
+            std::vector<StringId> event_name_ids;
+            std::vector<StringId> argument_name_ids;
+            std::vector<ArgumentKind> argument_kinds;
+            std::vector<uint64_t> argument_values;
         };
 
         std::mutex _mutex;
@@ -231,71 +228,4 @@ namespace nanotrace
         EventId _next_event_id = 1;
     };
 
-    struct CpuEventToken
-    {
-        uint64_t timestamp = 0;
-    };
-
-    class CpuThreadContext
-    {
-    public:
-        CpuThreadContext(TraceSession& session, const char* thread_name,
-            size_t event_capacity, TrackId parent_id = INVALID_TRACK_ID,
-            int32_t sort_order = 0);
-        ~CpuThreadContext();
-
-        CpuThreadContext(const CpuThreadContext&) = delete;
-        CpuThreadContext& operator=(const CpuThreadContext&) = delete;
-
-        CpuEventToken Begin() const;
-        void End(CpuEventToken token, const char* name,
-            uint64_t correlation_id = 0, uint32_t color = 0);
-        void Bookmark(const char* name, uint64_t correlation_id = 0,
-            uint32_t color = 0);
-        void Flush();
-
-        TrackId Track() const { return _track_id; }
-        size_t DroppedEventCount() const { return _dropped_event_count; }
-
-    private:
-        void AddBufferedEvent(const char* name, EventKind kind,
-            uint64_t timestamp, uint64_t duration,
-            uint64_t correlation_id, uint32_t color);
-
-        TraceSession* _session;
-        TrackId _track_id;
-        std::vector<BufferedCpuEvent> _events;
-        size_t _event_count = 0;
-        size_t _dropped_event_count = 0;
-        bool _events_registered = false;
-    };
-
-    class CpuScope
-    {
-    public:
-        CpuScope(CpuThreadContext& context, const char* name,
-            uint64_t correlation_id = 0, uint32_t color = 0)
-            : _context{ &context }
-            , _name{ name }
-            , _correlation_id{ correlation_id }
-            , _color{ color }
-            , _token{ context.Begin() }
-        {
-        }
-
-        ~CpuScope()
-        {
-            _context->End(_token, _name, _correlation_id, _color);
-        }
-
-        CpuScope(const CpuScope&) = delete;
-        CpuScope& operator=(const CpuScope&) = delete;
-
-    private:
-        CpuThreadContext* _context;
-        const char* _name;
-        uint64_t _correlation_id;
-        uint32_t _color;
-        CpuEventToken _token;
-    };
 }

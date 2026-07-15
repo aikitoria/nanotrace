@@ -27,34 +27,34 @@ cmake --build build
 
 ## Unified tracing
 
-Construct `GpuTrace` before any CUDA context exists. It initializes HES
-immediately and hides CUPTI setup, priming, clock snapshots, kernel matching,
-and attachment:
+Create the session first, then attach `GpuProcessTrace` before any CUDA context exists.
+It initializes HES immediately and hides CUPTI setup, priming, clock snapshots,
+kernel matching, and attachment:
 
 ~~~cpp
-nanotrace::GpuTrace gpu_trace{ "Inference step" };
-if (!gpu_trace)
+nanotrace::TraceSession session{ "Inference step" };
+nanotrace::GpuProcessTrace gpu_process_trace{ session };
+if (!gpu_process_trace)
 {
-    // Handle gpu_trace.LastError().
+    // Handle gpu_process_trace.LastError().
 }
 
 // CUDA contexts may now be created normally.
 cudaSetDevice(0);
 
-gpu_trace.Begin();
+gpu_process_trace.Begin();
 InstrumentedKernel<<<grid, block>>>(device_trace.get_handle());
 
 nanotrace::trace_writer kernel_trace{ "InstrumentedKernel" };
 kernel_trace.add_tensor(device_trace);
-gpu_trace.Write("trace.nanotrace", kernel_trace);
+gpu_process_trace.Finish(kernel_trace);
+session.Write("trace.nanotrace");
 ~~~
 
 CPU events use a fixed-capacity per-thread buffer:
 
 ~~~cpp
-nanotrace::TraceSession& session = gpu_trace.Session();
-nanotrace::CpuThreadContext cpu{
-    session, "Rank 0", 1024 };
+nanotrace::CpuThreadTrace cpu{ session, "Rank 0" };
 {
     nanotrace::CpuScope scope{ cpu, "Execute step" };
     // Launch work.
@@ -69,8 +69,8 @@ zones on the source thread.
 Parent CPU tracks explicitly when the application has a hierarchy:
 
 ~~~cpp
-nanotrace::CpuThreadContext rank{ session, "Rank 0", 1024 };
-nanotrace::CpuThreadContext worker{
+nanotrace::CpuThreadTrace rank{ session, "Rank 0" };
+nanotrace::CpuThreadTrace worker{
     session, "Worker 0", 1024, rank.Track(), 0 };
 
 // A parent can also be assigned after both tracks exist.
@@ -80,8 +80,36 @@ session.SetTrackParent(worker.Track(), rank.Track());
 Parent IDs are serialized in the trace. The viewer never infers application
 relationships from track names.
 
-`GpuTrace::Write()` places explicit intra-kernel events beneath the matching
-hardware kernel event. See `examples/unified_trace.cu` for the full flow.
+`GpuProcessTrace::Finish(kernel_trace)` stops hardware capture and places the explicit
+intra-kernel events beneath the matching hardware kernel event. Use `Finish()`
+followed by `AddKernelTrace()` when attaching more than one instrumented kernel.
+`TraceSession::Write()` serializes all attached CPU and GPU sources. Flushing
+moves each recorder's event buffer into session ownership without copying its
+event records, so finished recorders can be destroyed before the session is
+written. See `examples/unified_trace.cu` for the full flow.
+
+One `GpuProcessTrace` captures every CUDA device and context in the process. Select the
+hardware events for a multi-GPU or repeatedly launched kernel when attaching
+its device trace:
+
+~~~cpp
+gpu_process_trace.Finish();
+
+nanotrace::GpuKernelTraceOptions options{
+    .kernel_name_substring = "P2pAllReduceKernel",
+    .device_id = rank_device,
+    .expected_invocation_count = replay_count,
+    .blocks_per_invocation = blocks_per_launch,
+};
+gpu_process_trace.AddKernelTrace(kernel_trace, options);
+session.Write("trace.nanotrace");
+~~~
+
+`kernel_name_substring` defaults to the writer's name. A device or context
+selector is only required when otherwise matching kernels from more than one
+CUDA context. For repeated launches, blocks in the trace buffer are ordered by
+invocation; Nanotrace builds the hardware-event parent intervals and restores
+the block ID within each launch.
 
 ## Device instrumentation
 

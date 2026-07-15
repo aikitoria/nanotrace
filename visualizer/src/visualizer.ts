@@ -53,7 +53,7 @@ import {
 // Git commit hash injected at build time by Vite
 declare const __GIT_HASH__: string;
 
-const VERSION = `0.1-${__GIT_HASH__}`;
+const VERSION = `0.2-${__GIT_HASH__}`;
 const WHEEL_GESTURE_TIMEOUT_MS = 120;
 const HORIZONTAL_WHEEL_DOMINANCE = 1.5;
 const WHEEL_ZOOM_REFERENCE_PIXELS = 100;
@@ -564,6 +564,7 @@ export class ZoneVisualizer {
     async loadSampleFile(sampleName: string): Promise<void> {
         const sampleFiles: { [key: string]: string } = {
             'unified': 'unified_trace.nanotrace',
+            'mina-cuda-graph': 'mina_cuda_graph.nanotrace',
             'multistream-graph': 'multistream_graph.nanotrace',
             'cpu-hierarchy': 'cpu_hierarchy.nanotrace',
             'tma-static': 'tma_bandwidth_static_sm120a.nanotrace',

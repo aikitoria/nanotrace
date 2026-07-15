@@ -1,6 +1,6 @@
 #include <cstdio>
 
-#include <nanotrace/nanotrace_session.h>
+#include <nanotrace/session.h>
 
 int main(int argc, char** argv)
 {

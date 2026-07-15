@@ -21,10 +21,11 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Library sources
 set(NANOTRACE_SOURCES
-    src/nanotrace_gpu.cu
-    src/nanotrace_hes.cpp
-    src/nanotrace_host.cpp
-    src/nanotrace_session.cpp
+    src/cpu_thread_trace.cpp
+    src/gpu_process_trace.cu
+    src/hes.cpp
+    src/trace_writer.cpp
+    src/session.cpp
 )
 
 # Add miniz if enabled
@@ -37,24 +38,24 @@ if(NANOTRACE_WITH_MINIZ)
 endif()
 
 # Library
-add_library(nanotrace_host STATIC
+add_library(nanotrace STATIC
     ${NANOTRACE_SOURCES}
 )
 
-target_include_directories(nanotrace_host PUBLIC
+target_include_directories(nanotrace PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CUDAToolkit_INCLUDE_DIRS}
 )
 
 # Add ext directory for miniz
 if(NANOTRACE_WITH_MINIZ)
-    target_include_directories(nanotrace_host PRIVATE
+    target_include_directories(nanotrace PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/ext
     )
-    target_compile_definitions(nanotrace_host PRIVATE NANOTRACE_WITH_MINIZ)
+    target_compile_definitions(nanotrace PRIVATE NANOTRACE_WITH_MINIZ)
 endif()
 
-target_link_libraries(nanotrace_host PUBLIC
+target_link_libraries(nanotrace PUBLIC
     CUDA::cuda_driver
     CUDA::cudart
 )
@@ -64,9 +65,9 @@ if(NANOTRACE_CUPTI_LIBRARY)
     set_target_properties(nanotrace_cupti PROPERTIES
         IMPORTED_LOCATION "${NANOTRACE_CUPTI_LIBRARY}"
     )
-    target_link_libraries(nanotrace_host PUBLIC nanotrace_cupti)
+    target_link_libraries(nanotrace PUBLIC nanotrace_cupti)
 else()
-    target_link_libraries(nanotrace_host PUBLIC CUDA::cupti)
+    target_link_libraries(nanotrace PUBLIC CUDA::cupti)
 endif()
 
 # Examples (optional)
@@ -77,4 +78,4 @@ endif()
 
 # Install
 install(DIRECTORY include/nanotrace DESTINATION include)
-install(TARGETS nanotrace_host DESTINATION lib)
+install(TARGETS nanotrace DESTINATION lib)

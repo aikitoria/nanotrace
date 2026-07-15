@@ -1,5 +1,5 @@
-#include <nanotrace/nanotrace.cuh>
-#include <nanotrace/nanotrace_host.h>
+#include <nanotrace/device_trace.cuh>
+#include <nanotrace/trace_writer.h>
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>

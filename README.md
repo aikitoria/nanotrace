@@ -36,7 +36,7 @@ collapsed until you need them.
 
 ## Dense CPU tracing without a profiler in the hot path
 
-Each CPU thread records into its own fixed-capacity `CpuThreadContext`. Opening
+Each CPU thread records into its own fixed-capacity `CpuThreadTrace`. Opening
 and closing a zone reads the monotonic clock and appends a small record to that
 thread's preallocated buffer. It does not allocate memory, acquire a global
 trace lock, serialize data, or call into an attached profiling tool. Threads
@@ -87,14 +87,14 @@ start screen.
 
 ## Add Nanotrace to an application
 
-Create `nanotrace::GpuTrace` before the application initializes CUDA, then use
-CPU scopes and device trace handles around the work you want to inspect. The
-library handles timestamp correlation, kernel matching, and trace
-serialization.
+Create a `nanotrace::TraceSession`, attach `nanotrace::GpuProcessTrace` before the
+application initializes CUDA, then add CPU traces and device trace handles
+around the work you want to inspect. The library handles timestamp correlation,
+kernel matching, and trace serialization.
 
 The [CUDA and CPU API guide](nanotrace-cuda/README.md) covers:
 
-- CPU thread contexts, nested scopes, parent tracks, and bookmarks;
+- CPU traces, nested scopes, parent tracks, and bookmarks;
 - unified GPU capture and writing `.nanotrace` files;
 - static and parameterized device events;
 - compile-time instrumentation controls.
@@ -102,10 +102,16 @@ The [CUDA and CPU API guide](nanotrace-cuda/README.md) covers:
 The complete working setup is also available in
 [`unified_trace.cu`](nanotrace-cuda/examples/unified_trace.cu).
 
+One process-wide `GpuProcessTrace` captures every CUDA device and context. Explicit
+device traces can select a device and context and can map blocks from repeated
+kernel invocations back to their individual hardware events.
+
 ## Included examples
 
 - `unified_trace`: CPU launch scopes, three hardware-timed CUDA kernels, and
   expandable intra-kernel events;
+- `mina_cuda_graph`: an eight-GPU hybrid CPU/GPU MoE graph with expandable P2P
+  collective phases;
 - `multistream_graph_trace`: a captured CUDA graph executing across two
   driver-selected streams;
 - `cpu_hierarchy_trace`: application-defined parent and worker CPU tracks;
@@ -130,9 +136,11 @@ npm run validate -- /path/to/trace.nanotrace
 
 ## Current limitations
 
-- CUPTI HES capture must be initialized before CUDA creates a context. Construct
-  `nanotrace::GpuTrace` early and let the application initialize CUDA normally
-  afterward.
+- CUPTI HES capture must be initialized before CUDA creates a context. Create
+  the session and attach `nanotrace::GpuProcessTrace` early, then let the application
+  initialize CUDA normally.
+- Only one process-wide `GpuProcessTrace` can be active. It captures all CUDA devices,
+  contexts, and streams rather than requiring one collector per context.
 - Blackwell HES does not support MPS, MIG, vGPU, WSL, or confidential-compute
   configurations.
 - A single intra-kernel lane capture must finish within one 32-bit device-timer

@@ -276,8 +276,9 @@ not silently truncated.
 
 ## GPU capture lifecycle
 
-`GpuTrace` must be constructed before CUDA driver initialization and before any
-context exists. Internally, nanotrace follows this sequence:
+Create `TraceSession` first, then attach `GpuProcessTrace` before CUDA driver
+initialization and before any context exists. Internally, nanotrace follows this
+sequence:
 
 1. Subscribe to CUPTI and register activity buffers.
 2. Enable concurrent-kernel activity.
@@ -285,13 +286,16 @@ context exists. Internally, nanotrace follows this sequence:
 4. Call `cuInit(0)` without creating a context.
 5. Verify HES became active.
 6. Let the application create CUDA contexts and complete setup or warm-up.
-7. `GpuTrace::Begin()` starts capture, launches and synchronizes an internal
+7. `GpuProcessTrace::Begin()` starts capture, launches and synchronizes an internal
    priming kernel, discards priming records, and captures a clock snapshot.
 8. Run the instrumented workload and copy its lane buffers into a
    `trace_writer`.
-9. `GpuTrace::Write()` stops and flushes HES, matches the requested kernel,
-   attaches the intra-kernel events below its HES event, and serializes the
-   unified session.
+9. `GpuProcessTrace::Finish(trace_writer&)` stops and flushes HES, matches the
+   instrumented kernel, and attaches its intra-kernel events below the HES
+   event. Use `Finish()` followed by `AddKernelTrace()` for multiple writers or
+   `GpuKernelTraceOptions` to select a device, context, and repeated launches.
+10. `TraceSession::Write()` serializes all attached CPU and GPU sources.
 
-The collector only enables concurrent-kernel activity. A forced CUPTI flush is
-sufficient; `cudaDeviceReset()` is not required.
+The single process-wide collector receives activity from every CUDA device and
+context. The collector only enables concurrent-kernel activity. A forced CUPTI
+flush is sufficient; `cudaDeviceReset()` is not required.

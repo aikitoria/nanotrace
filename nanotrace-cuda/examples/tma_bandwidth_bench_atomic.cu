@@ -5,9 +5,9 @@
 #include <cooperative_groups.h>
 #include <stdio.h>
 #include <assert.h>
-#include <nanotrace/nanotrace.cuh>
-#include <nanotrace/nanotrace_gpu.h>
-#include <nanotrace/nanotrace_host.h>
+#include <nanotrace/device_trace.cuh>
+#include <nanotrace/gpu_process_trace.h>
+#include <nanotrace/trace_writer.h>
 
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
@@ -239,9 +239,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    nanotrace::GpuTrace gpu_trace("TMA bandwidth atomic schedule");
-    if (!gpu_trace) {
-        fprintf(stderr, "GPU tracing initialization failed: %s\n", gpu_trace.LastError().c_str());
+    nanotrace::TraceSession session("TMA bandwidth atomic schedule");
+    nanotrace::GpuProcessTrace gpu_process_trace(session);
+    if (!gpu_process_trace) {
+        fprintf(stderr, "GPU tracing initialization failed: %s\n", gpu_process_trace.LastError().c_str());
         return 1;
     }
 
@@ -394,8 +395,8 @@ int main(int argc, char** argv) {
     printf("Tiles processed: %d\n", total_tiles);
     printf("Tiles/ms: %.0f\n", total_tiles / elapsed_ms);
 
-    if (!gpu_trace.Begin()) {
-        fprintf(stderr, "GPU trace capture failed: %s\n", gpu_trace.LastError().c_str());
+    if (!gpu_process_trace.Begin()) {
+        fprintf(stderr, "GPU trace capture failed: %s\n", gpu_process_trace.LastError().c_str());
         return 1;
     }
 
@@ -415,8 +416,12 @@ int main(int argc, char** argv) {
     nanotrace::trace_writer writer("tma_bandwidth_kernel");
     writer.set_block_type<TMABlock>();
     writer.add_tensor(trace_tensor);
-    if (!gpu_trace.Write(output_path, writer)) {
-        fprintf(stderr, "Trace write failed: %s\n", gpu_trace.LastError().c_str());
+    if (!gpu_process_trace.Finish(writer)) {
+        fprintf(stderr, "GPU trace finalization failed: %s\n", gpu_process_trace.LastError().c_str());
+        return 1;
+    }
+    if (!session.Write(output_path)) {
+        fprintf(stderr, "Trace write failed: %s\n", session.LastError().c_str());
         return 1;
     }
     printf("Trace written to %s\n", output_path);

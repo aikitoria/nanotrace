@@ -9,11 +9,14 @@ renders those sources on a shared timeline.
 ~~~text
 nanotrace-cuda/
   include/nanotrace/
-    nanotrace.cuh          Device instrumentation
-    nanotrace_host.h       CUDA lane builders and session attachment
-    nanotrace_hes.h        CUPTI HES collector
-    nanotrace_session.h    CPU events, tracks, clocks, and v4 writer
-  src/                     Host implementations
+    cpu_thread_trace.h     Per-thread CPU recorder and scopes
+    device_trace.cuh       CUDA device instrumentation
+    gpu_process_trace.h    Process-wide GPU capture
+    session.h              Tracks, clocks, events, and v4 writer
+    trace_writer.h         Device-buffer parsing and session attachment
+  src/
+    hes.h                  Internal CUPTI HES collector
+    *.cpp, *.cu            Library implementations
   examples/                Standalone trace producers and benchmarks
 visualizer/
   src/                     WebGPU viewer and v4 parser
@@ -97,17 +100,19 @@ rows and committed headers remain 16-byte aligned.
 
 ## GPU capture lifecycle
 
-Construct `GpuTrace` before any CUDA runtime or driver operation creates a
-context. After setup and warm-up, call `Begin()`, run the instrumented workload,
-copy the device tensor into a `trace_writer`, and call `Write()`. `GpuTrace`
-owns HES initialization, priming, clock snapshots, kernel matching, attachment,
-shutdown, and unified serialization. Examples should not reproduce that
-low-level sequence.
+Create `TraceSession` first, then attach `GpuProcessTrace` before any CUDA runtime or
+driver operation creates a context. After setup and warm-up, call `Begin()`, run
+the instrumented workload, copy the device tensor into a `trace_writer`, call
+`Finish()`, then write the session. `GpuProcessTrace` owns HES initialization, priming,
+clock snapshots, kernel matching, attachment, and shutdown. It is a single
+process-wide collector for every CUDA device and context. Multi-device or
+repeated traces use `GpuKernelTraceOptions`; applications should not inspect
+raw `HesKernelEvent` records or reproduce the low-level sequence.
 
 ## CPU and track hierarchy
 
-`CpuThreadContext` uses a fixed-capacity per-thread buffer and flushes it into
-the session without copying events into a global vector. Give related tracks
+`CpuThreadTrace` uses a fixed-capacity per-thread buffer and moves it into session
+ownership on flush. Give related tracks
 serialized parent IDs with the constructor or `TraceSession::SetTrackParent()`.
 The viewer treats this hierarchy as application-defined; it must not infer
 parents from track names.
@@ -117,7 +122,7 @@ Event parent IDs are reserved for real event ownership and child expansion.
 
 ## Device instrumentation
 
-Use compile-time trace, block, and track definitions from `nanotrace.cuh`.
+Use compile-time trace, block, and track definitions from `device_trace.cuh`.
 Only controlling threads should enable a lane. Every enabled lane must call
 `finish_lane()` after its final event.
 

@@ -8,8 +8,9 @@
 #include <limits>
 #include <time.h>
 #include <unordered_map>
+#include <utility>
 
-#include "nanotrace/nanotrace_session.h"
+#include "nanotrace/session.h"
 
 #if defined(NANOTRACE_WITH_MINIZ)
 #include "miniz.h"
@@ -108,26 +109,6 @@ namespace nanotrace
             return (bits << 1) ^ static_cast<uint64_t>(value >> 63);
         }
 
-        bool ReadCpuEvent(const void* source, size_t event_index,
-            BufferedEventWithArguments* output, BufferedEventArgument*, size_t)
-        {
-            const BufferedCpuEvent* events =
-                static_cast<const BufferedCpuEvent*>(source);
-            const BufferedCpuEvent& event = events[event_index];
-            output->event = BufferedTraceEvent{
-                event.name,
-                INVALID_TRACK_ID,
-                event.kind,
-                event.timestamp,
-                event.duration,
-                event.correlation_id,
-                INVALID_EVENT_ID,
-                event.color,
-            };
-            output->arguments = nullptr;
-            output->argument_count = 0;
-            return true;
-        }
     }
 
     TraceSession::TraceSession(const char* name)
@@ -355,13 +336,15 @@ namespace nanotrace
         event->argument_count++;
     }
 
-    EventId TraceSession::AddBufferedEventSource(const void* source,
+    EventId TraceSession::AddBufferedEventSource(
+        std::shared_ptr<const void> owner, const void* source,
         size_t event_count, BufferedEventReader reader,
         TrackId fixed_track_id)
     {
         std::lock_guard<std::mutex> lock{ _mutex };
 
-        if ((!source && event_count != 0) || !reader)
+        if ((!owner && event_count != 0)
+            || (!source && event_count != 0) || !reader)
         {
             SetError("Buffered event source is invalid");
             return INVALID_EVENT_ID;
@@ -381,9 +364,85 @@ namespace nanotrace
             return INVALID_EVENT_ID;
         }
 
+        std::array<BufferedEventArgument,
+            BUFFERED_EVENT_ARGUMENT_CAPACITY> argument_storage;
+        std::unordered_map<const char*, StringId> string_ids;
+        string_ids.reserve(256);
+        size_t total_argument_count = 0;
+        std::vector<StringId> event_name_ids;
+        std::vector<StringId> argument_name_ids;
+        std::vector<ArgumentKind> argument_kinds;
+        std::vector<uint64_t> argument_values;
+        event_name_ids.reserve(event_count);
+
+        const auto intern_source_string = [this, &string_ids](
+            const char* value)
+        {
+            const char* valid_value = value ? value : "";
+            const std::unordered_map<const char*, StringId>::const_iterator
+                existing = string_ids.find(valid_value);
+            if (existing != string_ids.end())
+            {
+                return existing->second;
+            }
+
+            StringId id = Intern(valid_value);
+            string_ids.emplace(valid_value, id);
+            return id;
+        };
+
+        for (size_t event_index = 0;
+            event_index < event_count; ++event_index)
+        {
+            BufferedEventWithArguments event;
+            if (!reader(source, event_index, &event,
+                argument_storage.data(), argument_storage.size()))
+            {
+                SetError("Failed to read buffered event source");
+                return INVALID_EVENT_ID;
+            }
+
+            if (fixed_track_id != INVALID_TRACK_ID)
+            {
+                event.event.track_id = fixed_track_id;
+            }
+            if (event.event.track_id == INVALID_TRACK_ID
+                || event.event.track_id > _tracks.size())
+            {
+                SetError("Buffered event references an unknown track");
+                return INVALID_EVENT_ID;
+            }
+            if (event.argument_count > argument_storage.size()
+                || (!event.arguments && event.argument_count != 0))
+            {
+                SetError("Buffered event arguments are invalid");
+                return INVALID_EVENT_ID;
+            }
+
+            event_name_ids.push_back(
+                intern_source_string(event.event.name));
+            total_argument_count += event.argument_count;
+            for (size_t argument_index = 0;
+                argument_index < event.argument_count; ++argument_index)
+            {
+                const BufferedEventArgument& argument =
+                    event.arguments[argument_index];
+                argument_name_ids.push_back(
+                    intern_source_string(argument.name));
+                argument_kinds.push_back(argument.kind);
+                argument_values.push_back(
+                    argument.kind == ArgumentKind::String
+                        ? intern_source_string(argument.string_value)
+                        : argument.value);
+            }
+        }
+
         EventId first_event_id = _next_event_id;
         _event_sources.push_back(BufferedEventSourceDescriptor{
-            source, event_count, reader, fixed_track_id, first_event_id,
+            std::move(owner), source, event_count, total_argument_count,
+            reader, fixed_track_id, first_event_id,
+            std::move(event_name_ids), std::move(argument_name_ids),
+            std::move(argument_kinds), std::move(argument_values),
         });
         _next_event_id += event_count;
         return first_event_id;
@@ -416,75 +475,10 @@ namespace nanotrace
         uint64_t total_argument_count = _arguments.size();
         std::array<BufferedEventArgument,
             BUFFERED_EVENT_ARGUMENT_CAPACITY> argument_storage;
-        std::unordered_map<const char*, StringId> source_string_ids;
-        source_string_ids.reserve(256);
-
-        const auto intern_source_string = [&](const char* value)
-        {
-            const char* valid_value = value ? value : "";
-            const std::unordered_map<const char*, StringId>::const_iterator
-                existing = source_string_ids.find(valid_value);
-
-            if (existing != source_string_ids.end())
-            {
-                return existing->second;
-            }
-
-            StringId id = Intern(valid_value);
-            source_string_ids.emplace(valid_value, id);
-            return id;
-        };
-
         for (const BufferedEventSourceDescriptor& source : _event_sources)
         {
             total_event_count += source.event_count;
-
-            for (size_t i = 0; i < source.event_count; ++i)
-            {
-                BufferedEventWithArguments event;
-
-                if (!source.reader(source.source, i, &event,
-                    argument_storage.data(), argument_storage.size()))
-                {
-                    SetError("Failed to read buffered event source");
-                    return false;
-                }
-
-                if (source.fixed_track_id != INVALID_TRACK_ID)
-                {
-                    event.event.track_id = source.fixed_track_id;
-                }
-
-                if (event.event.track_id == INVALID_TRACK_ID
-                    || event.event.track_id > _tracks.size())
-                {
-                    SetError("Buffered event references an unknown track");
-                    return false;
-                }
-
-                if (event.argument_count > argument_storage.size()
-                    || (!event.arguments && event.argument_count != 0))
-                {
-                    SetError("Buffered event arguments are invalid");
-                    return false;
-                }
-
-                intern_source_string(event.event.name);
-                total_argument_count += event.argument_count;
-
-                for (size_t argument_index = 0;
-                    argument_index < event.argument_count; ++argument_index)
-                {
-                    const BufferedEventArgument& argument =
-                        event.arguments[argument_index];
-                    intern_source_string(argument.name);
-
-                    if (argument.kind == ArgumentKind::String)
-                    {
-                        intern_source_string(argument.string_value);
-                    }
-                }
-            }
+            total_argument_count += source.argument_count;
         }
 
         BinaryWriter body;
@@ -738,6 +732,8 @@ namespace nanotrace
             const BufferedEventSourceDescriptor& source =
                 _event_sources[source_index++];
 
+            size_t source_argument_index = 0;
+
             for (size_t i = 0; i < source.event_count; ++i)
             {
                 BufferedEventWithArguments event;
@@ -759,21 +755,27 @@ namespace nanotrace
                 for (size_t argument_index = 0;
                     argument_index < event.argument_count; ++argument_index)
                 {
-                    const BufferedEventArgument& argument =
-                        event.arguments[argument_index];
-                    uint64_t value = argument.kind == ArgumentKind::String
-                        ? intern_source_string(argument.string_value)
-                        : argument.value;
-                    StringId name = intern_source_string(argument.name);
+                    if (source_argument_index
+                        >= source.argument_name_ids.size())
+                    {
+                        SetError("Buffered event arguments changed after flush");
+                        return false;
+                    }
+                    StringId name = source.argument_name_ids[
+                        source_argument_index];
+                    ArgumentKind kind = source.argument_kinds[
+                        source_argument_index];
+                    uint64_t value = source.argument_values[
+                        source_argument_index++];
                     arguments.VarU64(name);
-                    arguments.U8(static_cast<uint8_t>(argument.kind));
+                    arguments.U8(static_cast<uint8_t>(kind));
 
-                    if (argument.kind == ArgumentKind::Signed)
+                    if (kind == ArgumentKind::Signed)
                     {
                         arguments.VarU64(ZigZagEncode(
                             std::bit_cast<int64_t>(value)));
                     }
-                    else if (argument.kind == ArgumentKind::Floating)
+                    else if (kind == ArgumentKind::Floating)
                     {
                         arguments.U64(value);
                     }
@@ -786,10 +788,14 @@ namespace nanotrace
                 }
 
                 const BufferedTraceEvent& buffered = event.event;
+                if (i >= source.event_name_ids.size())
+                {
+                    SetError("Buffered event source changed after flush");
+                    return false;
+                }
 
                 if (!encode_event(buffered.track_id, buffered.timestamp,
-                    buffered.duration, intern_source_string(buffered.name),
-                    buffered.kind,
+                    buffered.duration, source.event_name_ids[i], buffered.kind,
                     buffered.correlation_id, buffered.parent_id,
                     buffered.color, first_argument, event.argument_count))
                 {
@@ -873,70 +879,4 @@ namespace nanotrace
             + static_cast<uint64_t>(timestamp.tv_nsec);
     }
 
-    CpuThreadContext::CpuThreadContext(TraceSession& session,
-        const char* thread_name, size_t event_capacity, TrackId parent_id,
-        int32_t sort_order)
-        : _session{ &session }
-        , _track_id{ session.AddTrack(thread_name, TrackKind::CpuThread,
-            session.ReferenceClock(), parent_id, sort_order) }
-        , _events(event_capacity)
-    {
-    }
-
-    CpuThreadContext::~CpuThreadContext()
-    {
-        Flush();
-    }
-
-    CpuEventToken CpuThreadContext::Begin() const
-    {
-        return CpuEventToken{ TraceSession::MonotonicRawNowNs() };
-    }
-
-    void CpuThreadContext::AddBufferedEvent(const char* name, EventKind kind,
-        uint64_t timestamp, uint64_t duration, uint64_t correlation_id,
-        uint32_t color)
-    {
-        if (_event_count >= _events.size())
-        {
-            _dropped_event_count++;
-            return;
-        }
-
-        _events[_event_count++] = BufferedCpuEvent{
-            name, timestamp, duration, correlation_id, color, kind,
-        };
-    }
-
-    void CpuThreadContext::End(CpuEventToken token, const char* name,
-        uint64_t correlation_id, uint32_t color)
-    {
-        uint64_t end = TraceSession::MonotonicRawNowNs();
-        AddBufferedEvent(name, EventKind::Slice, token.timestamp,
-            end - token.timestamp, correlation_id, color);
-    }
-
-    void CpuThreadContext::Bookmark(const char* name,
-        uint64_t correlation_id, uint32_t color)
-    {
-        AddBufferedEvent(name, EventKind::Bookmark,
-            TraceSession::MonotonicRawNowNs(), 0, correlation_id, color);
-    }
-
-    void CpuThreadContext::Flush()
-    {
-        if (!_session || _events_registered)
-        {
-            return;
-        }
-
-        if (_event_count != 0 && _session->AddBufferedEventSource(
-            _events.data(), _event_count, ReadCpuEvent, _track_id)
-            == INVALID_EVENT_ID)
-        {
-            return;
-        }
-
-        _events_registered = true;
-    }
 }
