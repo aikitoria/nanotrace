@@ -51,6 +51,12 @@ export interface TimelineIntervals {
     label: number;                   // Label interval (>= major, power of 10)
 }
 
+/** Session-wide point event rendered as a vertical timeline rule. */
+export interface TraceBookmark {
+    timestampNs: number;
+    label: string;
+}
+
 // ============================================================================
 // Structure of Arrays (SoA) Data Structures
 // ============================================================================
@@ -258,4 +264,5 @@ export interface HierarchyData {
     kernelName: string;
     gridDims: [number, number, number];
     clusterDims: [number, number, number];
+    bookmarks: TraceBookmark[];
 }

@@ -99,6 +99,14 @@ function validateProjection(trace: ParsedTraceData): void {
             }
         }
     }
+
+    for (const bookmark of trace.bookmarks) {
+        if (!Number.isFinite(bookmark.timestampNs)
+            || bookmark.timestampNs < 0
+            || bookmark.label.length === 0) {
+            throw new Error('Trace has an invalid bookmark');
+        }
+    }
 }
 
 function validateEventParents(trace: ParsedTraceData): Set<bigint> {
@@ -174,7 +182,8 @@ async function validateNanotrace(filename: string): Promise<void> {
         expanded.zones,
         expanded.blocks,
         expanded.trackNames,
-        expanded.trackDepths
+        expanded.trackDepths,
+        expanded.bookmarks
     );
     if (!Number.isFinite(hierarchy.totalDurationNs)
         || hierarchy.totalDurationNs <= 0) {
@@ -185,6 +194,7 @@ async function validateNanotrace(filename: string): Promise<void> {
     console.log(`Rows: ${expanded.trackNames.length}`);
     console.log(`Tracks: ${expanded.tracks.count}`);
     console.log(`Events: ${expanded.zones.count}`);
+    console.log(`Bookmarks: ${expanded.bookmarks.length}`);
     console.log(`Expandable events: ${expandableEventIds.size}`);
     console.log(`Duration: ${hierarchy.totalDurationNs} ns`);
     console.log('Trace and all materialized projections validated');

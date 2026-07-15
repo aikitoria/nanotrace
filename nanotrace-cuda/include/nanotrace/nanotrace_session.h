@@ -42,7 +42,7 @@ namespace nanotrace
     enum class EventKind : uint8_t
     {
         Slice,
-        Instant,
+        Bookmark,
         Counter,
         Flow,
     };
@@ -179,7 +179,7 @@ namespace nanotrace
             uint64_t timestamp, uint64_t duration,
             uint64_t correlation_id = 0, EventId parent_id = INVALID_EVENT_ID,
             uint32_t color = 0);
-        EventId AddInstant(TrackId track_id, const char* name,
+        EventId AddBookmark(TrackId track_id, const char* name,
             uint64_t timestamp, uint64_t correlation_id = 0,
             EventId parent_id = INVALID_EVENT_ID, uint32_t color = 0);
         void RegisterEventFormat(const char* label, const char* tooltip,
@@ -250,7 +250,7 @@ namespace nanotrace
         CpuEventToken Begin() const;
         void End(CpuEventToken token, const char* name,
             uint64_t correlation_id = 0, uint32_t color = 0);
-        void Instant(const char* name, uint64_t correlation_id = 0,
+        void Bookmark(const char* name, uint64_t correlation_id = 0,
             uint32_t color = 0);
         void Flush();
 

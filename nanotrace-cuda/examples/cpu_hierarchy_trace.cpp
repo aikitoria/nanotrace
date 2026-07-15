@@ -23,6 +23,7 @@ int main(int argc, char** argv)
     session.AddSlice(main_thread, "Dispatch workers", start + 8'000, 22'000);
     session.AddSlice(main_thread, "Wait for workers", start + 34'000, 174'000);
     session.AddSlice(main_thread, "Publish result", start + 214'000, 18'000);
+    session.AddBookmark(main_thread, "Workers dispatched", start + 30'000);
 
     session.AddSlice(worker_0, "Prepare shard", start + 24'000, 34'000);
     session.AddSlice(worker_0, "Compute shard", start + 62'000, 118'000);

@@ -246,11 +246,11 @@ namespace nanotrace
             correlation_id, parent_id, color);
     }
 
-    EventId TraceSession::AddInstant(TrackId track_id, const char* name,
+    EventId TraceSession::AddBookmark(TrackId track_id, const char* name,
         uint64_t timestamp, uint64_t correlation_id, EventId parent_id,
         uint32_t color)
     {
-        return AddEvent(track_id, name, EventKind::Instant, timestamp, 0,
+        return AddEvent(track_id, name, EventKind::Bookmark, timestamp, 0,
             correlation_id, parent_id, color);
     }
 
@@ -916,10 +916,10 @@ namespace nanotrace
             end - token.timestamp, correlation_id, color);
     }
 
-    void CpuThreadContext::Instant(const char* name,
+    void CpuThreadContext::Bookmark(const char* name,
         uint64_t correlation_id, uint32_t color)
     {
-        AddBufferedEvent(name, EventKind::Instant,
+        AddBufferedEvent(name, EventKind::Bookmark,
             TraceSession::MonotonicRawNowNs(), 0, correlation_id, color);
     }
 

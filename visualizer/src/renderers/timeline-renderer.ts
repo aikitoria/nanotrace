@@ -19,7 +19,7 @@
  */
 
 import { Camera } from '../utils/camera.js';
-import { TimelineIntervals } from '../utils/types.js';
+import { TimelineIntervals, TraceBookmark } from '../utils/types.js';
 import {
     TIMELINE_TICK_SPACING,
     TIMELINE_LABEL_SPACING,
@@ -55,8 +55,11 @@ export class TimelineRenderer {
     // DOM element pools to avoid per-frame allocations (GC pressure reduction)
     private tickPool: HTMLElement[] = [];
     private labelPool: HTMLElement[] = [];
+    private bookmarkLinePool: HTMLElement[] = [];
+    private bookmarkLabelPool: HTMLElement[] = [];
     private activeTickCount = 0;
     private activeLabelCount = 0;
+    private activeBookmarkCount = 0;
 
     /**
      * Creates timeline renderer with references to container, canvas, and camera.
@@ -115,6 +118,30 @@ export class TimelineRenderer {
         return label;
     }
 
+    /** Gets a vertical bookmark rule and its label from their DOM pools. */
+    private getBookmarkElements(): [HTMLElement, HTMLElement] {
+        let line: HTMLElement;
+        let label: HTMLElement;
+        if (this.activeBookmarkCount < this.bookmarkLinePool.length) {
+            line = this.bookmarkLinePool[this.activeBookmarkCount];
+            label = this.bookmarkLabelPool[this.activeBookmarkCount];
+            line.style.display = '';
+            label.style.display = '';
+        } else {
+            line = document.createElement('div');
+            line.className = 'timeline-bookmark-line';
+            this.timelineContainer.appendChild(line);
+            this.bookmarkLinePool.push(line);
+
+            label = document.createElement('div');
+            label.className = 'timeline-bookmark-label';
+            this.timelineContainer.appendChild(label);
+            this.bookmarkLabelPool.push(label);
+        }
+        this.activeBookmarkCount++;
+        return [line, label];
+    }
+
     /**
      * Hides unused elements from the pools instead of destroying them.
      * Called at the end of updateTimeline after all visible elements have been reused.
@@ -127,6 +154,11 @@ export class TimelineRenderer {
         // Hide unused labels
         for (let i = this.activeLabelCount; i < this.labelPool.length; i++) {
             this.labelPool[i].style.display = 'none';
+        }
+        for (let i = this.activeBookmarkCount;
+            i < this.bookmarkLinePool.length; i++) {
+            this.bookmarkLinePool[i].style.display = 'none';
+            this.bookmarkLabelPool[i].style.display = 'none';
         }
     }
 
@@ -143,11 +175,20 @@ export class TimelineRenderer {
         for (const label of this.labelPool) {
             label.remove();
         }
+        for (const line of this.bookmarkLinePool) {
+            line.remove();
+        }
+        for (const label of this.bookmarkLabelPool) {
+            label.remove();
+        }
         // Clear pools
         this.tickPool = [];
         this.labelPool = [];
+        this.bookmarkLinePool = [];
+        this.bookmarkLabelPool = [];
         this.activeTickCount = 0;
         this.activeLabelCount = 0;
+        this.activeBookmarkCount = 0;
     }
 
     /**
@@ -257,7 +298,7 @@ export class TimelineRenderer {
      *
      * Uses physical pixel widths (1 or 2 device pixels) for crisp rendering.
      */
-    updateTimeline(TIME_RANGE: number): void {
+    updateTimeline(TIME_RANGE: number, bookmarks: TraceBookmark[]): void {
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
 
@@ -269,6 +310,7 @@ export class TimelineRenderer {
         // Reset active counts to reuse elements from the pool
         this.activeTickCount = 0;
         this.activeLabelCount = 0;
+        this.activeBookmarkCount = 0;
 
         const startTiny = Math.floor(worldLeft / intervals.tiny) * intervals.tiny;
         const endTiny = Math.ceil(worldRight / intervals.tiny) * intervals.tiny;
@@ -331,6 +373,24 @@ export class TimelineRenderer {
                 label.style.left = `${screenX}px`;
                 label.style.transform = 'translateX(-50%)';
             }
+        }
+
+        for (const bookmark of bookmarks) {
+            const time = bookmark.timestampNs * 1e-6;
+            if (time < worldLeft || time > worldRight) continue;
+
+            const screenX = Math.round(
+                ((time + this.camera.x) * this.camera.zoomX / aspect + 1)
+                * rect.width / 2);
+            if (screenX < 0 || screenX > rect.width) continue;
+
+            const [line, label] = this.getBookmarkElements();
+            const placeLabelOnLeft = screenX > rect.width - 160;
+            line.style.left = `${screenX}px`;
+            label.textContent = bookmark.label;
+            label.style.left = `${screenX + (placeLabelOnLeft ? -1 : 1)}px`;
+            label.style.transform = placeLabelOnLeft
+                ? 'translateX(-100%)' : '';
         }
 
         // Hide all unused elements from the pools

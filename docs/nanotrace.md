@@ -72,7 +72,7 @@ Track kinds:
 | 8 | `Generic` |
 
 Event kinds occupy bits 0-1 of the event flags byte: 0 is `Slice`, 1 is
-`Instant`, 2 is `Counter`, and 3 is `Flow`.
+`Bookmark`, 2 is `Counter`, and 3 is `Flow`.
 
 Argument kinds are 0 `Unsigned`, 1 `Signed`, 2 `Floating`, 3 `String`, and 4
 `Boolean`.

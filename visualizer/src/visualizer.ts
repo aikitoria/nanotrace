@@ -793,7 +793,8 @@ export class ZoneVisualizer {
             parsedData.zones,
             parsedData.blocks,
             parsedData.trackNames,
-            parsedData.trackDepths
+            parsedData.trackDepths,
+            parsedData.bookmarks
         );
         // Store metadata for rendering
         this.worldHeight = this.hierarchy.worldHeight;
@@ -1653,7 +1654,9 @@ export class ZoneVisualizer {
             if (laneVisible) {
                 const clampedTopY = Math.max(timelineHeight, screenTopY);
                 const clampedHeight = Math.max(0, screenBottomY - clampedTopY);
-                let currentLabelX = labelX;
+                // Root track labels belong to the viewport, not trace time.
+                // Keep them pinned to the left when time zero is on-screen.
+                let currentLabelX = lanes.depths[i] === 0 ? 0 : labelX;
                 let currentLabelWidth = labelWidth;
 
                 const physicalSmRow = lanes.names[i]?.startsWith('SM ') ?? false;
@@ -1839,7 +1842,8 @@ export class ZoneVisualizer {
         this.updateTrackFrame();
         this.updateKernelFrames();
         this.updateLaneLabels();
-        this.timelineRenderer!.updateTimeline(this.TIME_RANGE);
+        this.timelineRenderer!.updateTimeline(
+            this.TIME_RANGE, this.hierarchy?.bookmarks ?? []);
         this.renderZoneLabels();
 
         if (this.interactionManager && (this.interactionManager.hasActiveSelection() || this.interactionManager.isCurrentlySelecting())) {

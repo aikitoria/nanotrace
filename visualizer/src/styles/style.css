@@ -353,6 +353,33 @@ body.visualization-active #kernel-frames {
     pointer-events: none;
 }
 
+.timeline-bookmark-line {
+    position: absolute;
+    top: 30px;
+    width: 1px;
+    height: calc(100vh - 30px);
+    background: rgba(190, 194, 199, 0.28);
+    pointer-events: none;
+    z-index: 0;
+}
+
+.timeline-bookmark-label {
+    position: absolute;
+    top: 32px;
+    max-width: 240px;
+    padding: 2px 4px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    background: rgba(28, 29, 30, 0.92);
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 1;
+}
+
 #cursor-line,
 .selection-line {
     position: fixed;

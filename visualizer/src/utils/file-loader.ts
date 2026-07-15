@@ -5,6 +5,7 @@ import {
     HierarchyData,
     LanesSoA,
     SMAccelerator,
+    TraceBookmark,
     TracksSoA,
     ZonesSoA
 } from './types.js';
@@ -21,6 +22,7 @@ const MAGIC = 'NTRACE4';
 const FILE_HEADER_SIZE = 32;
 const CHUNK_HEADER_SIZE = 24;
 const MIN_EVENT_DURATION_NS = 1;
+const EVENT_KIND_BOOKMARK = 1;
 
 enum ChunkType {
     Session = 1,
@@ -101,6 +103,7 @@ export interface ParsedTraceData {
     trackExpanded: boolean[];
     trackExpansionGroupIds: bigint[];
     trackExpansionModes: TrackExpansionMode[];
+    bookmarks: TraceBookmark[];
 }
 
 export enum TrackExpansionMode {
@@ -689,9 +692,11 @@ export async function parseTraceFile(
         const mapped = mapTimestamp(
             track.clockId, event.timestamp, referenceClock, clocks, snapshotsByClock);
         if (origin === undefined || mapped < origin) origin = mapped;
-        const records = eventsByTrack.get(event.trackId) ?? [];
-        records.push(event);
-        eventsByTrack.set(event.trackId, records);
+        if (event.kind !== EVENT_KIND_BOOKMARK) {
+            const records = eventsByTrack.get(event.trackId) ?? [];
+            records.push(event);
+            eventsByTrack.set(event.trackId, records);
+        }
     }
     const traceOrigin = origin ?? 0n;
 
@@ -747,6 +752,23 @@ export async function parseTraceFile(
         }
     }
 
+    const bookmarks: TraceBookmark[] = [];
+    for (const event of eventRecords) {
+        if (event.kind !== EVENT_KIND_BOOKMARK) continue;
+
+        const track = tracksById.get(event.trackId);
+        if (!track) continue;
+        const mappedTimestamp = mapTimestamp(
+            track.clockId, event.timestamp,
+            referenceClock, clocks, snapshotsByClock);
+        bookmarks.push({
+            timestampNs: Number(mappedTimestamp - traceOrigin),
+            label: strings[event.nameId] ?? `Bookmark ${event.nameId}`
+        });
+    }
+    bookmarks.sort((first, second) =>
+        first.timestampNs - second.timestampNs);
+
     let zoneCount = 0;
     for (const track of visibleTracks) zoneCount += eventsByTrack.get(track.id)!.length;
     const tracks = new TracksSoA();
@@ -779,6 +801,7 @@ export async function parseTraceFile(
     zones.sublaneIndices = new Uint8Array(zoneCount);
     let zoneParameterCount = 0;
     for (const event of eventRecords) {
+        if (event.kind === EVENT_KIND_BOOKMARK) continue;
         const descriptorId = eventNameIds.get(event.nameId);
         zoneParameterCount += descriptorId === undefined ? 0
             : Math.min(formatDescriptors[descriptorId].placeholderCount,
@@ -788,6 +811,7 @@ export async function parseTraceFile(
 
     const parentEventIds = new Set<bigint>();
     for (const event of eventRecords) {
+        if (event.kind === EVENT_KIND_BOOKMARK) continue;
         if (event.parentId !== 0n) parentEventIds.add(event.parentId);
     }
 
@@ -932,7 +956,8 @@ export async function parseTraceFile(
         trackExpanded: new Array<boolean>(visibleTracks.length).fill(false),
         trackExpansionGroupIds: new Array<bigint>(visibleTracks.length).fill(0n),
         trackExpansionModes: new Array<TrackExpansionMode>(
-            visibleTracks.length).fill(TrackExpansionMode.Always)
+            visibleTracks.length).fill(TrackExpansionMode.Always),
+        bookmarks
     };
 }
 
@@ -1517,7 +1542,8 @@ export function projectTraceData(
         trackDisclosureKeys: rows.map(row => row.trackDisclosureKey),
         trackExpanded: rows.map(row => row.trackExpanded),
         trackExpansionGroupIds: rows.map(row => row.expansionGroupId),
-        trackExpansionModes: rows.map(row => row.expansionMode)
+        trackExpansionModes: rows.map(row => row.expansionMode),
+        bookmarks: source.bookmarks
     };
 }
 
@@ -1551,7 +1577,8 @@ export function buildHierarchy(
     zones: ZonesSoA,
     blocks: BlocksSoA,
     trackNames: string[] = [],
-    trackDepths: number[] = []
+    trackDepths: number[] = [],
+    bookmarks: TraceBookmark[] = []
 ): HierarchyData {
     const blocksByRow = new Map<number, number[]>();
     for (let blockIndex = 0; blockIndex < blocks.count; blockIndex++) {
@@ -1655,6 +1682,9 @@ export function buildHierarchy(
         lanes.heights[rowIndex] = height;
         totalDurationNs = Math.max(totalDurationNs, lanes.widths[rowIndex]);
     }
+    for (const bookmark of bookmarks) {
+        totalDurationNs = Math.max(totalDurationNs, bookmark.timestampNs);
+    }
 
     let currentY = 0;
     for (let rowIndex = lanes.count - 1; rowIndex >= 0; rowIndex--) {
@@ -1721,7 +1751,8 @@ export function buildHierarchy(
         formatDescriptors,
         kernelName,
         gridDims,
-        clusterDims
+        clusterDims,
+        bookmarks
     };
 }
 

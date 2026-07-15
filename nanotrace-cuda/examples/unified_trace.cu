@@ -143,7 +143,7 @@ int main(int argc, char** argv)
             return 1;
         }
     }
-    cpu.Instant("GPU complete");
+    cpu.Bookmark("GPU complete");
 
     nanotrace::trace_writer kernel_trace{ "UnifiedKernel" };
     kernel_trace.set_block_type<UnifiedBlock>();

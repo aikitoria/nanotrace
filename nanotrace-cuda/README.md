@@ -59,8 +59,12 @@ nanotrace::CpuThreadContext cpu{
     nanotrace::CpuScope scope{ cpu, "Execute step" };
     // Launch work.
 }
+cpu.Bookmark("Step complete");
 cpu.Flush();
 ~~~
+
+Bookmarks appear as labeled vertical rules across the viewer rather than as
+zones on the source thread.
 
 Parent CPU tracks explicitly when the application has a hierarchy:
 
