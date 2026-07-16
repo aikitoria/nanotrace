@@ -24,9 +24,11 @@ namespace nanotrace
     class GpuProcessTrace::Implementation
     {
     public:
-        explicit Implementation(TraceSession& session)
+        explicit Implementation(TraceSession& session,
+            const char* kernel_name_prefix_to_strip)
             : _session{ &session }
-            , _hes{ session }
+            , _hes{ session, INVALID_TRACK_ID,
+                kernel_name_prefix_to_strip }
         {
             if (!_hes.Initialize())
             {
@@ -125,7 +127,9 @@ namespace nanotrace
             const std::vector<HesKernelEvent>& kernels = _hes.KernelEvents();
             for (const HesKernelEvent& kernel : kernels)
             {
-                if (kernel.name && std::strstr(kernel.name, kernel_name)
+                const char* match_name = kernel.match_name
+                    ? kernel.match_name : kernel.name;
+                if (match_name && std::strstr(match_name, kernel_name)
                     && (!options.device_id
                         || kernel.device_id == *options.device_id)
                     && (!options.context_id
@@ -227,7 +231,7 @@ namespace nanotrace
     class GpuProcessTrace::Implementation
     {
     public:
-        explicit Implementation(TraceSession&)
+        explicit Implementation(TraceSession&, const char*)
         {
         }
 
@@ -245,8 +249,10 @@ namespace nanotrace
     };
 #endif
 
-    GpuProcessTrace::GpuProcessTrace(TraceSession& session)
-        : _implementation{ std::make_unique<Implementation>(session) }
+    GpuProcessTrace::GpuProcessTrace(TraceSession& session,
+        const char* kernel_name_prefix_to_strip)
+        : _implementation{ std::make_unique<Implementation>(session,
+            kernel_name_prefix_to_strip) }
     {
     }
 

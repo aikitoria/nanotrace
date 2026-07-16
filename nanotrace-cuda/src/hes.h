@@ -23,13 +23,15 @@ namespace nanotrace
         uint64_t start_ns = 0;
         uint64_t end_ns = 0;
         const char* name = nullptr;
+        const char* match_name = nullptr;
     };
 
     class HesTracer
     {
     public:
         explicit HesTracer(TraceSession& session,
-            TrackId parent_track = INVALID_TRACK_ID);
+            TrackId parent_track = INVALID_TRACK_ID,
+            const char* kernel_name_prefix_to_strip = nullptr);
         ~HesTracer();
 
         HesTracer(const HesTracer&) = delete;

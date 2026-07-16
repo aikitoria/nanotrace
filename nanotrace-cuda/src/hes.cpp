@@ -40,7 +40,8 @@ namespace nanotrace
             return result;
         }
 
-        std::string KernelDisplayName(const std::string& signature)
+        std::string KernelDisplayName(const std::string& signature,
+            std::string_view prefix_to_strip)
         {
             uint32_t depth = 0;
             std::string name = signature;
@@ -67,6 +68,12 @@ namespace nanotrace
             if (name.starts_with(VOID_PREFIX))
             {
                 name.erase(0, VOID_PREFIX.size());
+            }
+
+            if (!prefix_to_strip.empty()
+                && name.starts_with(prefix_to_strip))
+            {
+                name.erase(0, prefix_to_strip.size());
             }
             return name;
         }
@@ -122,6 +129,7 @@ namespace nanotrace
         struct KernelNames
         {
             std::string name;
+            std::string match_name;
         };
 
         struct GraphExecutionKey
@@ -253,11 +261,15 @@ namespace nanotrace
     class HesTracer::Implementation
     {
     public:
-        Implementation(TraceSession& session, TrackId parent_track)
+        Implementation(TraceSession& session, TrackId parent_track,
+            const char* kernel_name_prefix_to_strip)
             : _session{ &session }
             , _parent_track{ parent_track }
             , _cupti_clock{ session.AddClock(
                 "CUPTI hardware clock", ClockKind::Cupti) }
+            , _kernel_name_prefix_to_strip{
+                kernel_name_prefix_to_strip
+                    ? kernel_name_prefix_to_strip : "" }
         {
         }
 
@@ -594,10 +606,13 @@ namespace nanotrace
                     else
                     {
                         std::string signature = DemangleKernelName(raw_name);
-                        std::string name = KernelDisplayName(signature);
+                        std::string match_name = KernelDisplayName(
+                            signature, {});
+                        std::string name = KernelDisplayName(signature,
+                            _kernel_name_prefix_to_strip);
                         const std::pair<KernelNameMap::iterator, bool> inserted =
                             _kernel_names.emplace(raw_name, KernelNames{
-                                std::move(name) });
+                                std::move(name), std::move(match_name) });
                         names = &inserted.first->second;
                     }
 
@@ -614,6 +629,7 @@ namespace nanotrace
                         kernel->start,
                         kernel->end,
                         names->name.c_str(),
+                        names->match_name.c_str(),
                     });
                     continue;
                 }
@@ -869,12 +885,15 @@ namespace nanotrace
             _completed_kernel_events;
         std::vector<GraphExecutionEvent> _graph_events;
         KernelNameMap _kernel_names;
+        std::string _kernel_name_prefix_to_strip;
         static inline std::atomic<Implementation*> _active{ nullptr };
     };
 
-    HesTracer::HesTracer(TraceSession& session, TrackId parent_track)
+    HesTracer::HesTracer(TraceSession& session, TrackId parent_track,
+        const char* kernel_name_prefix_to_strip)
         : _implementation{
-            std::make_unique<Implementation>(session, parent_track) }
+            std::make_unique<Implementation>(session, parent_track,
+                kernel_name_prefix_to_strip) }
     {
     }
 

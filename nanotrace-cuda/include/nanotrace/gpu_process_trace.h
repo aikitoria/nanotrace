@@ -23,7 +23,8 @@ namespace nanotrace
     class GpuProcessTrace
     {
     public:
-        explicit GpuProcessTrace(TraceSession& session);
+        explicit GpuProcessTrace(TraceSession& session,
+            const char* kernel_name_prefix_to_strip = nullptr);
         ~GpuProcessTrace();
 
         GpuProcessTrace(const GpuProcessTrace&) = delete;
