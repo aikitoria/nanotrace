@@ -698,6 +698,7 @@ export async function parseTraceFile(
     zones.endsX = new Float64Array(zoneCount);
     zones.ys = new Float32Array(zoneCount);
     zones.colors = new Uint8Array(zoneCount * 3);
+    zones.eventSpecIds = new Uint32Array(zoneCount);
     zones.formatDescIds = new Uint16Array(zoneCount);
     zones.paramsOffsets = new Uint32Array(zoneCount);
     zones.paramsCounts = new Uint8Array(zoneCount);
@@ -812,6 +813,7 @@ export async function parseTraceFile(
                 }
             }
             zones.details[zoneIndex] = details?.join('\n') ?? '';
+            zones.eventSpecIds[zoneIndex] = event.nameId;
             zones.formatDescIds[zoneIndex] = descriptorId;
             zones.trackIndices[zoneIndex] = trackIndex;
             zones.smIndices[zoneIndex] = trackIndex;
@@ -1268,6 +1270,7 @@ export function projectTraceData(
     zones.endsX = new Float64Array(zoneCount);
     zones.ys = new Float32Array(zoneCount);
     zones.colors = new Uint8Array(zoneCount * 3);
+    zones.eventSpecIds = new Uint32Array(zoneCount);
     zones.formatDescIds = new Uint16Array(zoneCount);
     zones.paramsOffsets = new Uint32Array(zoneCount);
     zones.paramsCounts = new Uint8Array(zoneCount);
@@ -1360,6 +1363,8 @@ export function projectTraceData(
                 source.zones.endsX[sourceZoneIndex];
             zones.formatDescIds[targetZoneIndex] =
                 source.zones.formatDescIds[sourceZoneIndex];
+            zones.eventSpecIds[targetZoneIndex] =
+                source.zones.eventSpecIds[sourceZoneIndex];
             zones.paramsOffsets[targetZoneIndex] =
                 source.zones.paramsOffsets[sourceZoneIndex];
             zones.paramsCounts[targetZoneIndex] =

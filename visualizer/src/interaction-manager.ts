@@ -33,6 +33,13 @@ import {
     TIME_DECIMAL_PLACES
 } from './utils/constants.js';
 
+export interface SelectionBounds {
+    start: number;
+    end: number;
+    bottom: number;
+    top: number;
+}
+
 function EscapeHtml(value: string): string {
     return value
         .replace(/&/g, '&amp;')
@@ -110,7 +117,10 @@ export class InteractionManager {
     private isSelecting: boolean = false;
     private selectionStartWorldX: number = 0;
     private selectionEndWorldX: number = 0;
+    private selectionStartWorldY: number = 0;
+    private selectionEndWorldY: number = 0;
     private hasSelection: boolean = false;
+    private selectionChanged: (bounds: SelectionBounds | null) => void;
 
     /**
      * Creates interaction manager with references to camera and UI elements.
@@ -123,7 +133,8 @@ export class InteractionManager {
         selectionRegion: HTMLElement,
         selectionLineStart: HTMLElement,
         selectionLineEnd: HTMLElement,
-        selectionLabel: HTMLElement
+        selectionLabel: HTMLElement,
+        selectionChanged: (bounds: SelectionBounds | null) => void
     ) {
         this.camera = camera;
         this.canvas = canvas;
@@ -132,6 +143,7 @@ export class InteractionManager {
         this.selectionLineStart = selectionLineStart;
         this.selectionLineEnd = selectionLineEnd;
         this.selectionLabel = selectionLabel;
+        this.selectionChanged = selectionChanged;
     }
 
     /** Updates camera reference when visualization is reinitialized. */
@@ -171,21 +183,27 @@ export class InteractionManager {
     }
 
     /** Begins a new selection at the given world X coordinate. */
-    startSelection(worldX: number): void {
+    startSelection(worldX: number, worldY: number): void {
         this.isSelecting = true;
+        this.hasSelection = false;
         this.selectionStartWorldX = worldX;
         this.selectionEndWorldX = worldX;
+        this.selectionStartWorldY = worldY;
+        this.selectionEndWorldY = worldY;
+        this.selectionChanged(null);
     }
 
     /** Updates the end position of the selection during drag. */
-    updateSelectionEnd(worldX: number): void {
+    updateSelectionEnd(worldX: number, worldY: number): void {
         this.selectionEndWorldX = worldX;
+        this.selectionEndWorldY = worldY;
     }
 
     /** Finalizes the selection (called on mouseup if distance threshold met). */
     endSelection(): void {
         this.isSelecting = false;
         this.hasSelection = true;
+        this.selectionChanged(this.getSelectionBounds());
     }
 
     /** Hides all selection UI elements. */
@@ -201,6 +219,7 @@ export class InteractionManager {
         this.hasSelection = false;
         this.isSelecting = false;
         this.hideSelectionUI();
+        this.selectionChanged(null);
     }
 
     /**
@@ -413,25 +432,35 @@ export class InteractionManager {
 
         const worldLeftX = Math.min(this.selectionStartWorldX, this.selectionEndWorldX);
         const worldRightX = Math.max(this.selectionStartWorldX, this.selectionEndWorldX);
+        const worldBottomY = Math.min(this.selectionStartWorldY, this.selectionEndWorldY);
+        const worldTopY = Math.max(this.selectionStartWorldY, this.selectionEndWorldY);
 
         const ndcLeft = (worldLeftX + this.camera.x) * this.camera.zoomX / aspect;
         const ndcRight = (worldRightX + this.camera.x) * this.camera.zoomX / aspect;
+        const ndcBottom = (worldBottomY + this.camera.y) * this.camera.zoomY;
+        const ndcTop = (worldTopY + this.camera.y) * this.camera.zoomY;
 
         // Check for invalid values
-        if (!isFinite(ndcLeft) || !isFinite(ndcRight)) {
+        if (!isFinite(ndcLeft) || !isFinite(ndcRight)
+            || !isFinite(ndcBottom) || !isFinite(ndcTop)) {
             this.hideSelectionUI();
             return;
         }
 
         const screenLeft = (ndcLeft + 1) * rect.width / 2;
         const screenRight = (ndcRight + 1) * rect.width / 2;
+        const screenTop = (1 - ndcTop) * rect.height / 2;
+        const screenBottom = (1 - ndcBottom) * rect.height / 2;
 
         const width = screenRight - screenLeft;
+        const height = Math.max(1, screenBottom - screenTop);
 
         if (width > 1) {
             // Show full selection region with two lines
             this.selectionRegion.style.left = `${screenLeft}px`;
             this.selectionRegion.style.width = `${width}px`;
+            this.selectionRegion.style.top = `${screenTop}px`;
+            this.selectionRegion.style.height = `${height}px`;
             this.selectionRegion.style.display = 'block';
 
             this.selectionLineStart.style.left = `${screenLeft}px`;
@@ -459,6 +488,7 @@ export class InteractionManager {
                 `Len: ${formatDuration(durNs)}`;
 
             this.selectionLabel.style.left = `${screenLeft + SELECTION_LABEL_OFFSET}px`;
+            this.selectionLabel.style.top = `${Math.max(36, screenTop + 4)}px`;
             this.selectionLabel.style.display = 'block';
         } else {
             // Collapse to a single line when too narrow
@@ -490,6 +520,7 @@ export class InteractionManager {
                 `Len: ${formatDuration(durNs)}`;
 
             this.selectionLabel.style.left = `${centerX + SELECTION_LABEL_OFFSET}px`;
+            this.selectionLabel.style.top = `${Math.max(36, screenTop + 4)}px`;
             this.selectionLabel.style.display = 'block';
         }
     }
@@ -499,10 +530,12 @@ export class InteractionManager {
      * Always returns start <= end regardless of drag direction.
      * Used for shader uniform updates and selection validation.
      */
-    getSelectionBounds(): { start: number; end: number } {
+    getSelectionBounds(): SelectionBounds {
         return {
             start: Math.min(this.selectionStartWorldX, this.selectionEndWorldX),
-            end: Math.max(this.selectionStartWorldX, this.selectionEndWorldX)
+            end: Math.max(this.selectionStartWorldX, this.selectionEndWorldX),
+            bottom: Math.min(this.selectionStartWorldY, this.selectionEndWorldY),
+            top: Math.max(this.selectionStartWorldY, this.selectionEndWorldY)
         };
     }
 }

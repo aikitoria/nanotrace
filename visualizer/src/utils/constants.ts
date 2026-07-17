@@ -174,9 +174,9 @@ export const ZOOM_FACTOR = 1.1;
 
 /**
  * Minimum X-axis zoom level (timeline zoom).
- * Prevents zooming out beyond this threshold (0.001x).
+ * This is only a numerical safety floor; long traces must remain fully viewable.
  */
-export const MIN_ZOOM_X = 0.001;
+export const MIN_ZOOM_X = 1e-9;
 
 /**
  * Maximum X-axis zoom level (timeline zoom).

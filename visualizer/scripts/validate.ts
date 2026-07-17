@@ -10,6 +10,9 @@ import {
     type ParsedTraceData
 } from '../src/utils/file-loader.js';
 import { binarySearchZones } from '../src/utils/soa-helpers.js';
+import {
+    AggregateSelectionStatistics
+} from '../src/utils/selection-stats.js';
 
 function validateTrackOrder(trace: ParsedTraceData): void {
     let encounteredCpuTrack = false;
@@ -41,6 +44,9 @@ function validateProjection(trace: ParsedTraceData): void {
     }
     for (let zoneIndex = 0;
         zoneIndex < trace.zones.count; zoneIndex++) {
+        if (!Number.isInteger(trace.zones.eventSpecIds[zoneIndex])) {
+            throw new Error(`Event ${zoneIndex} has an invalid specification`);
+        }
         if (trace.zones.formatDescIds[zoneIndex]
             >= trace.formatDescriptors.length) {
             throw new Error(`Event ${zoneIndex} has an invalid format`);
@@ -109,6 +115,99 @@ function validateProjection(trace: ParsedTraceData): void {
     }
 }
 
+function validateSelectionStatistics(trace: ParsedTraceData): void {
+    const zoneVisibility = new Uint32Array(trace.zones.count);
+    zoneVisibility.fill(1);
+    const rowSelected = new Uint8Array(trace.trackNames.length);
+    rowSelected.fill(1);
+    const rowOffsets = new Float32Array(trace.trackNames.length);
+    const rowIsGpu = new Uint8Array(trace.trackNames.length);
+    for (let rowIndex = 0;
+        rowIndex < trace.trackHierarchies.length; rowIndex++) {
+        rowIsGpu[rowIndex] = trace.trackHierarchies[rowIndex]
+            .some(node => node.kind === 2) ? 1 : 0;
+    }
+
+    const statistics = AggregateSelectionStatistics(
+        trace.zones,
+        zoneVisibility,
+        rowSelected,
+        rowOffsets,
+        rowIsGpu,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY
+    );
+    const countedZones = [...statistics.cpu, ...statistics.gpu]
+        .reduce((count, statistic) => count + statistic.count, 0);
+    if (countedZones !== trace.zones.count) {
+        throw new Error(
+            `Selection statistics counted ${countedZones} of `
+            + `${trace.zones.count} zones`);
+    }
+
+    if (trace.zones.count === 0) return;
+    rowSelected.fill(0);
+    const selectedRow = trace.zones.smIndices[0];
+    rowSelected[selectedRow] = 1;
+    const rowStatistics = AggregateSelectionStatistics(
+        trace.zones,
+        zoneVisibility,
+        rowSelected,
+        rowOffsets,
+        rowIsGpu,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY
+    );
+    const countedRowZones = [...rowStatistics.cpu, ...rowStatistics.gpu]
+        .reduce((count, statistic) => count + statistic.count, 0);
+    let expectedRowZones = 0;
+    for (let zoneIndex = 0;
+        zoneIndex < trace.zones.count; zoneIndex++) {
+        if (trace.zones.smIndices[zoneIndex] === selectedRow) {
+            expectedRowZones++;
+        }
+    }
+    if (countedRowZones !== expectedRowZones) {
+        throw new Error(
+            `Row-scoped selection counted ${countedRowZones} of `
+            + `${expectedRowZones} zones`);
+    }
+
+    const selectedY = trace.zones.ys[0];
+    const sublaneStatistics = AggregateSelectionStatistics(
+        trace.zones,
+        zoneVisibility,
+        rowSelected,
+        rowOffsets,
+        rowIsGpu,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+        selectedY,
+        selectedY
+    );
+    const countedSublaneZones = [
+        ...sublaneStatistics.cpu,
+        ...sublaneStatistics.gpu
+    ].reduce((count, statistic) => count + statistic.count, 0);
+    let expectedSublaneZones = 0;
+    for (let zoneIndex = 0;
+        zoneIndex < trace.zones.count; zoneIndex++) {
+        if (trace.zones.smIndices[zoneIndex] === selectedRow
+            && trace.zones.ys[zoneIndex] === selectedY) {
+            expectedSublaneZones++;
+        }
+    }
+    if (countedSublaneZones !== expectedSublaneZones) {
+        throw new Error(
+            `Sublane-scoped selection counted ${countedSublaneZones} of `
+            + `${expectedSublaneZones} zones`);
+    }
+}
+
 function validateEventParents(trace: ParsedTraceData): Set<bigint> {
     const zonesByEventId = new Map<bigint, number>();
     const expandableEventIds = new Set<bigint>();
@@ -164,8 +263,10 @@ async function validateNanotrace(filename: string): Promise<void> {
 
     validateTrackOrder(collapsed);
     validateProjection(collapsed);
+    validateSelectionStatistics(collapsed);
     validateTrackOrder(expanded);
     validateProjection(expanded);
+    validateSelectionStatistics(expanded);
 
     if (collapsed.tracks.count !== expanded.tracks.count
         || collapsed.zones.count !== expanded.zones.count

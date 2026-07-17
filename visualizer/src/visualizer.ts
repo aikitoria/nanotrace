@@ -18,11 +18,18 @@ import { parseTraceFile, projectTraceData, buildHierarchy, formatString as forma
 import { createGPUBuffers, createPipelines, GPUResources } from './renderers/gpu-renderer.js';
 import { LabelRenderer } from './renderers/label-renderer.js';
 import { TimelineRenderer } from './renderers/timeline-renderer.js';
-import { InteractionManager } from './interaction-manager.js';
+import {
+    InteractionManager,
+    type SelectionBounds
+} from './interaction-manager.js';
 import {
     HierarchyData
 } from './utils/types.js';
 import { formatDuration } from './utils/soa-helpers.js';
+import {
+    AggregateSelectionStatistics,
+    type ZoneStatistics
+} from './utils/selection-stats.js';
 import {
     BASE_TIME_RANGE,
     ZOOM_FACTOR,
@@ -57,14 +64,29 @@ const VERSION = `0.2-${__GIT_HASH__}`;
 const WHEEL_GESTURE_TIMEOUT_MS = 120;
 const HORIZONTAL_WHEEL_DOMINANCE = 1.5;
 const WHEEL_ZOOM_REFERENCE_PIXELS = 100;
+const RIGHT_CLICK_DRAG_THRESHOLD_PX = 4;
+const ZONE_BLINK_DURATION_MS = 500;
 
 type WheelGestureMode = 'panX' | 'zoomX' | 'zoomY' | 'zoomBoth';
+
+function FormatZoomFactor(value: number): string {
+    if (value >= 1) return value.toFixed(2);
+    if (value >= 0.01) return value.toFixed(3);
+    if (value >= 0.0001) return value.toFixed(5);
+    return value.toExponential(2);
+}
 
 interface ExpandedKernelGroup {
     startNs: number;
     endNs: number;
     parentZoneIndex: number;
     blockIndices: number[];
+}
+
+interface RightClickCandidate {
+    zoneIndex: number;
+    screenX: number;
+    screenY: number;
 }
 
 /**
@@ -95,6 +117,12 @@ export class ZoneVisualizer {
     private selectionLineStart: HTMLElement;
     private selectionLineEnd: HTMLElement;
     private selectionLabel: HTMLElement;
+    private selectionStatsPanel: HTMLElement;
+    private selectionStatsRange: HTMLElement;
+    private selectionStatsSearch: HTMLInputElement;
+    private selectionStatsCpu: HTMLElement;
+    private selectionStatsGpu: HTMLElement;
+    private selectionStatsFooter: HTMLElement;
     private fileSelector: HTMLElement;
     private loadingOverlay: HTMLElement;
     private loadingText: HTMLElement;
@@ -105,6 +133,7 @@ export class ZoneVisualizer {
 
     // WebGPU resources (initialized in initWebGPU)
     private adapter: GPUAdapter | null = null;
+    private webGpuInitialization: Promise<void> | null = null;
     private device!: GPUDevice;
     private context!: GPUCanvasContext;
     private format!: GPUTextureFormat;
@@ -122,6 +151,7 @@ export class ZoneVisualizer {
     private rowBaseYs = new Float32Array();
     private rowOffsets = new Float32Array();
     private rowVisible = new Uint8Array();
+    private rowSelected = new Uint8Array();
     private rowIsGpu = new Uint8Array();
     private rowVisibleZoneCounts = new Uint32Array();
     private rowLayout = new Float32Array();
@@ -158,6 +188,11 @@ export class ZoneVisualizer {
     private numZones: number = 0;
     private wheelGestureMode: WheelGestureMode = 'zoomX';
     private lastWheelEventTime: number = Number.NEGATIVE_INFINITY;
+    private rightClickCandidate: RightClickCandidate | null = null;
+    private blinkedZoneId: number = -1;
+    private blinkStartTime: number = 0;
+    private selectionCpuStatistics: ZoneStatistics[] = [];
+    private selectionGpuStatistics: ZoneStatistics[] = [];
 
     // Preallocated buffers to avoid per-frame allocations (GC pressure reduction)
     private uniformData = new ArrayBuffer(128);
@@ -194,6 +229,17 @@ export class ZoneVisualizer {
         this.selectionLineStart = this.getElement('selection-line-start');
         this.selectionLineEnd = this.getElement('selection-line-end');
         this.selectionLabel = this.getElement('selection-label');
+        this.selectionStatsPanel = this.getElement('selection-stats-panel');
+        this.selectionStatsRange = this.getElement('selection-stats-range');
+        this.selectionStatsSearch = this.getElement(
+            'selection-stats-search') as HTMLInputElement;
+        this.selectionStatsCpu = this.getElement('selection-stats-cpu');
+        this.selectionStatsGpu = this.getElement('selection-stats-gpu');
+        this.selectionStatsFooter = this.getElement('selection-stats-footer');
+        this.selectionStatsSearch.addEventListener(
+            'input', () => this.renderSelectionStatisticsTables());
+        this.selectionStatsSearch.addEventListener(
+            'keydown', (event) => event.stopPropagation());
         this.fileSelector = this.getElement('file-selector');
         this.loadingOverlay = this.getElement('loading-overlay');
         this.loadingText = this.loadingOverlay.querySelector('.loading-text') as HTMLElement;
@@ -290,7 +336,14 @@ export class ZoneVisualizer {
      * buffer sizes to handle large traces (potentially millions of zones).
      * The preferred canvas format is auto-detected for optimal performance.
      */
-    async initWebGPU(): Promise<void> {
+    initWebGPU(): Promise<void> {
+        if (!this.webGpuInitialization) {
+            this.webGpuInitialization = this.initializeWebGPU();
+        }
+        return this.webGpuInitialization;
+    }
+
+    private async initializeWebGPU(): Promise<void> {
         if (!navigator.gpu) {
             throw new Error('WebGPU not supported');
         }
@@ -369,7 +422,8 @@ export class ZoneVisualizer {
             this.selectionRegion,
             this.selectionLineStart,
             this.selectionLineEnd,
-            this.selectionLabel
+            this.selectionLabel,
+            (bounds) => this.updateSelectionStatistics(bounds)
         );
         this.interactionManager.updateLayout(
             this.rowOffsets, this.rowVisible, this.zoneVisibility);
@@ -471,6 +525,7 @@ export class ZoneVisualizer {
         this.selectionLineStart.style.display = 'none';
         this.selectionLineEnd.style.display = 'none';
         this.selectionLabel.style.display = 'none';
+        this.updateSelectionStatistics(null);
 
         // Clear label canvas
         const rect = this.labelCanvas.getBoundingClientRect();
@@ -508,6 +563,7 @@ export class ZoneVisualizer {
         await new Promise(resolve => setTimeout(resolve, LOADING_OVERLAY_DELAY));
 
         try {
+            await this.initWebGPU();
             await this.loadTraceFile(file);
             await this.initVisualization();
             this.loadingOverlay.classList.add('hidden');
@@ -547,6 +603,7 @@ export class ZoneVisualizer {
         await new Promise(resolve => setTimeout(resolve, LOADING_OVERLAY_DELAY));
 
         try {
+            await this.initWebGPU();
             await this.loadTraceFile(file);
             await this.initVisualization();
             this.loadingOverlay.classList.add('hidden');
@@ -586,6 +643,7 @@ export class ZoneVisualizer {
         await new Promise(resolve => setTimeout(resolve, 0));
 
         try {
+            await this.initWebGPU();
             // Fetch sample file from public directory (with base path)
             const basePath = import.meta.env.BASE_URL || '/';
             const response = await fetch(`${basePath}${fileName}`);
@@ -812,6 +870,7 @@ export class ZoneVisualizer {
         this.rowBaseYs = lanes.ys.slice();
         this.rowOffsets = new Float32Array(lanes.count);
         this.rowVisible = new Uint8Array(lanes.count);
+        this.rowSelected = new Uint8Array(lanes.count);
         this.rowVisibleZoneCounts = new Uint32Array(lanes.count);
         this.rowLayout = new Float32Array(lanes.count * 4);
         this.zoneVisibility = new Uint32Array(zones.count);
@@ -1224,6 +1283,143 @@ export class ZoneVisualizer {
         await this.rebuildProjection();
     }
 
+    /** Rebuilds the sidebar only when a selection is finalized or cleared. */
+    private updateSelectionStatistics(
+        bounds: SelectionBounds | null
+    ): void {
+        this.updateSelectionRows(bounds);
+        if (!bounds || !this.hierarchy) {
+            this.selectionStatsPanel.classList.add('hidden');
+            document.body.classList.remove('selection-stats-active');
+            return;
+        }
+
+        const selectionStartNs = bounds.start * MS_TO_NS;
+        const selectionEndNs = bounds.end * MS_TO_NS;
+        const statistics = AggregateSelectionStatistics(
+            this.hierarchy.zones,
+            this.zoneVisibility,
+            this.rowSelected,
+            this.rowOffsets,
+            this.rowIsGpu,
+            selectionStartNs,
+            selectionEndNs,
+            bounds.bottom,
+            bounds.top
+        );
+
+        let selectedRowCount = 0;
+        for (const selected of this.rowSelected) selectedRowCount += selected;
+
+        this.selectionStatsRange.textContent =
+            `${Math.round(selectionStartNs).toLocaleString()} ns - `
+            + `${Math.round(selectionEndNs).toLocaleString()} ns `
+            + `(${formatDuration(selectionEndNs - selectionStartNs)}; `
+            + `${selectedRowCount.toLocaleString()} `
+            + `${selectedRowCount === 1 ? 'row' : 'rows'})`;
+        this.selectionCpuStatistics = statistics.cpu;
+        this.selectionGpuStatistics = statistics.gpu;
+        this.renderSelectionStatisticsTables();
+        this.selectionStatsPanel.classList.remove('hidden');
+        document.body.classList.add('selection-stats-active');
+    }
+
+    /** Converts the vertical drag span into whole-track selection bits. */
+    private updateSelectionRows(bounds: SelectionBounds | null): void {
+        if (!this.hierarchy) return;
+
+        const lanes = this.hierarchy.lanes;
+        for (let rowIndex = 0; rowIndex < lanes.count; rowIndex++) {
+            const rowBottom = lanes.ys[rowIndex];
+            const rowTop = rowBottom + lanes.heights[rowIndex];
+            const selected = bounds !== null
+                && this.rowVisible[rowIndex] !== 0
+                && rowBottom <= bounds.top
+                && rowTop >= bounds.bottom;
+            this.rowSelected[rowIndex] = selected ? 1 : 0;
+            this.rowLayout[rowIndex * 4 + 2] = selected ? 1 : 0;
+        }
+
+        if (this.gpuResources) {
+            this.device.queue.writeBuffer(
+                this.gpuResources.buffers.rowLayout, 0, this.rowLayout);
+        }
+    }
+
+    private renderSelectionStatisticsTable(
+        container: HTMLElement,
+        statistics: ZoneStatistics[]
+    ): void {
+        container.replaceChildren();
+        if (statistics.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'selection-stats-empty';
+            empty.textContent = this.selectionStatsSearch.value.trim()
+                ? 'No matching events'
+                : 'No zones in this selection';
+            container.appendChild(empty);
+            return;
+        }
+
+        const table = document.createElement('table');
+        table.className = 'selection-stats-table';
+        const header = table.createTHead().insertRow();
+        for (const label of ['Zone', 'Count', 'Total', 'Average']) {
+            const cell = document.createElement('th');
+            cell.scope = 'col';
+            cell.textContent = label;
+            header.appendChild(cell);
+        }
+
+        const body = table.createTBody();
+        for (const statistic of statistics) {
+            const row = body.insertRow();
+            const descriptor = this.hierarchy?.formatDescriptors[
+                statistic.displayFormatDescId];
+            const name = descriptor?.labelString
+                ?? `Event spec ${statistic.eventSpecId}`;
+            const values = [
+                name,
+                statistic.count.toLocaleString(),
+                formatDuration(statistic.totalNs),
+                formatDuration(statistic.averageNs)
+            ];
+
+            for (let column = 0; column < values.length; column++) {
+                const cell = row.insertCell();
+                cell.textContent = values[column];
+                if (column === 0) cell.title = name;
+            }
+        }
+
+        container.appendChild(table);
+    }
+
+    private renderSelectionStatisticsTables(): void {
+        const query = this.selectionStatsSearch.value.trim().toLocaleLowerCase();
+        const filter = (statistics: ZoneStatistics[]): ZoneStatistics[] => {
+            if (!query) return statistics;
+            return statistics.filter((statistic) => {
+                const descriptor = this.hierarchy?.formatDescriptors[
+                    statistic.displayFormatDescId];
+                const name = descriptor?.labelString ?? '';
+                return name.toLocaleLowerCase().includes(query)
+                    || statistic.eventSpecId.toString().includes(query);
+            });
+        };
+
+        const cpuStatistics = filter(this.selectionCpuStatistics);
+        const gpuStatistics = filter(this.selectionGpuStatistics);
+        this.renderSelectionStatisticsTable(this.selectionStatsCpu, cpuStatistics);
+        this.renderSelectionStatisticsTable(this.selectionStatsGpu, gpuStatistics);
+
+        const totalNs = [...cpuStatistics, ...gpuStatistics]
+            .reduce((total, statistic) => total + statistic.totalNs, 0);
+        this.selectionStatsFooter.textContent = query
+            ? `Filtered total duration: ${formatDuration(totalNs)}`
+            : `Total duration: ${formatDuration(totalNs)}`;
+    }
+
     /**
      * Wrapper around formatStringHelper to use instance's format descriptors.
      * Replaces placeholders like {0}, {1} with parameter values.
@@ -1317,6 +1513,9 @@ export class ZoneVisualizer {
         // Prevent right-click context menu on canvas
         this.canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
+            const candidate = this.rightClickCandidate;
+            this.rightClickCandidate = null;
+            if (candidate) void this.copyZoneTiming(candidate.zoneIndex);
         });
 
         window.addEventListener('resize', () => this.resizeCanvas());
@@ -1330,6 +1529,10 @@ export class ZoneVisualizer {
 
         window.addEventListener('wheel', (e) => {
             if (!this.camera) return;
+            if (e.target instanceof Element
+                && e.target.closest('#selection-stats-panel')) {
+                return;
+            }
 
             const helpOverlay = document.getElementById('help-overlay');
             if (helpOverlay && !helpOverlay.classList.contains('hidden')) return;
@@ -1385,19 +1588,26 @@ export class ZoneVisualizer {
                     / WHEEL_ZOOM_REFERENCE_PIXELS);
 
             if (this.wheelGestureMode === 'zoomBoth') {
-                this.camera.zoom = Math.max(
+                const newZoomY = Math.max(
                     MIN_ZOOM_Y,
                     Math.min(MAX_ZOOM_Y, this.camera.zoom * zoomFactor));
+                const newZoomX = Math.max(
+                    MIN_ZOOM_X,
+                    Math.min(MAX_ZOOM_X,
+                        oldZoomX * newZoomY / oldZoomY));
+                this.camera.zoom = newZoomY;
+                this.camera.xZoomMultiplier = newZoomX / newZoomY;
             } else if (this.wheelGestureMode === 'zoomY') {
                 this.camera.zoom = Math.max(
                     MIN_ZOOM_Y,
                     Math.min(MAX_ZOOM_Y, this.camera.zoom * zoomFactor));
                 this.camera.xZoomMultiplier = oldZoomX / this.camera.zoom;
             } else {
-                this.camera.xZoomMultiplier = Math.max(
+                const newZoomX = Math.max(
                     MIN_ZOOM_X,
                     Math.min(MAX_ZOOM_X,
-                        this.camera.xZoomMultiplier * zoomFactor));
+                        oldZoomX * zoomFactor));
+                this.camera.xZoomMultiplier = newZoomX / this.camera.zoom;
             }
 
             if (this.wheelGestureMode !== 'zoomY') {
@@ -1423,8 +1633,13 @@ export class ZoneVisualizer {
                     // Convert zone times from nanoseconds to milliseconds
                     const zoneStartMs = this.hierarchy.zones.startsX[result.zoneIdx] * 1e-6;
                     const zoneEndMs = this.hierarchy.zones.endsX[result.zoneIdx] * 1e-6;
-                    this.interactionManager.startSelection(Math.max(0, zoneStartMs - epsilon));
-                    this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, zoneEndMs + epsilon));
+                    const rowIndex = this.hierarchy.zones.smIndices[result.zoneIdx];
+                    const rowBottom = this.hierarchy.lanes.ys[rowIndex];
+                    const rowTop = rowBottom + this.hierarchy.lanes.heights[rowIndex];
+                    this.interactionManager.startSelection(
+                        Math.max(0, zoneStartMs - epsilon), rowBottom);
+                    this.interactionManager.updateSelectionEnd(
+                        Math.min(this.TIME_RANGE, zoneEndMs + epsilon), rowTop);
                     this.interactionManager.endSelection();
                     this.interactionManager.updateSelection();
                 } else if (result.blockIdx !== -1) {
@@ -1432,8 +1647,13 @@ export class ZoneVisualizer {
                     // Convert block times from nanoseconds to milliseconds
                     const blockStartMs = this.hierarchy.blocks.startsX[result.blockIdx] * 1e-6;
                     const blockEndMs = this.hierarchy.blocks.endsX[result.blockIdx] * 1e-6;
-                    this.interactionManager.startSelection(Math.max(0, blockStartMs - epsilon));
-                    this.interactionManager.updateSelectionEnd(Math.min(this.TIME_RANGE, blockEndMs + epsilon));
+                    const rowIndex = this.hierarchy.blocks.smIndices[result.blockIdx];
+                    const rowBottom = this.hierarchy.lanes.ys[rowIndex];
+                    const rowTop = rowBottom + this.hierarchy.lanes.heights[rowIndex];
+                    this.interactionManager.startSelection(
+                        Math.max(0, blockStartMs - epsilon), rowBottom);
+                    this.interactionManager.updateSelectionEnd(
+                        Math.min(this.TIME_RANGE, blockEndMs + epsilon), rowTop);
                     this.interactionManager.endSelection();
                     this.interactionManager.updateSelection();
                 }
@@ -1462,6 +1682,15 @@ export class ZoneVisualizer {
                 this.camera.isDragging = true;
                 this.camera.lastX = e.clientX;
                 this.camera.lastY = e.clientY;
+                const result = this.hierarchy
+                    ? this.interactionManager.findZoneAtPosition(
+                        e.clientX, e.clientY, this.hierarchy)
+                    : { zoneIdx: -1, blockIdx: -1 };
+                this.rightClickCandidate = result.zoneIdx === -1 ? null : {
+                    zoneIndex: result.zoneIdx,
+                    screenX: e.clientX,
+                    screenY: e.clientY
+                };
             } else if (e.button === 0) {
                 if (this.hierarchy) {
                     const result = this.interactionManager.findZoneAtPosition(
@@ -1474,7 +1703,9 @@ export class ZoneVisualizer {
 
                 const worldPos = this.camera.screenToWorld(e.clientX, e.clientY, this.canvas);
                 const clampedX = Math.max(0, Math.min(this.TIME_RANGE, worldPos.x));
-                this.interactionManager.startSelection(clampedX);
+                this.interactionManager.startSelection(clampedX, worldPos.y);
+                this.updateSelectionRows(
+                    this.interactionManager.getSelectionBounds());
                 this.interactionManager.hideSelectionUI();
             }
         });
@@ -1506,6 +1737,13 @@ export class ZoneVisualizer {
             const isHelpOpen = helpOverlay && !helpOverlay.classList.contains('hidden');
 
             if (this.camera.isDragging) {
+                if (this.rightClickCandidate
+                    && Math.hypot(
+                        e.clientX - this.rightClickCandidate.screenX,
+                        e.clientY - this.rightClickCandidate.screenY)
+                        > RIGHT_CLICK_DRAG_THRESHOLD_PX) {
+                    this.rightClickCandidate = null;
+                }
                 const dx = e.clientX - this.camera.lastX;
                 const dy = e.clientY - this.camera.lastY;
                 const rect = this.canvas.getBoundingClientRect();
@@ -1518,7 +1756,11 @@ export class ZoneVisualizer {
 
             if (this.interactionManager.isCurrentlySelecting()) {
                 const worldPos = this.camera.screenToWorld(e.clientX, e.clientY, this.canvas);
-                this.interactionManager.updateSelectionEnd(Math.max(0, Math.min(this.TIME_RANGE, worldPos.x)));
+                this.interactionManager.updateSelectionEnd(
+                    Math.max(0, Math.min(this.TIME_RANGE, worldPos.x)),
+                    worldPos.y);
+                this.updateSelectionRows(
+                    this.interactionManager.getSelectionBounds());
                 this.interactionManager.updateSelection();
             }
 
@@ -1553,6 +1795,47 @@ export class ZoneVisualizer {
             this.cursorLine.style.display = 'none';
             this.cursorTimestamp.style.display = 'none';
         });
+    }
+
+    private async copyZoneTiming(zoneIndex: number): Promise<void> {
+        if (!this.hierarchy || zoneIndex < 0
+            || zoneIndex >= this.hierarchy.zones.count) {
+            return;
+        }
+
+        const zones = this.hierarchy.zones;
+        const parameterOffset = zones.paramsOffsets[zoneIndex];
+        const parameterCount = zones.paramsCounts[zoneIndex];
+        const parameters: number[] = [];
+        for (let parameterIndex = 0;
+            parameterIndex < parameterCount; parameterIndex++) {
+            parameters.push(
+                zones.paramsPool[parameterOffset + parameterIndex]);
+        }
+
+        const name = this.formatString(
+            zones.formatDescIds[zoneIndex], parameters);
+        const startNs = zones.startsX[zoneIndex];
+        const endNs = zones.endsX[zoneIndex];
+        const durationNs = endNs - startNs;
+        const text = `${name}\nStart: ${startNs} ns\nEnd: ${endNs} ns\n`
+            + `Duration: ${durationNs} ns (${formatDuration(durationNs)})`;
+
+        this.blinkedZoneId = zoneIndex;
+        this.blinkStartTime = performance.now();
+
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            textarea.remove();
+        }
     }
 
     /** Fits the trace beside the hierarchical track-label gutter. */
@@ -1845,7 +2128,7 @@ export class ZoneVisualizer {
         // Update only the dynamic content
         const dynamicStats = this.stats.querySelector('.stats-dynamic');
         if (dynamicStats && this.hierarchy) {
-            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration}<br>Rows: ${this.hierarchy.lanes.count.toLocaleString()} | Groups: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${this.camera.zoomX.toFixed(2)} × ${this.camera.zoomY.toFixed(2)} | FPS: ${fpsStr}`;
+            dynamicStats.innerHTML = `${this.kernelName}<br>Duration: ${formattedDuration}<br>Rows: ${this.hierarchy.lanes.count.toLocaleString()} | Groups: ${this.hierarchy.blocks.count.toLocaleString()} | Zones: ${this.numZones.toLocaleString()}<br>Zoom: ${FormatZoomFactor(this.camera.zoomX)} × ${FormatZoomFactor(this.camera.zoomY)} | FPS: ${fpsStr}`;
         }
         this.lastTime = now;
 
@@ -1897,6 +2180,17 @@ export class ZoneVisualizer {
         floatView[26] = scale_x;
         floatView[27] = scale_y;
         floatView[28] = this.canvas.width;
+        const blinkElapsed = now - this.blinkStartTime;
+        if (this.blinkedZoneId !== -1
+            && blinkElapsed < ZONE_BLINK_DURATION_MS) {
+            intView[29] = this.blinkedZoneId;
+            floatView[30] = 0.3 + 0.7 * Math.pow(
+                Math.sin(Math.PI * blinkElapsed / ZONE_BLINK_DURATION_MS), 2);
+        } else {
+            this.blinkedZoneId = -1;
+            intView[29] = -1;
+            floatView[30] = 0;
+        }
 
         this.device.queue.writeBuffer(this.gpuResources.uniformBuffer, 0, this.uniformData);
 

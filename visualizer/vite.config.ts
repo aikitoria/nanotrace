@@ -4,8 +4,8 @@ import { createHtmlPlugin } from 'vite-plugin-html';
 
 const gitHash = process.env.NANOTRACE_GIT_HASH ?? 'dev';
 
-export default defineConfig({
-  base: '/nanotrace/',
+export default defineConfig(({ command }) => ({
+  base: command === 'serve' ? '/' : '/nanotrace/',
   define: {
     __GIT_HASH__: JSON.stringify(gitHash),
   },
@@ -49,4 +49,4 @@ export default defineConfig({
     extensions: ['.ts', '.js'],
   },
   publicDir: 'public',
-});
+}));

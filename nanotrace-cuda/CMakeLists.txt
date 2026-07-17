@@ -12,6 +12,8 @@ set(CMAKE_CUDA_ARCHITECTURES "120a")
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
+find_path(LIBIBERTY_INCLUDE_DIR libiberty/demangle.h REQUIRED)
+find_library(LIBIBERTY_LIBRARY iberty REQUIRED)
 
 # Options
 option(NANOTRACE_WITH_MINIZ "Enable compression support with miniz" ON)
@@ -47,6 +49,10 @@ target_include_directories(nanotrace PUBLIC
     ${CUDAToolkit_INCLUDE_DIRS}
 )
 
+target_include_directories(nanotrace PRIVATE
+    ${LIBIBERTY_INCLUDE_DIR}
+)
+
 # Add ext directory for miniz
 if(NANOTRACE_WITH_MINIZ)
     target_include_directories(nanotrace PRIVATE
@@ -59,6 +65,12 @@ target_link_libraries(nanotrace PUBLIC
     CUDA::cuda_driver
     CUDA::cudart
 )
+
+target_link_libraries(nanotrace PRIVATE
+    ${LIBIBERTY_LIBRARY}
+)
+
+target_compile_definitions(nanotrace PRIVATE HAVE_DECL_BASENAME=1)
 
 if(NANOTRACE_CUPTI_LIBRARY)
     add_library(nanotrace_cupti SHARED IMPORTED)

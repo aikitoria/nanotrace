@@ -117,6 +117,8 @@ struct Uniforms {
     scale_x: f32,
     scale_y: f32,
     viewport_width: f32,
+    blinkedId: i32,
+    blinkIntensity: f32,
 }
 `;
 
@@ -148,7 +150,7 @@ const WGSL_ROW_LAYOUT = `
 struct RowLayout {
     yOffset: f32,
     visible: f32,
-    padding0: f32,
+    selected: f32,
     padding1: f32,
 }
 
@@ -175,6 +177,7 @@ struct VertexOutput {
     @location(2) @interpolate(flat) color: vec3<f32>,
     @location(3) @interpolate(flat) zoneSize: vec2<f32>,
     @location(4) @interpolate(flat) isSelected: f32,
+    @location(5) @interpolate(flat) blinkIntensity: f32,
 }
 
 ${WGSL_DOUBLE_PRECISION_FUNCTIONS}
@@ -239,12 +242,15 @@ fn vertexMain(
     output.isHovered = select(0.0, 1.0, id == uniforms.hoveredId);
     output.color = color;
     output.zoneSize = vec2<f32>(width, height);
+    output.blinkIntensity = select(
+        0.0, uniforms.blinkIntensity, id == uniforms.blinkedId);
 
     // Selection calculation using high-precision position
     let zoneCenterX = ds_add(x_high, x_low, 0.0, 0.0); // Reconstruct absolute position
     let zoneStart = zoneCenterX - width * 0.5;
     let zoneEnd = zoneCenterX + width * 0.5;
     let isFullyInside = uniforms.hasSelection != 0 &&
+                       rowLayout.selected >= 0.5 &&
                        zoneStart >= uniforms.selectionStart &&
                        zoneEnd <= uniforms.selectionEnd;
     output.isSelected = select(0.0, 1.0, isFullyInside);
@@ -267,6 +273,8 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         fillColor = mix(baseFillColor, baseFillColor * ${SELECTION_BRIGHTNESS_BOOST}, input.isSelected);
     }
+    fillColor = mix(
+        fillColor, vec3<f32>(1.0, 0.78, 0.22), input.blinkIntensity);
 
     if (uniforms.zoomY < ${OUTLINE_DISABLE_ZOOM_THRESHOLD}) {
         return vec4<f32>(fillColor, 1.0);
@@ -295,6 +303,8 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         outlineColor = mix(baseOutlineColor, baseOutlineColor * ${SELECTION_BRIGHTNESS_BOOST}, input.isSelected);
     }
+    outlineColor = mix(
+        outlineColor, vec3<f32>(1.0, 0.94, 0.68), input.blinkIntensity);
 
     let color = select(fillColor, outlineColor, isEdge);
 
@@ -611,6 +621,7 @@ fn vertexMain(
     let blockStart = ds_add(startX_high, startX_low, 0.0, 0.0);
     let blockEnd = ds_add(endX_high, endX_low, 0.0, 0.0);
     let isFullyInside = uniforms.hasSelection != 0 &&
+                       rowLayout.selected >= 0.5 &&
                        blockStart >= uniforms.selectionStart &&
                        blockEnd <= uniforms.selectionEnd;
 

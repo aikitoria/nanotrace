@@ -110,6 +110,7 @@ export class ZonesSoA {
     colors!: Uint8Array;                // [r0,g0,b0, r1,g1,b1, ...] packed bytes (0-255)
 
     // Format descriptors (for zone labels)
+    eventSpecIds!: Uint32Array;         // Stable interned event specification identity
     formatDescIds!: Uint16Array;        // Format descriptor index
     paramsOffsets!: Uint32Array;        // Index into paramsPool
     paramsCounts!: Uint8Array;          // Params count per zone

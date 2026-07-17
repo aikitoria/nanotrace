@@ -2,7 +2,7 @@
  * Camera system for viewport control and coordinate transformations.
  *
  * Provides independent X/Y zoom control for specialized timeline visualization:
- * - X-axis zoom: Timeline (scroll wheel) - Range: 0.001x to 1,000,000x
+ * - X-axis zoom: Timeline (scroll wheel) - Range: 1e-9x to 20,000x
  * - Y-axis zoom: Vertical (Shift+scroll or Ctrl+scroll) - Range: 0.01x to 2.0x
  *
  * Coordinate spaces:

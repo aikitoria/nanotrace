@@ -64,6 +64,7 @@ namespace nanotrace
             {
                 result = cudaDeviceSynchronize();
             }
+
             if (result != cudaSuccess)
             {
                 _last_error = "Failed to prime GPU hardware tracing: ";

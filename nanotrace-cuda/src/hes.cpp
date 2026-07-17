@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <atomic>
-#include <cxxabi.h>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -9,6 +8,7 @@
 #include <utility>
 
 #include <cupti.h>
+#include <libiberty/demangle.h>
 
 #include "hes.h"
 
@@ -26,10 +26,10 @@ namespace nanotrace
                 return "CUDA kernel";
             }
 
-            int status = 0;
-            char* demangled = abi::__cxa_demangle(name, nullptr, nullptr,
-                &status);
-            if (status != 0 || !demangled)
+            constexpr int options = DMGL_PARAMS | DMGL_ANSI | DMGL_VERBOSE
+                | DMGL_NO_RECURSE_LIMIT;
+            char* demangled = cplus_demangle(name, options);
+            if (!demangled)
             {
                 std::free(demangled);
                 return name;

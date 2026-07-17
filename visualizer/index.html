@@ -26,6 +26,23 @@
     <div class="selection-line" id="selection-line-start"></div>
     <div class="selection-line" id="selection-line-end"></div>
     <div id="selection-label" class="mono"></div>
+    <aside id="selection-stats-panel" class="hidden">
+        <header class="selection-stats-header">
+            <h2>Selection statistics</h2>
+            <div id="selection-stats-range" class="mono"></div>
+            <div class="selection-stats-note">Visible zones enclosed in time on selected sublanes, grouped by event specification</div>
+            <input id="selection-stats-search" type="search" placeholder="Search events or spec IDs" autocomplete="off" spellcheck="false">
+        </header>
+        <section>
+            <h3>GPU zones</h3>
+            <div id="selection-stats-gpu"></div>
+        </section>
+        <section>
+            <h3>CPU zones</h3>
+            <div id="selection-stats-cpu"></div>
+        </section>
+        <footer id="selection-stats-footer" class="mono"></footer>
+    </aside>
 
     <div id="file-selector" class="overlay-full">
         <div class="file-selector-content" id="file-selector-content">
