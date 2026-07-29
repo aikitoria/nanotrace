@@ -183,7 +183,16 @@ namespace nanotrace
         using StreamTrackMap = std::unordered_map<StreamKey, TrackId,
             StreamKeyHash>;
         using GraphExecutionMap = std::unordered_map<GraphExecutionKey,
-            size_t, GraphExecutionKeyHash>;
+            std::vector<size_t>, GraphExecutionKeyHash>;
+
+        // Kernel activity is collected in node-trace mode, where CUPTI does
+        // not also provide graph-level records. Correlation IDs normally
+        // identify one launch, but HES can reuse one on a later replay (and
+        // can report zero). Keep executions separated when their kernel
+        // activity has a substantial idle gap instead of stretching one
+        // synthetic graph interval across unrelated launches.
+        constexpr uint64_t GRAPH_EXECUTION_MAX_KERNEL_GAP_NS =
+            100ULL * 1000 * 1000;
 
         bool ReadHesEvent(const void* source, size_t event_index,
             BufferedEventWithArguments* output,
@@ -694,39 +703,49 @@ namespace nanotrace
                 uint64_t correlation_id, uint64_t start_ns,
                 uint64_t end_ns)
             {
-                if (graph_id == 0 || correlation_id == 0)
+                if (graph_id == 0)
                 {
                     return;
                 }
 
                 GraphExecutionKey key{
                     device_id, context_id, graph_id, correlation_id };
-                const GraphExecutionMap::const_iterator existing =
-                    graph_execution_indices.find(key);
-                if (existing == graph_execution_indices.end())
+                std::vector<size_t>& executions = graph_execution_indices[key];
+
+                for (size_t index : executions)
                 {
-                    size_t index = _graph_events.size();
-                    _graph_events.push_back(GraphExecutionEvent{
-                        INVALID_EVENT_ID,
-                        INVALID_TRACK_ID,
-                        _cupti_clock,
-                        device_id,
-                        context_id,
-                        graph_id,
-                        correlation_id,
-                        start_ns,
-                        end_ns,
-                        1,
-                    });
-                    graph_execution_indices.emplace(key, index);
-                    return;
+                    GraphExecutionEvent& execution = _graph_events[index];
+                    bool separated_after = start_ns > execution.end_ns
+                        && start_ns - execution.end_ns
+                            > GRAPH_EXECUTION_MAX_KERNEL_GAP_NS;
+                    bool separated_before = execution.start_ns > end_ns
+                        && execution.start_ns - end_ns
+                            > GRAPH_EXECUTION_MAX_KERNEL_GAP_NS;
+
+                    if (!separated_after && !separated_before)
+                    {
+                        execution.start_ns = std::min(
+                            execution.start_ns, start_ns);
+                        execution.end_ns = std::max(execution.end_ns, end_ns);
+                        execution.activity_count++;
+                        return;
+                    }
                 }
 
-                GraphExecutionEvent& execution =
-                    _graph_events[existing->second];
-                execution.start_ns = std::min(execution.start_ns, start_ns);
-                execution.end_ns = std::max(execution.end_ns, end_ns);
-                execution.activity_count++;
+                size_t index = _graph_events.size();
+                _graph_events.push_back(GraphExecutionEvent{
+                    INVALID_EVENT_ID,
+                    INVALID_TRACK_ID,
+                    _cupti_clock,
+                    device_id,
+                    context_id,
+                    graph_id,
+                    correlation_id,
+                    start_ns,
+                    end_ns,
+                    1,
+                });
+                executions.push_back(index);
             };
 
             for (HesKernelEvent& kernel : _raw_kernel_events)
