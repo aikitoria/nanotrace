@@ -560,7 +560,7 @@ ${WGSL_ROW_LAYOUT}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) worldPos: vec2<f32>,
+    @location(0) ndcPos: vec2<f32>,
     @location(1) @interpolate(flat) blockStart: vec2<f32>,
     @location(2) @interpolate(flat) blockEnd: vec2<f32>,
     @location(3) @interpolate(flat) isHovered: f32,
@@ -598,23 +598,10 @@ fn vertexMain(
 
     let vertex = vertices[vertexIndex];
 
-    // Block starts at startX and extends to endX
-    // Left edge (vertex.x=-1): X = startX
-    // Right edge (vertex.x=1): X = endX
-    // Use select() to pick between the two double-single values without arithmetic
-    let worldCornerX_high = select(startX_high, endX_high, vertex.x > 0.0);
-    let worldCornerX_low = select(startX_low, endX_low, vertex.x > 0.0);
-
-    // Apply camera transformation using double-precision
-    let viewX = ds_add(worldCornerX_high, worldCornerX_low, uniforms.camera_x_high, uniforms.camera_x_low);
-
     // Y doesn't need double precision
     let centerY = y + rowLayout.yOffset + height * 0.5;
     let worldCornerY = centerY + vertex.y * height * 0.5;
     let viewY = worldCornerY + uniforms.camera_y;
-
-    // Apply scale to get NDC
-    let ndcPos = vec2<f32>(viewX * uniforms.scale_x, viewY * uniforms.scale_y);
 
     // Selection calculation using high-precision
     // blockStart = startX, blockEnd = endX (use ds_add to collapse to f32 for comparison)
@@ -625,20 +612,32 @@ fn vertexMain(
                        blockStart >= uniforms.selectionStart &&
                        blockEnd <= uniforms.selectionEnd;
 
-    // Compute block bounds in view space (before scale to NDC)
+    // Compute the original block bounds in NDC for edge detection. Clamp the
+    // rasterized horizontal vertices to the viewport exactly as the block
+    // background does: a long block can otherwise produce a quad millions of
+    // pixels wide, making fixed-function clipping and f32 derivatives unstable.
     let blockStartView = ds_add(startX_high, startX_low, uniforms.camera_x_high, uniforms.camera_x_low);
     let blockEndView = ds_add(endX_high, endX_low, uniforms.camera_x_high, uniforms.camera_x_low);
-    let blockStartY = y + rowLayout.yOffset + uniforms.camera_y;
-    let blockEndY = y + rowLayout.yOffset + height + uniforms.camera_y;
+    let blockStartNdc = vec2<f32>(
+        blockStartView * uniforms.scale_x,
+        (y + rowLayout.yOffset + uniforms.camera_y) * uniforms.scale_y);
+    let blockEndNdc = vec2<f32>(
+        blockEndView * uniforms.scale_x,
+        (y + rowLayout.yOffset + height + uniforms.camera_y) * uniforms.scale_y);
+    let clippedStartX = clamp(blockStartNdc.x, -1.0, 1.0);
+    let clippedEndX = clamp(blockEndNdc.x, -1.0, 1.0);
+    let ndcPos = vec2<f32>(
+        select(clippedStartX, clippedEndX, vertex.x > 0.0),
+        viewY * uniforms.scale_y);
 
     var output: VertexOutput;
     output.position = select(
         vec4<f32>(2.0, 2.0, 0.0, 1.0),
         vec4<f32>(ndcPos, 0.0, 1.0),
         rowLayout.visible >= 0.5 && blockVisible);
-    output.worldPos = vec2<f32>(viewX, viewY);
-    output.blockStart = vec2<f32>(blockStartView, blockStartY);
-    output.blockEnd = vec2<f32>(blockEndView, blockEndY);
+    output.ndcPos = ndcPos;
+    output.blockStart = blockStartNdc;
+    output.blockEnd = blockEndNdc;
     output.isHovered = select(0.0, 1.0, i32(instanceIndex) == uniforms.hoveredBlockId);
     output.isSelected = select(0.0, 1.0, isFullyInside);
     return output;
@@ -650,17 +649,18 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Use derivatives on view-space position for pixel-accurate edge detection
-    let pixelSizeX = fwidth(input.worldPos.x);
-    let pixelSizeY = fwidth(input.worldPos.y);
+    // Derivatives stay pixel-sized because the interpolant uses the same
+    // clipped NDC geometry as the rasterizer.
+    let pixelSizeX = fwidth(input.ndcPos.x);
+    let pixelSizeY = fwidth(input.ndcPos.y);
 
-    // Compute distance from edges in view space
-    let distFromLeftEdge = input.worldPos.x - input.blockStart.x;
-    let distFromRightEdge = input.blockEnd.x - input.worldPos.x;
-    let distFromTopEdge = input.blockEnd.y - input.worldPos.y;
-    let distFromBottomEdge = input.worldPos.y - input.blockStart.y;
+    // Retain the unclipped bounds so off-screen vertical edges remain hidden.
+    let distFromLeftEdge = input.ndcPos.x - input.blockStart.x;
+    let distFromRightEdge = input.blockEnd.x - input.ndcPos.x;
+    let distFromTopEdge = input.blockEnd.y - input.ndcPos.y;
+    let distFromBottomEdge = input.ndcPos.y - input.blockStart.y;
 
-    // Edge threshold in view space (1 pixel worth, same as zones)
+    // Edge threshold in NDC (one pixel worth, same as zones)
     let edgeThicknessX = pixelSizeX * ${OUTLINE_THICKNESS_MULTIPLIER};
     let edgeThicknessY = pixelSizeY * ${OUTLINE_THICKNESS_MULTIPLIER};
 
