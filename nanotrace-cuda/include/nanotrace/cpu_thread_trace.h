@@ -11,6 +11,7 @@ namespace nanotrace
     struct BufferedCpuEvent
     {
         const char* name = nullptr;
+        const char* semantic_range = nullptr;
         uint64_t timestamp = 0;
         uint64_t duration = 0;
         uint64_t correlation_id = 0;
@@ -37,7 +38,7 @@ namespace nanotrace
 
         CpuEventToken Begin() const;
         void End(CpuEventToken token, const char* name,
-            uint64_t correlation_id = 0, uint32_t color = 0);
+            uint64_t correlation_id = 0, uint32_t color = 0, const char* semantic_range = nullptr);
         void Bookmark(const char* name, uint64_t correlation_id = 0,
             uint32_t color = 0);
         bool Flush();
@@ -48,7 +49,7 @@ namespace nanotrace
     private:
         void AddBufferedEvent(const char* name, EventKind kind,
             uint64_t timestamp, uint64_t duration,
-            uint64_t correlation_id, uint32_t color);
+            uint64_t correlation_id, uint32_t color, const char* semantic_range = nullptr);
 
         TraceSession* _session;
         TrackId _track_id;

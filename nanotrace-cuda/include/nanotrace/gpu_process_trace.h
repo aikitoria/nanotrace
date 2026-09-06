@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace nanotrace
 {
@@ -18,6 +19,17 @@ namespace nanotrace
         std::optional<uint32_t> context_id;
         size_t expected_invocation_count = 1;
         uint32_t blocks_per_invocation = 1;
+    };
+
+    // A named envelope of existing hardware-timed graph nodes. A dynamic
+    // track takes its name from RecordGraphLaunch, e.g. a surviving request.
+    struct GpuGraphRange
+    {
+        std::string name;
+        std::string track;
+        bool dynamic_track = false;
+        uint32_t color = 0;
+        uint64_t instance = 0; // Distinguishes disjoint scopes with the same label.
     };
 
     class GpuProcessTrace
@@ -37,6 +49,10 @@ namespace nanotrace
         bool AddKernelTrace(trace_writer& kernel_trace);
         bool AddKernelTrace(trace_writer& kernel_trace,
             const GpuKernelTraceOptions& options);
+        void RegisterGraphNode(uint64_t graph, uint64_t node, const char* name,
+            const std::vector<GpuGraphRange>& ranges, bool launch_anchor);
+        void MarkGraphIterationEnd(uint64_t node);
+        void RecordGraphLaunch(uint64_t graph, const char* dynamic_track);
         const std::string& LastError() const;
 
     private:

@@ -9,6 +9,8 @@
 
 namespace nanotrace
 {
+    struct GpuGraphRange;
+
     struct HesKernelEvent
     {
         EventId event_id = INVALID_EVENT_ID;
@@ -43,6 +45,10 @@ namespace nanotrace
         bool CaptureClockSnapshot();
         bool Stop();
         bool IsInitialized() const;
+        void RegisterGraphNode(uint64_t graph, uint64_t node, const char* name,
+            const std::vector<GpuGraphRange>& ranges, bool launch_anchor);
+        void MarkGraphIterationEnd(uint64_t node);
+        void RecordGraphLaunch(uint64_t graph, const char* dynamic_track);
         const std::string& LastError() const;
         const std::vector<HesKernelEvent>& KernelEvents() const;
 

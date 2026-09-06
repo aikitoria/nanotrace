@@ -6,6 +6,7 @@ import {
     LanesSoA,
     SMAccelerator,
     TraceBookmark,
+    TraceOverlays,
     TracksSoA,
     ZonesSoA
 } from './types.js';
@@ -15,8 +16,10 @@ import {
     LANE_EDGE_PADDING,
     LANE_PADDING,
     SUBLANE_HEIGHT,
+    SEMANTIC_GROUP_GAP,
     SUBLANE_PADDING
 } from './constants.js';
+import { semanticGroupTopRows, semanticRangeColor } from './semantic-layout.js';
 
 const MAGIC = 'NTRACE4';
 const FILE_HEADER_SIZE = 32;
@@ -71,12 +74,6 @@ interface EventRecord {
     kind: number;
 }
 
-interface ArgumentRecord {
-    nameId: number;
-    kind: number;
-    value: bigint;
-}
-
 interface EventFormatRecord {
     labelId: number;
     tooltipId: number;
@@ -104,6 +101,7 @@ export interface ParsedTraceData {
     trackExpansionGroupIds: bigint[];
     trackExpansionModes: TrackExpansionMode[];
     bookmarks: TraceBookmark[];
+    overlays?: TraceOverlays;
 }
 
 export enum TrackExpansionMode {
@@ -384,6 +382,9 @@ export async function parseTraceFile(
 ): Promise<ParsedTraceData> {
     if (onProgress) onProgress('Parsing unified trace...');
     const fileBuffer = await file.arrayBuffer();
+    if (fileBuffer.byteLength < FILE_HEADER_SIZE) {
+        throw new Error(`Trace "${file.name}" has an incomplete header: received ${fileBuffer.byteLength} bytes, expected at least ${FILE_HEADER_SIZE}`);
+    }
     const headerView = new DataView(fileBuffer);
     const magic = textDecoder.decode(new Uint8Array(fileBuffer, 0, 7));
     if (magic !== MAGIC) {
@@ -405,7 +406,7 @@ export async function parseTraceFile(
         throw new Error(`Unsupported nanotrace flags ${fileFlags}`);
     }
     if (storedBodySize !== fileBuffer.byteLength - FILE_HEADER_SIZE) {
-        throw new Error('Trace body size does not match the file header');
+        throw new Error(`Trace "${file.name}" size does not match its header: received ${fileBuffer.byteLength} bytes, expected ${storedBodySize + FILE_HEADER_SIZE} bytes`);
     }
 
     let buffer: ArrayBuffer;
@@ -437,7 +438,23 @@ export async function parseTraceFile(
     const clockSnapshots: ClockSnapshotRecord[] = [];
     const trackRecords: TrackRecord[] = [];
     const eventRecords: EventRecord[] = [];
-    const argumentRecords: ArgumentRecord[] = [];
+    // Compact raw arguments are essential for hardware captures with millions
+    // of kernel events. Retaining one object + BigInt per argument exceeds
+    // browser heap limits before projection, despite a small compressed file.
+    let argumentCapacity = 0;
+    for (let chunkOffset = offset; chunkOffset + CHUNK_HEADER_SIZE <= buffer.byteLength;) {
+        const chunk = new Reader(view, chunkOffset);
+        const type = chunk.u32();
+        chunk.u32();
+        const bytes = Number(chunk.u64());
+        const count = Number(chunk.u64());
+        if (type === ChunkType.Arguments) argumentCapacity += count;
+        chunkOffset += CHUNK_HEADER_SIZE + bytes;
+    }
+    const argumentNames = new Uint32Array(argumentCapacity);
+    const argumentKinds = new Uint8Array(argumentCapacity);
+    const argumentValues = new BigUint64Array(argumentCapacity);
+    let argumentCursor = 0;
     const eventFormatRecords: EventFormatRecord[] = [];
     const trackIndicesById = new Map<bigint, number>();
     while (offset + CHUNK_HEADER_SIZE <= buffer.byteLength) {
@@ -558,7 +575,9 @@ export async function parseTraceFile(
                     value = reader.varUint();
                 }
 
-                argumentRecords.push({ nameId, kind, value });
+                argumentNames[argumentCursor] = nameId;
+                argumentKinds[argumentCursor] = kind;
+                argumentValues[argumentCursor++] = value;
             }
         } else if (chunkType === ChunkType.EventFormats) {
             for (let i = 0; i < count; i++) {
@@ -653,7 +672,7 @@ export async function parseTraceFile(
             const metadata = eventFormatsByLabel[event.nameId];
             eventNameIds[event.nameId] = formatDescriptors.length;
             formatDescriptors.push({
-                labelString: name,
+                labelString: name.replace(/^(?:mina::kernels::|mina::components::)/, ''),
                 tooltipString: metadata
                     ? strings[metadata.tooltipId] ?? name : name,
                 placeholderCount: metadata?.parameterCount ?? 0
@@ -700,6 +719,7 @@ export async function parseTraceFile(
     zones.colors = new Uint8Array(zoneCount * 3);
     zones.eventSpecIds = new Uint32Array(zoneCount);
     zones.formatDescIds = new Uint16Array(zoneCount);
+    zones.semanticFormatIds = new Uint32Array(zoneCount);
     zones.paramsOffsets = new Uint32Array(zoneCount);
     zones.paramsCounts = new Uint8Array(zoneCount);
     zones.trackIndices = new Uint32Array(zoneCount);
@@ -777,12 +797,21 @@ export async function parseTraceFile(
                 ? null : new Array<string>();
             for (let argumentIndex = 0;
                 argumentIndex < event.argumentCount; argumentIndex++) {
-                const argument = argumentRecords[
-                    event.firstArgument + argumentIndex];
-                if (!argument) continue;
+                const argument = event.firstArgument + argumentIndex;
+                if (argument >= argumentCursor) continue;
 
-                const argumentName = strings[argument.nameId]
+                const argumentName = strings[argumentNames[argument]]
                     ?? `argument_${argumentIndex}`;
+                if (argumentName === 'semantic_range' && argumentKinds[argument] === 3) {
+                    const labelId = Number(argumentValues[argument]);
+                    if (eventNameIds[labelId] < 0) {
+                        eventNameIds[labelId] = formatDescriptors.length;
+                        formatDescriptors.push({labelString: strings[labelId],
+                            tooltipString: strings[labelId], placeholderCount: 0});
+                    }
+                    zones.semanticFormatIds[zoneIndex] = eventNameIds[labelId] + 1;
+                    continue;
+                }
                 if (argumentName === 'kernel_signature'
                     || argumentName === 'graph_id'
                     || argumentName === 'graph_node_id'
@@ -790,25 +819,27 @@ export async function parseTraceFile(
                     continue;
                 }
 
+                const argumentKind = argumentKinds[argument];
+                const value = argumentValues[argument];
                 let argumentValue: string;
-                if (argument.kind === 1) {
-                    argumentValue = BigInt.asIntN(64, argument.value).toString();
-                } else if (argument.kind === 2) {
+                if (argumentKind === 1) {
+                    argumentValue = BigInt.asIntN(64, value).toString();
+                } else if (argumentKind === 2) {
                     const floating = new ArrayBuffer(8);
                     new DataView(floating).setBigUint64(
-                        0, argument.value, true);
+                        0, value, true);
                     argumentValue = new DataView(floating)
                         .getFloat64(0, true).toString();
-                } else if (argument.kind === 3) {
-                    argumentValue = strings[Number(argument.value)]
-                        ?? `<string ${argument.value}>`;
+                } else if (argumentKind === 3) {
+                    argumentValue = strings[Number(value)]
+                        ?? `<string ${value}>`;
                 } else {
-                    argumentValue = argument.value.toString();
+                    argumentValue = value.toString();
                 }
                 details!.push(`${argumentName}: ${argumentValue}`);
-                if (argumentIndex < placeholderCount && argument.kind !== 3) {
+                if (argumentIndex < placeholderCount && argumentKind !== 3) {
                     zones.paramsPool[zoneParameterIndex++] = Number(
-                        BigInt.asUintN(32, argument.value));
+                        BigInt.asUintN(32, value));
                     zones.paramsCounts[zoneIndex]++;
                 }
             }
@@ -970,6 +1001,8 @@ export function projectTraceData(
 
         const parentEventId = source.zones.parentEventIds[visibleZones[0]];
         const hierarchy = source.trackHierarchies[trackIndex];
+        // Semantic annotations are overlays, never layout rows or sublanes.
+        if (hierarchy.some(node => node.kind === 9)) continue;
         const smNode = hierarchy.find(node => node.kind === 5);
         const gpuNode = hierarchy.find(node => node.kind === 2);
         const streamNode = hierarchy.find(node => node.kind === 3);
@@ -1072,6 +1105,68 @@ export function projectTraceData(
         return (originalRowOrder.get(first) ?? 0)
             - (originalRowOrder.get(second) ?? 0);
     });
+
+    // Store each semantic interval once per GPU, not once per internal CUDA
+    // stream. Expanded GPUs can contain hundreds of streams; the renderer
+    // spans the currently visible group without multiplying range storage.
+    const overlayGroups: Array<{ zones: number[]; group: number }> = [];
+    const groupRows: number[][] = [];
+    const groupsByGpu = new Map<bigint, number>();
+    let overlayCount = 0;
+    for (let track = 0; track < source.tracks.count; ++track) {
+        const hierarchy = source.trackHierarchies[track];
+        if (!hierarchy.some(node => node.kind === 9)) continue;
+        const gpu = hierarchy.find(node => node.kind === 2);
+        if (!gpu) continue;
+        let group = groupsByGpu.get(gpu.id);
+        if (group === undefined) {
+            group = groupRows.length;
+            groupsByGpu.set(gpu.id, group);
+            const targets: number[] = [];
+            rows.forEach((row, index) => {
+                if (row.hierarchy.some(node => node.id === gpu.id)) targets.push(index);
+            });
+            groupRows.push(targets);
+        }
+        const zones = visibleZonesByTrack[track] ?? [];
+        overlayGroups.push({zones, group});
+        overlayCount += zones.length;
+    }
+    // The dispatching CPU thread owns one envelope spanning its worker group.
+    // Workers keep ordinary compute zones and do not duplicate the metadata.
+    for (let track = 0; track < source.tracks.count; ++track) {
+        const hierarchy = source.trackHierarchies[track];
+        if (hierarchy[hierarchy.length - 1]?.kind !== 1) continue;
+        const zones = (visibleZonesByTrack[track] ?? []).filter(zone => source.zones.semanticFormatIds[zone] !== 0);
+        if (zones.length === 0) continue;
+        const thread = hierarchy[hierarchy.length - 1];
+        const targets: number[] = [];
+        rows.forEach((row, index) => {
+            if (row.hierarchy.some(node => node.id === thread.id)) targets.push(index);
+        });
+        overlayGroups.push({zones, group: groupRows.length});
+        groupRows.push(targets);
+        overlayCount += zones.length;
+    }
+    const overlays = new TraceOverlays(overlayCount, groupRows);
+    const semanticColors = new Map<string, number>();
+    let overlayIndex = 0;
+    for (const group of overlayGroups) for (const zone of group.zones) {
+        overlays.groupIndices[overlayIndex] = group.group;
+        overlays.startsX[overlayIndex] = source.zones.startsX[zone];
+        overlays.endsX[overlayIndex] = source.zones.endsX[zone];
+        const semantic = source.zones.semanticFormatIds[zone];
+        overlays.labels[overlayIndex] = source.formatDescriptors[semantic ? semantic - 1 : source.zones.formatDescIds[zone]].labelString;
+        const fallbackColor = semantic ? 0xD9944A : (source.zones.colors[zone * 3] << 16)
+            | (source.zones.colors[zone * 3 + 1] << 8) | source.zones.colors[zone * 3 + 2];
+        const label = overlays.labels[overlayIndex];
+        let color = semanticColors.get(label);
+        if (color === undefined) {
+            color = semanticRangeColor(label, fallbackColor);
+            semanticColors.set(label, color);
+        }
+        overlays.colors[overlayIndex++] = color;
+    }
 
     interface ProjectedBlockLayout {
         rowIndex: number;
@@ -1272,6 +1367,7 @@ export function projectTraceData(
     zones.colors = new Uint8Array(zoneCount * 3);
     zones.eventSpecIds = new Uint32Array(zoneCount);
     zones.formatDescIds = new Uint16Array(zoneCount);
+    zones.semanticFormatIds = new Uint32Array(zoneCount);
     zones.paramsOffsets = new Uint32Array(zoneCount);
     zones.paramsCounts = new Uint8Array(zoneCount);
     zones.trackIndices = new Uint32Array(zoneCount);
@@ -1363,6 +1459,7 @@ export function projectTraceData(
                 source.zones.endsX[sourceZoneIndex];
             zones.formatDescIds[targetZoneIndex] =
                 source.zones.formatDescIds[sourceZoneIndex];
+            zones.semanticFormatIds[targetZoneIndex] = source.zones.semanticFormatIds[sourceZoneIndex];
             zones.eventSpecIds[targetZoneIndex] =
                 source.zones.eventSpecIds[sourceZoneIndex];
             zones.paramsOffsets[targetZoneIndex] =
@@ -1420,6 +1517,7 @@ export function projectTraceData(
         trackExpanded: rows.map(row => row.trackExpanded),
         trackExpansionGroupIds: rows.map(row => row.expansionGroupId),
         trackExpansionModes: rows.map(row => row.expansionMode),
+        overlays,
         bookmarks: source.bookmarks
     };
 }
@@ -1455,7 +1553,8 @@ export function buildHierarchy(
     blocks: BlocksSoA,
     trackNames: string[] = [],
     trackDepths: number[] = [],
-    bookmarks: TraceBookmark[] = []
+    bookmarks: TraceBookmark[] = [],
+    overlays: TraceOverlays = new TraceOverlays()
 ): HierarchyData {
     const blocksByRow = new Map<number, number[]>();
     for (let blockIndex = 0; blockIndex < blocks.count; blockIndex++) {
@@ -1563,6 +1662,7 @@ export function buildHierarchy(
         totalDurationNs = Math.max(totalDurationNs, bookmark.timestampNs);
     }
 
+    const semanticTops = semanticGroupTopRows(lanes.count, overlays);
     let currentY = 0;
     for (let rowIndex = lanes.count - 1; rowIndex >= 0; rowIndex--) {
         lanes.ys[rowIndex] = currentY;
@@ -1604,6 +1704,7 @@ export function buildHierarchy(
             && (trackDepths[rowIndex] ?? 0) === 0
             && (trackDepths[rowIndex - 1] ?? 0) > 0;
         currentY += lanes.heights[rowIndex] + rowPadding;
+        if (semanticTops[rowIndex]) currentY += SEMANTIC_GROUP_GAP;
         if (startsExpandedGroup) {
             currentY += rowPadding * 2;
         }
@@ -1629,7 +1730,8 @@ export function buildHierarchy(
         kernelName,
         gridDims,
         clusterDims,
-        bookmarks
+        bookmarks,
+        overlays
     };
 }
 

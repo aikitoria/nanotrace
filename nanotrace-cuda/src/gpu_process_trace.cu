@@ -216,6 +216,17 @@ namespace nanotrace
             return Finish() && AddKernelTrace(kernel_trace);
         }
 
+        void RegisterGraphNode(uint64_t graph, uint64_t node, const char* name,
+            const std::vector<GpuGraphRange>& ranges, bool launch_anchor)
+        {
+            _hes.RegisterGraphNode(graph, node, name, ranges, launch_anchor);
+        }
+        void MarkGraphIterationEnd(uint64_t node) { _hes.MarkGraphIterationEnd(node); }
+        void RecordGraphLaunch(uint64_t graph, const char* dynamic_track)
+        {
+            if (_capturing) _hes.RecordGraphLaunch(graph, dynamic_track);
+        }
+
         const std::string& LastError() const
         {
             return _last_error;
@@ -243,6 +254,9 @@ namespace nanotrace
         bool AddKernelTrace(trace_writer&) { return true; }
         bool AddKernelTrace(trace_writer&,
             const GpuKernelTraceOptions&) { return true; }
+        void RegisterGraphNode(uint64_t, uint64_t, const char*, const std::vector<GpuGraphRange>&, bool) {}
+        void MarkGraphIterationEnd(uint64_t) {}
+        void RecordGraphLaunch(uint64_t, const char*) {}
         const std::string& LastError() const { return _last_error; }
 
     private:
@@ -290,6 +304,19 @@ namespace nanotrace
         return _implementation->AddKernelTrace(kernel_trace, options);
     }
 
+    void GpuProcessTrace::RegisterGraphNode(uint64_t graph, uint64_t node, const char* name,
+        const std::vector<GpuGraphRange>& ranges, bool launch_anchor)
+    {
+        _implementation->RegisterGraphNode(graph, node, name, ranges, launch_anchor);
+    }
+    void GpuProcessTrace::MarkGraphIterationEnd(uint64_t node)
+    {
+        _implementation->MarkGraphIterationEnd(node);
+    }
+    void GpuProcessTrace::RecordGraphLaunch(uint64_t graph, const char* dynamic_track)
+    {
+        _implementation->RecordGraphLaunch(graph, dynamic_track);
+    }
     const std::string& GpuProcessTrace::LastError() const
     {
         return _implementation->LastError();

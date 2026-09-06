@@ -133,6 +133,9 @@ export const LABEL_CLIP_MARGIN = 6;
 /** Fixed height of each sublane (zone track) within a block. */
 export const SUBLANE_HEIGHT = 0.014;
 
+/** Label space between annotated groups, outside their frames. */
+export const SEMANTIC_GROUP_GAP = SUBLANE_HEIGHT;
+
 /** Vertical spacing between SM lanes. */
 export const LANE_PADDING = 0.0015;
 

@@ -9,7 +9,7 @@ namespace nanotrace
     namespace
     {
         bool ReadCpuEvent(const void* source, size_t event_index,
-            BufferedEventWithArguments* output, BufferedEventArgument*, size_t)
+            BufferedEventWithArguments* output, BufferedEventArgument* arguments, size_t capacity)
         {
             const BufferedCpuEvent* events =
                 static_cast<const BufferedCpuEvent*>(source);
@@ -26,6 +26,11 @@ namespace nanotrace
             };
             output->arguments = nullptr;
             output->argument_count = 0;
+            if (event.semantic_range && capacity != 0) {
+                arguments[0] = { "semantic_range", ArgumentKind::String, 0, event.semantic_range };
+                output->arguments = arguments;
+                output->argument_count = 1;
+            }
             return true;
         }
     }
@@ -53,7 +58,7 @@ namespace nanotrace
 
     void CpuThreadTrace::AddBufferedEvent(const char* name, EventKind kind,
         uint64_t timestamp, uint64_t duration, uint64_t correlation_id,
-        uint32_t color)
+        uint32_t color, const char* semantic_range)
     {
         if (_event_count >= _events.size())
         {
@@ -62,16 +67,16 @@ namespace nanotrace
         }
 
         _events[_event_count++] = BufferedCpuEvent{
-            name, timestamp, duration, correlation_id, color, kind,
+            name, semantic_range, timestamp, duration, correlation_id, color, kind,
         };
     }
 
     void CpuThreadTrace::End(CpuEventToken token, const char* name,
-        uint64_t correlation_id, uint32_t color)
+        uint64_t correlation_id, uint32_t color, const char* semantic_range)
     {
         uint64_t end = TraceSession::MonotonicRawNowNs();
         AddBufferedEvent(name, EventKind::Slice, token.timestamp,
-            end - token.timestamp, correlation_id, color);
+            end - token.timestamp, correlation_id, color, semantic_range);
     }
 
     void CpuThreadTrace::Bookmark(const char* name,

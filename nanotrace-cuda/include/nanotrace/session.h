@@ -38,6 +38,7 @@ namespace nanotrace
         ThreadBlock,
         Warp,
         Generic,
+        GpuAnnotation,
     };
 
     enum class EventKind : uint8_t

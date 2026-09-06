@@ -14,6 +14,7 @@
  */
 
 import { Camera } from './utils/camera.js';
+import { semanticGroupTopRows } from './utils/semantic-layout.js';
 import { parseTraceFile, projectTraceData, buildHierarchy, formatString as formatStringHelper, formatTrackString as formatTrackStringHelper, formatBlockString as formatBlockStringHelper, formatTooltipString as formatTooltipStringHelper, formatTrackTooltipString as formatTrackTooltipStringHelper, formatBlockTooltipString as formatBlockTooltipStringHelper, TrackExpansionMode, type ParsedTraceData } from './utils/file-loader.js';
 import { createGPUBuffers, createPipelines, GPUResources } from './renderers/gpu-renderer.js';
 import { LabelRenderer } from './renderers/label-renderer.js';
@@ -49,6 +50,7 @@ import {
     MIN_LABEL_FONT_SIZE,
     MIN_LABEL_ZOOM_Y,
     SUBLANE_HEIGHT,
+    SEMANTIC_GROUP_GAP,
     LOADING_OVERLAY_DELAY,
     FPS_PADDING_WIDTH,
     MS_TO_NS,
@@ -262,6 +264,7 @@ export class ZoneVisualizer {
         const helpOverlay = this.getElement('help-overlay');
         this.helpBtn.addEventListener('click', () => {
             helpOverlay.classList.remove('hidden');
+            this.labelRenderer?.setHoveredSemanticRange(-1);
             // Hide cursor line, timestamp, and tooltip when help is open
             this.cursorLine.style.display = 'none';
             this.cursorTimestamp.style.display = 'none';
@@ -850,7 +853,8 @@ export class ZoneVisualizer {
             parsedData.blocks,
             parsedData.trackNames,
             parsedData.trackDepths,
-            parsedData.bookmarks
+            parsedData.bookmarks,
+            parsedData.overlays
         );
         // Store metadata for rendering
         this.worldHeight = this.hierarchy.worldHeight;
@@ -1018,6 +1022,7 @@ export class ZoneVisualizer {
             if (visible) previousVisibleRow = rowIndex;
         }
 
+        const semanticTops = semanticGroupTopRows(lanes.count, this.hierarchy.overlays, this.rowVisible);
         const oldWorldHeight = this.worldHeight;
         const rowPadding = LANE_PADDING + BLOCK_LANE_PADDING;
         let currentY = 0;
@@ -1031,6 +1036,7 @@ export class ZoneVisualizer {
 
             if (!visible) continue;
             currentY += lanes.heights[rowIndex] + rowPadding;
+            if (semanticTops[rowIndex]) currentY += SEMANTIC_GROUP_GAP;
             const aboveRow = visibleAbove[rowIndex];
             if (aboveRow >= 0
                 && this.rowIsGpu[rowIndex] !== this.rowIsGpu[aboveRow]) {
@@ -1188,14 +1194,7 @@ export class ZoneVisualizer {
         this.interactionManager?.clearSelection();
         if (this.interactionManager && this.hierarchy
             && screenX !== undefined && screenY !== undefined) {
-            this.interactionManager.updateHover(
-                screenX,
-                screenY,
-                this.hierarchy,
-                this.formatTooltipString.bind(this),
-                this.formatTrackTooltipString.bind(this),
-                this.formatBlockTooltipString.bind(this)
-            );
+            this.updateHover(screenX, screenY);
         }
     }
 
@@ -1224,11 +1223,7 @@ export class ZoneVisualizer {
             this.updateExpandAllButton();
             if (this.interactionManager && this.hierarchy
                 && screenX !== undefined && screenY !== undefined) {
-                this.interactionManager.updateHover(
-                    screenX, screenY, this.hierarchy,
-                    this.formatTooltipString.bind(this),
-                    this.formatTrackTooltipString.bind(this),
-                    this.formatBlockTooltipString.bind(this));
+                this.updateHover(screenX, screenY);
             }
             return;
         } else {
@@ -1256,11 +1251,7 @@ export class ZoneVisualizer {
             this.interactionManager?.clearSelection();
             if (this.interactionManager && this.hierarchy
                 && screenX !== undefined && screenY !== undefined) {
-                this.interactionManager.updateHover(
-                    screenX, screenY, this.hierarchy,
-                    this.formatTooltipString.bind(this),
-                    this.formatTrackTooltipString.bind(this),
-                    this.formatBlockTooltipString.bind(this));
+                this.updateHover(screenX, screenY);
             }
             return;
         }
@@ -1785,16 +1776,32 @@ export class ZoneVisualizer {
                 this.cursorTimestamp.style.display = 'none';
             }
 
-            // Don't update hover if help overlay is open
-            if (!isHelpOpen && this.hierarchy) {
-                this.interactionManager.updateHover(e.clientX, e.clientY, this.hierarchy, this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this), this.formatBlockTooltipString.bind(this));
+            if (!isHelpOpen && !this.camera.isDragging
+                && !this.interactionManager.isCurrentlySelecting()) {
+                this.updateHover(e.clientX, e.clientY);
+            } else {
+                this.labelRenderer?.setHoveredSemanticRange(-1);
+                this.tooltip.classList.remove('visible');
             }
+
         });
 
         document.body.addEventListener('mouseleave', () => {
+            this.labelRenderer?.setHoveredSemanticRange(-1);
             this.cursorLine.style.display = 'none';
             this.cursorTimestamp.style.display = 'none';
         });
+    }
+
+    private updateHover(screenX: number, screenY: number): void {
+        if (!this.hierarchy || !this.interactionManager || !this.labelRenderer) return;
+        const rect = this.canvas.getBoundingClientRect();
+        const range = this.labelRenderer.findSemanticRangeAtPosition(
+            screenX - rect.left, screenY - rect.top, this.rowVisible);
+        const highlighted = this.interactionManager.updateHover(screenX, screenY, this.hierarchy,
+            this.formatTooltipString.bind(this), this.formatTrackTooltipString.bind(this),
+            this.formatBlockTooltipString.bind(this), range.index, range.header);
+        this.labelRenderer.setHoveredSemanticRange(highlighted);
     }
 
     private async copyZoneTiming(zoneIndex: number): Promise<void> {

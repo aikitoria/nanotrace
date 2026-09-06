@@ -97,6 +97,7 @@ export class ZonesSoA {
     expanded!: Uint8Array;
     disclosureKeys: string[] = [];
     details: string[] = [];
+    semanticFormatIds!: Uint32Array;    // Optional overlay descriptor + 1, zero means none
 
     // Spatial bounds (integer nanoseconds for precision)
     startsX!: Float64Array;              // Start time in nanoseconds
@@ -251,6 +252,22 @@ export class SMAccelerator {
  * HierarchyData - Complete visualization hierarchy using SoA structures.
  * Replaces the old object-based hierarchy for massive memory reduction.
  */
+/** Flat overlays never participate in row layout or zone hit testing. */
+export class TraceOverlays {
+    readonly groupIndices: Uint32Array;
+    readonly startsX: Float64Array;
+    readonly endsX: Float64Array;
+    readonly labels: string[];
+    readonly colors: Uint32Array;
+    constructor(readonly count: number = 0, readonly groupRows: number[][] = []) {
+        this.groupIndices = new Uint32Array(count);
+        this.startsX = new Float64Array(count);
+        this.endsX = new Float64Array(count);
+        this.labels = new Array<string>(count);
+        this.colors = new Uint32Array(count);
+    }
+}
+
 export interface HierarchyData {
     tracks: TracksSoA;
     zones: ZonesSoA;
@@ -266,4 +283,5 @@ export interface HierarchyData {
     gridDims: [number, number, number];
     clusterDims: [number, number, number];
     bookmarks: TraceBookmark[];
+    overlays: TraceOverlays;
 }

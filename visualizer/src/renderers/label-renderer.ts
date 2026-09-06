@@ -10,6 +10,8 @@ import { Camera } from '../utils/camera.js';
 import { HierarchyData } from '../utils/types.js';
 import { formatDuration, NS_TO_MS } from '../utils/soa-helpers.js';
 import {
+    LANE_EDGE_PADDING,
+    SEMANTIC_GROUP_GAP,
     SUBLANE_HEIGHT,
     LABEL_COLOR,
     TRACK_LABEL_WIDTH,
@@ -159,7 +161,9 @@ export class LabelRenderer {
     private hierarchy: HierarchyData;
     private zoneIndex: TemporalWidthIndex;
     private blockIndex: TemporalWidthIndex;
+    private overlayIndex: TemporalWidthIndex;
 
+    private hoveredSemanticRange = -1;
     private dirty = true;
     private lastCameraX = Number.NaN;
     private lastCameraY = Number.NaN;
@@ -177,6 +181,9 @@ export class LabelRenderer {
         this.labelCtx = labelCtx;
         this.camera = camera;
         this.hierarchy = hierarchy;
+        this.overlayIndex = new TemporalWidthIndex(
+            hierarchy.overlays.startsX, hierarchy.overlays.endsX,
+            hierarchy.overlays.count, hierarchy.totalDurationNs);
         this.zoneIndex = new TemporalWidthIndex(
             hierarchy.zones.startsX,
             hierarchy.zones.endsX,
@@ -192,6 +199,53 @@ export class LabelRenderer {
     updateCamera(camera: Camera): void {
         this.camera = camera;
         this.invalidate();
+    }
+
+    setHoveredSemanticRange(index: number): void {
+        if (this.hoveredSemanticRange === index) return;
+        this.hoveredSemanticRange = index;
+        this.invalidate();
+    }
+
+    private semanticGroupBounds(rowVisible: Uint8Array, yScale: number, yOffset: number) {
+        const ranges = this.hierarchy.overlays;
+        const tops = new Float64Array(ranges.groupRows.length).fill(Infinity);
+        const bottoms = new Float64Array(ranges.groupRows.length).fill(-Infinity);
+        ranges.groupRows.forEach((rows, group) => {
+            for (const row of rows) {
+                if (!rowVisible[row]) continue;
+                const lane = this.hierarchy.smAccelerator.getLaneIndex(row);
+                if (lane === undefined) continue;
+                // Lane positions already include row compaction.
+                const bottom = yOffset - this.hierarchy.lanes.ys[lane] * yScale;
+                const top = bottom - this.hierarchy.lanes.heights[lane] * yScale;
+                tops[group] = Math.min(tops[group], top);
+                bottoms[group] = Math.max(bottoms[group], bottom);
+            }
+        });
+        return {tops, bottoms};
+    }
+
+    findSemanticRangeAtPosition(x: number, y: number, rowVisible: Uint8Array): {index: number; header: boolean} {
+        const width = this.labelCtx.canvas.width / devicePixelRatio;
+        const height = this.labelCtx.canvas.height / devicePixelRatio;
+        if (x < TRACK_LABEL_WIDTH || x >= width || y < 0 || y >= height)
+            return {index: -1, header: false};
+        const nsToPixels = NS_TO_MS * this.camera.zoomX * height / 2;
+        const xOffset = this.camera.x * this.camera.zoomX * height / 2 + width / 2;
+        const yScale = this.camera.zoomY * height / 2;
+        const yOffset = height / 2 - this.camera.y * yScale;
+        const {tops, bottoms} = this.semanticGroupBounds(rowVisible, yScale, yOffset);
+        const ns = (x - xOffset) / nsToPixels;
+        let hit = -1;
+        this.overlayIndex.visitCandidates(0, ns, ns, index => {
+            const group = this.hierarchy.overlays.groupIndices[index];
+            if (ns >= this.hierarchy.overlays.endsX[index] || y < tops[group] - SEMANTIC_GROUP_GAP * yScale || y >= bottoms[group]) return;
+            if (hit !== -1) throw new Error('Invalid overlapping semantic ranges in trace');
+            hit = index;
+        });
+        const headerBottom = hit < 0 ? 0 : tops[this.hierarchy.overlays.groupIndices[hit]];
+        return {index: hit, header: hit >= 0 && y < headerBottom};
     }
 
     invalidate(): void {
@@ -230,8 +284,7 @@ export class LabelRenderer {
         this.lastDevicePixelRatio = dpr;
 
         this.labelCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-        if (zoomY < MIN_LABEL_ZOOM_Y || canvasWidth === 0
-            || canvasHeight === 0) {
+        if (canvasWidth === 0 || canvasHeight === 0) {
             return;
         }
 
@@ -256,7 +309,6 @@ export class LabelRenderer {
         const zoneScreenHeight = SUBLANE_HEIGHT * yScale;
         const fontSize = LABEL_FONT_SIZE * zoneScreenHeight
             / MIN_ZONE_LABEL_HEIGHT;
-        if (fontSize < MIN_LABEL_FONT_SIZE) return;
 
         this.labelCtx.save();
         this.labelCtx.scale(dpr, dpr);
@@ -265,18 +317,80 @@ export class LabelRenderer {
         this.labelCtx.textBaseline = 'middle';
         const fontScale = fontSize / LABEL_FONT_SIZE;
 
-        this.renderBlockLabels(
-            rowOffsets, rowVisible, zoneVisibility,
-            nanosecondsToPixels, xOffset, yScale, yOffset,
-            visibleStartNs, visibleEndNs, height,
-            fontScale);
-        this.renderZoneLabels(
-            rowOffsets, rowVisible, zoneVisibility,
-            nanosecondsToPixels, xOffset, yScale, yOffset,
-            visibleStartNs, visibleEndNs, height,
-            zoneScreenHeight, fontSize, fontScale);
-
+        if (zoomY >= MIN_LABEL_ZOOM_Y && fontSize >= MIN_LABEL_FONT_SIZE) {
+            this.renderBlockLabels(
+                rowOffsets, rowVisible, zoneVisibility,
+                nanosecondsToPixels, xOffset, yScale, yOffset,
+                visibleStartNs, visibleEndNs, height,
+                fontScale);
+            this.renderZoneLabels(
+                rowOffsets, rowVisible, zoneVisibility,
+                nanosecondsToPixels, xOffset, yScale, yOffset,
+                visibleStartNs, visibleEndNs, height,
+                zoneScreenHeight, fontSize, fontScale);
+        }
+        this.renderSemanticRanges(rowVisible,
+            nanosecondsToPixels, xOffset, yScale, yOffset, width, height, fontSize);
         this.labelCtx.restore();
+    }
+
+    private renderSemanticRanges(
+        rowVisible: Uint8Array,
+        nanosecondsToPixels: number, xOffset: number,
+        yScale: number, yOffset: number, width: number, height: number, zoneFontSize: number
+    ): void {
+        // Labels occupy the reserved gap between groups. The range line sits
+        // on the group's outer frame; row and zone heights stay unchanged.
+        const ctx = this.labelCtx;
+        const ranges = this.hierarchy.overlays;
+        const {tops: groupTops, bottoms: groupBottoms} = this.semanticGroupBounds(rowVisible, yScale, yOffset);
+        const compactFontSize = zoneFontSize * 2 / 3;
+        ctx.font = `${compactFontSize}px ${LABEL_FONT_FAMILY}`;
+        const visibleStart = Math.max(0, (TRACK_LABEL_WIDTH - xOffset) / nanosecondsToPixels);
+        const visibleEnd = Math.min(this.hierarchy.totalDurationNs, (width - xOffset) / nanosecondsToPixels);
+        this.overlayIndex.visitCandidates(1 / nanosecondsToPixels, visibleStart, visibleEnd, index => {
+            const group = ranges.groupIndices[index];
+            const trackTop = groupTops[group];
+            if (groupBottoms[group] < 0 || trackTop > height) return;
+            const top = trackTop - (SEMANTIC_GROUP_GAP - LANE_EDGE_PADDING) * yScale;
+            const left = Math.max(TRACK_LABEL_WIDTH, ranges.startsX[index] * nanosecondsToPixels + xOffset);
+            const right = Math.min(width, ranges.endsX[index] * nanosecondsToPixels + xOffset);
+            if (right <= left) return;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(left, top, right - left, groupBottoms[group] - top);
+            ctx.clip();
+            ctx.fillStyle = `#${ranges.colors[index].toString(16).padStart(6, '0')}`;
+            ctx.globalAlpha = 1;
+            ctx.fillRect(left, trackTop, right - left, 2);
+            const label = compactFontSize >= MIN_LABEL_FONT_SIZE
+                ? this.fitLabel(ranges.labels[index], right - left - 6) : null;
+            if (label !== null) {
+                ctx.globalAlpha = 0.85;
+                ctx.fillText(label, left + 3, top + compactFontSize / 2 + 4);
+            }
+            ctx.restore();
+        });
+        const index = this.hoveredSemanticRange;
+        if (index >= 0 && index < ranges.count) {
+            const group = ranges.groupIndices[index];
+            const top = Math.max(0, groupTops[group]);
+            const rowHeight = Math.min(height, groupBottoms[group]) - top;
+            if (rowHeight <= 0) return;
+            const left = Math.max(TRACK_LABEL_WIDTH, ranges.startsX[index] * nanosecondsToPixels + xOffset);
+            const right = Math.min(width, ranges.endsX[index] * nanosecondsToPixels + xOffset);
+            if (right <= left) return;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(left, top, right - left, rowHeight);
+            ctx.clip();
+            ctx.fillStyle = `#${ranges.colors[index].toString(16).padStart(6, '0')}`;
+            ctx.globalAlpha = 0.13;
+            ctx.fillRect(left, top, right - left, rowHeight);
+            ctx.globalAlpha = 0.9;
+            ctx.fillRect(left, top, right - left, 2);
+            ctx.restore();
+        }
     }
 
     private renderBlockLabels(

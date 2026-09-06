@@ -70,6 +70,43 @@ Track kinds:
 | 6 | `ThreadBlock` |
 | 7 | `Warp` |
 | 8 | `Generic` |
+| 9 | `GpuAnnotation` |
+
+`GpuAnnotation` tracks are metadata containers parented to a GPU device.
+Their slices describe flat semantic envelopes of hardware-timed graph nodes.
+The viewer reserves label space between groups, outside their frames, with
+opaque 2-pixel horizontal lines aligned to the group's outer border.
+Regions have no vertical start lines, including on hover. Labels use two-thirds
+the zone-label font size. Only hover adds a background tint. Hovering an
+ordinary zone retains the containing region highlight while its tooltip
+shows the zone details; hovering the region background shows its name and
+duration in the same tooltip.
+These overlays never allocate a row or increase its height; only the spacing
+between groups grows. The gap follows the first visible row after expansion
+or collapse. Right-click copying retains exact start, end and duration values.
+Kernel slices retain their original names, timings, and hierarchy. A range may span asynchronous
+branches, so its duration is elapsed time, not summed kernel execution time.
+
+CPU slices can carry a string `semantic_range` argument. The viewer uses it
+for the same compact highlight and hover layer across that thread's worker
+group, preserving operation names and event timing. The dispatching thread
+owns the range before its parallel-for begins; workers create no duplicate
+semantic ranges. Both `mina::kernels::` and
+`mina::components::` are hidden in displayed zone labels; full signatures
+remain available as metadata.
+
+Applications register graph-node tools IDs, a semantic label and a scope
+instance during graph construction. Disjoint occurrences of the same label
+remain separate ranges; the collector exports their `range_instance` argument.
+This prevents Issue/Finish scopes from bridging intervening work. Applications
+record the dynamic context at launch, and identify an existing
+iteration-end node for device loops. The collector uses those explicit IDs and
+boundaries, without interpreting kernel names or adding marker kernels. CUDA
+may change conditional-body clone IDs during executable construction, so the
+collector queries their finalized IDs at `GRAPHEXEC_CREATED` and retains the
+mapping after graph destruction for deferred HES processing. Launch
+anchors must match recorded launches; ambiguous attribution fails capture
+instead of assigning an incorrect context.
 
 Event kinds occupy bits 0-1 of the event flags byte: 0 is `Slice`, 1 is
 `Bookmark`, 2 is `Counter`, and 3 is `Flow`.

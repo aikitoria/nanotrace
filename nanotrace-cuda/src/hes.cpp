@@ -11,6 +11,7 @@
 #include <libiberty/demangle.h>
 
 #include "hes.h"
+#include "graph_annotations.h"
 
 namespace nanotrace
 {
@@ -340,7 +341,13 @@ namespace nanotrace
 
             if (!Check(cuptiEnableCallback(1, _subscriber,
                 CUPTI_CB_DOMAIN_STATE, CUPTI_CBID_STATE_FATAL_ERROR),
-                "enable fatal error callback"))
+                "enable fatal error callback")
+                || !Check(cuptiEnableCallback(1, _subscriber, CUPTI_CB_DOMAIN_RESOURCE,
+                    CUPTI_CBID_RESOURCE_GRAPHNODE_CLONED), "enable graph node clone callback")
+                || !Check(cuptiEnableCallback(1, _subscriber, CUPTI_CB_DOMAIN_RESOURCE,
+                    CUPTI_CBID_RESOURCE_GRAPHEXEC_CREATED), "enable executable graph callback")
+                || !Check(cuptiEnableCallback(1, _subscriber, CUPTI_CB_DOMAIN_RESOURCE,
+                    CUPTI_CBID_RESOURCE_GRAPHNODE_DESTROY_STARTING), "enable graph node destruction callback"))
             {
                 _active.store(nullptr, std::memory_order_release);
                 cuptiUnsubscribe(_subscriber);
@@ -510,6 +517,23 @@ namespace nanotrace
         }
 
         bool IsInitialized() const { return _initialized; }
+        void RegisterGraphNode(uint64_t graph, uint64_t node, const char* name,
+            const std::vector<GpuGraphRange>& ranges, bool launch_anchor)
+        {
+            std::lock_guard<std::mutex> lock{ _event_mutex };
+            _annotations.RegisterNode(graph, node, name, ranges, launch_anchor);
+        }
+        void MarkGraphIterationEnd(uint64_t node)
+        {
+            std::lock_guard<std::mutex> lock{ _event_mutex };
+            _annotations.MarkIterationEnd(node);
+        }
+        void RecordGraphLaunch(uint64_t graph, const char* dynamic_track)
+        {
+            std::lock_guard<std::mutex> lock{ _event_mutex };
+            _annotations.RecordLaunch(graph, dynamic_track);
+        }
+
         const std::string& LastError() const { return _last_error; }
         const std::vector<HesKernelEvent>& KernelEvents() const
         {
@@ -532,7 +556,7 @@ namespace nanotrace
         }
 
         static void CUPTIAPI SubscriberCallback(void* user_data,
-            CUpti_CallbackDomain domain, CUpti_CallbackId,
+            CUpti_CallbackDomain domain, CUpti_CallbackId callback_id,
             const void* callback_data)
         {
             Implementation* implementation =
@@ -541,6 +565,51 @@ namespace nanotrace
             if (!implementation)
             {
                 return;
+            }
+
+            // CUDA flattens conditional bodies during instantiation. A clone's
+            // tools ID at GRAPHNODE_CLONED is provisional; query it again at
+            // GRAPHEXEC_CREATED to obtain the ID recorded by HES. Never infer
+            // flattened IDs from node ordering or graph geometry.
+            if (domain == CUPTI_CB_DOMAIN_RESOURCE
+                && callback_id == CUPTI_CBID_RESOURCE_GRAPHEXEC_CREATED)
+            {
+                std::lock_guard<std::mutex> lock{implementation->_event_mutex};
+                for (const auto& [node, original] : implementation->_live_graph_clones)
+                {
+                    uint64_t executable = 0;
+                    if (implementation->Check(cuptiGetGraphNodeId(node, &executable), "executable graph node ID"))
+                        implementation->_annotations.CloneNode(original, executable);
+                }
+            }
+            if (domain == CUPTI_CB_DOMAIN_RESOURCE
+                && callback_id == CUPTI_CBID_RESOURCE_GRAPHNODE_DESTROY_STARTING && callback_data)
+            {
+                const auto* resource = static_cast<const CUpti_ResourceData*>(callback_data);
+                const auto* graph = static_cast<const CUpti_GraphData*>(resource->resourceDescriptor);
+                if (graph && graph->node)
+                {
+                    std::lock_guard<std::mutex> lock{implementation->_event_mutex};
+                    implementation->_live_graph_clones.erase(graph->node);
+                }
+            }
+
+            if (domain == CUPTI_CB_DOMAIN_RESOURCE
+                && callback_id == CUPTI_CBID_RESOURCE_GRAPHNODE_CLONED && callback_data)
+            {
+                const auto* resource = static_cast<const CUpti_ResourceData*>(callback_data);
+                const auto* graph = static_cast<const CUpti_GraphData*>(resource->resourceDescriptor);
+                if (graph && graph->originalNode && graph->node)
+                {
+                    uint64_t original = 0, clone = 0;
+                    if (implementation->Check(cuptiGetGraphNodeId(graph->originalNode, &original), "original graph node ID")
+                        && implementation->Check(cuptiGetGraphNodeId(graph->node, &clone), "cloned graph node ID"))
+                    {
+                        std::lock_guard<std::mutex> lock{implementation->_event_mutex};
+                        implementation->_annotations.CloneNode(original, clone);
+                        implementation->_live_graph_clones[graph->node] = original;
+                    }
+                }
             }
 
             if (domain == CUPTI_CB_DOMAIN_STATE && callback_data)
@@ -766,6 +835,8 @@ namespace nanotrace
             }
 
             _raw_kernel_events.clear();
+            if (!_annotations.Append(*_session, _kernel_events, get_device_track, _last_error))
+                return false;
 
             constexpr uint32_t GRAPH_TRACK_STREAM_ID =
                 std::numeric_limits<uint32_t>::max();
@@ -903,6 +974,8 @@ namespace nanotrace
         std::shared_ptr<std::vector<HesKernelEvent>>
             _completed_kernel_events;
         std::vector<GraphExecutionEvent> _graph_events;
+        GraphAnnotations _annotations;
+        std::unordered_map<CUgraphNode, uint64_t> _live_graph_clones;
         KernelNameMap _kernel_names;
         std::string _kernel_name_prefix_to_strip;
         static inline std::atomic<Implementation*> _active{ nullptr };
@@ -935,6 +1008,19 @@ namespace nanotrace
     bool HesTracer::IsInitialized() const
     {
         return _implementation->IsInitialized();
+    }
+    void HesTracer::RegisterGraphNode(uint64_t graph, uint64_t node, const char* name,
+        const std::vector<GpuGraphRange>& ranges, bool launch_anchor)
+    {
+        _implementation->RegisterGraphNode(graph, node, name, ranges, launch_anchor);
+    }
+    void HesTracer::MarkGraphIterationEnd(uint64_t node)
+    {
+        _implementation->MarkGraphIterationEnd(node);
+    }
+    void HesTracer::RecordGraphLaunch(uint64_t graph, const char* dynamic_track)
+    {
+        _implementation->RecordGraphLaunch(graph, dynamic_track);
     }
     const std::string& HesTracer::LastError() const
     {

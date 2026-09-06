@@ -321,7 +321,7 @@ export class InteractionManager {
      * and displays tooltip with formatted zone information:
      * - Zone name (from format descriptor)
      * - Hierarchy (warp/sublane / block)
-     * - Timing (absolute nanosecond timestamps and an adaptive duration)
+     * - Duration with an adaptive unit
      *
      * Tooltip appears offset 10px right and down from cursor.
      */
@@ -331,21 +331,21 @@ export class InteractionManager {
         hierarchy: HierarchyData,
         formatString: (formatDescId: number, params: number[]) => string,
         formatTrackString: (formatDescId: number, laneId: number, params: number[]) => string,
-        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string
-    ): void {
+        formatBlockString: (formatDescId: number, blockId: number, clusterId: number) => string,
+        semanticRangeIndex = -1, semanticHeader = false
+    ): number {
         const result = this.findZoneAtPosition(screenX, screenY, hierarchy);
         const { zones, blocks, tracks, formatDescriptors } = hierarchy;
 
         // Update hover state for shader highlighting
         this.hoveredBlockId = result.blockIdx;
 
-        if (result.zoneIdx !== -1) {
+        if (result.zoneIdx !== -1 && !semanticHeader) {
             this.hoveredZoneId = result.zoneIdx;
 
             // Zone times are already in nanoseconds (SoA storage)
             const startNs = zones.startsX[result.zoneIdx];
             const endNs = zones.endsX[result.zoneIdx];
-            const durNs = endNs - startNs;
 
             // Get zone params from pool (NO allocation!)
             const zoneParamsOffset = zones.paramsOffsets[result.zoneIdx];
@@ -397,24 +397,36 @@ export class InteractionManager {
                     .join('<br>')}`
                 : '';
 
-            // Display hierarchical tooltip: Zone / Warp / Block / Timing
-            this.tooltip.innerHTML = `
-                ${EscapeHtml(zoneName)}<br>
-                ${EscapeHtml(hierarchyName)}<br>
-                Start: ${startNs.toLocaleString()} ns<br>
-                End: ${endNs.toLocaleString()} ns<br>
-                Duration: ${formatDuration(durNs)}${details}${expansionHint}
-            `;
+            this.showTooltip(screenX, screenY, zoneName, hierarchyName, startNs, endNs, details + expansionHint);
             this.canvas.style.cursor = zones.hasChildren[result.zoneIdx] !== 0
                 ? 'pointer' : 'default';
-            this.tooltip.style.left = `${screenX + TOOLTIP_OFFSET_X}px`;
-            this.tooltip.style.top = `${screenY + TOOLTIP_OFFSET_Y}px`;
-            this.tooltip.classList.add('visible');
+            return semanticRangeIndex;
         } else {
             this.hoveredZoneId = -1;
             this.canvas.style.cursor = 'default';
+            if (semanticRangeIndex >= 0 && semanticRangeIndex < hierarchy.overlays.count) {
+                const ranges = hierarchy.overlays;
+                const row = ranges.groupRows[ranges.groupIndices[semanticRangeIndex]][0];
+                this.hoveredBlockId = -1;
+                this.showTooltip(screenX, screenY, ranges.labels[semanticRangeIndex],
+                    hierarchy.lanes.names[row], ranges.startsX[semanticRangeIndex], ranges.endsX[semanticRangeIndex]);
+                return semanticRangeIndex;
+            }
             this.tooltip.classList.remove('visible');
         }
+        return -1;
+    }
+
+    private showTooltip(screenX: number, screenY: number, name: string, hierarchyName: string,
+        startNs: number, endNs: number, extraHtml = ''): void {
+        this.tooltip.innerHTML = `
+            ${EscapeHtml(name)}<br>
+            ${EscapeHtml(hierarchyName)}<br>
+            Duration: ${formatDuration(endNs - startNs)}${extraHtml}
+        `;
+        this.tooltip.style.left = `${screenX + TOOLTIP_OFFSET_X}px`;
+        this.tooltip.style.top = `${screenY + TOOLTIP_OFFSET_Y}px`;
+        this.tooltip.classList.add('visible');
     }
 
     /**
