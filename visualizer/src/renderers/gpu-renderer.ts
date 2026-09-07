@@ -918,7 +918,7 @@ function createBackgroundPipeline(
 }
 
 /**
- * Uploads trace data to GPU storage buffers for instanced rendering (SoA version).
+ * Uploads trace data to GPU storage buffers for instanced rendering.
  *
  * Creates 4 storage buffers:
  * - positionBuffer: Zone data (12 floats per zone, aligned to 3 vec4s):

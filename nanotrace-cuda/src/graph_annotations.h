@@ -117,13 +117,21 @@ namespace nanotrace
                     };
                     using Key = std::tuple<size_t, uint64_t, std::string, std::string>;
                     std::map<Key, Range> ranges;
+                    std::unordered_map<uint64_t, size_t> occurrences;
                     for (auto it = first; it != last; ++it)
                     {
                         HesKernelEvent& event = **it;
                         const Node& node = _nodes.at(Original(event.graph_node_id));
                         size_t iteration = static_cast<size_t>(std::lower_bound(iteration_ends.begin(), iteration_ends.end(), event.start_ns) - iteration_ends.begin());
+                        size_t occurrence = occurrences[Original(event.graph_node_id)]++;
                         for (const GpuGraphRange& definition : node.ranges)
                         {
+                            if (definition.repeat_count == 0 || definition.repetition >= definition.repeat_count)
+                            {
+                                error = "Invalid graph node repetition range";
+                                return false;
+                            }
+                            if (occurrence % definition.repeat_count != definition.repetition) continue;
                             const std::string& track = definition.dynamic_track ? graph.launch_tracks[launch] : definition.track;
                             std::string label = track.empty() ? definition.name : track + " " + definition.name;
                             Range& range = ranges[{ iteration, definition.instance, track, label }];

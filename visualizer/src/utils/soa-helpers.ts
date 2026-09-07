@@ -1,111 +1,6 @@
-/**
- * Helper functions for working with Structure of Arrays (SoA) data structures.
- * Provides convenient accessors and utilities for the TypedArray-based memory layout.
- */
-
 import { ZonesSoA, BlocksSoA } from './types.js';
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/** Conversion factor: nanoseconds to milliseconds */
-export const NS_TO_MS = 1e-6;
-
-/** Conversion factor: milliseconds to nanoseconds */
-export const MS_TO_NS = 1e6;
-
-// ============================================================================
-// Direct Pool Access Helpers
-// ============================================================================
-
-/**
- * Format a zone's label string using its params pool.
- * Consumers should call formatString() directly with pool access:
- *
- * const offset = zones.paramsOffsets[idx];
- * const count = zones.paramsCounts[idx];
- * for (let i = 0; i < count; i++) {
- *   const param = zones.paramsPool[offset + i];
- *   // use param...
- * }
- *
- * DO NOT create temporary arrays - work directly with pools!
- */
-
-// ============================================================================
-// Bounds Helpers
-// ============================================================================
-
-/**
- * Get zone width (duration) in nanoseconds.
- * Computed on-the-fly from start/end times.
- */
-export function getZoneWidth(zones: ZonesSoA, idx: number): number {
-    return zones.endsX[idx] - zones.startsX[idx];
-}
-
-/**
- * Get block width (duration) in nanoseconds.
- * Computed on-the-fly from start/end times.
- */
-export function getBlockWidth(blocks: BlocksSoA, idx: number): number {
-    return blocks.endsX[idx] - blocks.startsX[idx];
-}
-
-/**
- * Get zone center X position in nanoseconds.
- * Computed on-the-fly (not cached in SoA).
- */
-export function getZoneCenterX(zones: ZonesSoA, idx: number): number {
-    return (zones.startsX[idx] + zones.endsX[idx]) / 2;
-}
-
-/**
- * Get block center X position in nanoseconds.
- * Computed on-the-fly (not cached in SoA).
- */
-export function getBlockCenterX(blocks: BlocksSoA, idx: number): number {
-    return (blocks.startsX[idx] + blocks.endsX[idx]) / 2;
-}
-
-// ============================================================================
-// Color Unpacking
-// ============================================================================
-
-/**
- * Get zone color as [r, g, b] tuple (0-255 range).
- * Colors are packed as bytes in the SoA for memory efficiency.
- */
-export function getZoneColor(zones: ZonesSoA, idx: number): [number, number, number] {
-    return [
-        zones.colors[idx * 3 + 0],
-        zones.colors[idx * 3 + 1],
-        zones.colors[idx * 3 + 2]
-    ];
-}
-
-// ============================================================================
-// Block Lane Indirection Access
-// ============================================================================
-
-/**
- * Iterate blocks in a block lane using indirection.
- * Consumers should access the indirection array directly:
- *
- * const offset = blockLanes.blockIndicesOffsets[blIdx];
- * const count = blockLanes.blockIndicesCounts[blIdx];
- * for (let i = 0; i < count; i++) {
- *   const blockIdx = blockLanes.blockIndices[offset + i];
- *   // use blocks.startsX[blockIdx], etc...
- * }
- *
- * DO NOT create temporary arrays - use direct indexing!
- */
-
-// ============================================================================
-// Binary Search
-// ============================================================================
+export { NS_TO_MS, MS_TO_NS } from './constants.js';
 
 /**
  * Binary search for a block using indirection array.
@@ -125,7 +20,7 @@ export function binarySearchBlocksIndirect(
 
     while (left <= right) {
         const mid = Math.floor((left + right) / 2);
-        const blockIdx = blockIndices[offset + mid];  // INDIRECTION
+        const blockIdx = blockIndices[offset + mid];
 
         if (timeNs >= blocks.startsX[blockIdx] &&
             timeNs < blocks.endsX[blockIdx] &&
@@ -185,10 +80,6 @@ export function binarySearchZones(
 
     return -1;
 }
-
-// ============================================================================
-// Time Formatting
-// ============================================================================
 
 const durationFormatter = new Intl.NumberFormat(undefined, {
     maximumFractionDigits: 3

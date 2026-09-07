@@ -1,8 +1,7 @@
 import { defineConfig } from 'vite';
-import { imagetools } from 'vite-imagetools';
 import { createHtmlPlugin } from 'vite-plugin-html';
 
-const gitHash = process.env.NANOTRACE_GIT_HASH ?? 'dev';
+const gitHash = process.env.NANOTRACE_GIT_HASH?.slice(0, 12) ?? 'dev';
 
 export default defineConfig(({ command }) => ({
   base: command === 'serve' ? '/' : '/nanotrace/',
@@ -13,7 +12,6 @@ export default defineConfig(({ command }) => ({
     port: 4173,
   },
   plugins: [
-    imagetools(),
     createHtmlPlugin({
       minify: {
         collapseWhitespace: true,

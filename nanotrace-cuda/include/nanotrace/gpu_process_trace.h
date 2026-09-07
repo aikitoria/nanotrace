@@ -30,6 +30,10 @@ namespace nanotrace
         bool dynamic_track = false;
         uint32_t color = 0;
         uint64_t instance = 0; // Distinguishes disjoint scopes with the same label.
+        // Select one occurrence of a reused node in a fixed-count device loop.
+        // Occurrences count independently per node and reset at each launch.
+        uint32_t repetition = 0;
+        uint32_t repeat_count = 1;
     };
 
     class GpuProcessTrace

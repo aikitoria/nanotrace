@@ -672,7 +672,7 @@ export async function parseTraceFile(
             const metadata = eventFormatsByLabel[event.nameId];
             eventNameIds[event.nameId] = formatDescriptors.length;
             formatDescriptors.push({
-                labelString: name.replace(/^(?:mina::kernels::|mina::components::)/, ''),
+                labelString: name,
                 tooltipString: metadata
                     ? strings[metadata.tooltipId] ?? name : name,
                 placeholderCount: metadata?.parameterCount ?? 0
@@ -1149,7 +1149,7 @@ export function projectTraceData(
         overlayCount += zones.length;
     }
     const overlays = new TraceOverlays(overlayCount, groupRows);
-    const semanticColors = new Map<string, number>();
+    const semanticColors = new Map<number, number>();
     let overlayIndex = 0;
     for (const group of overlayGroups) for (const zone of group.zones) {
         overlays.groupIndices[overlayIndex] = group.group;
@@ -1159,11 +1159,10 @@ export function projectTraceData(
         overlays.labels[overlayIndex] = source.formatDescriptors[semantic ? semantic - 1 : source.zones.formatDescIds[zone]].labelString;
         const fallbackColor = semantic ? 0xD9944A : (source.zones.colors[zone * 3] << 16)
             | (source.zones.colors[zone * 3 + 1] << 8) | source.zones.colors[zone * 3 + 2];
-        const label = overlays.labels[overlayIndex];
-        let color = semanticColors.get(label);
+        let color = semanticColors.get(fallbackColor);
         if (color === undefined) {
-            color = semanticRangeColor(label, fallbackColor);
-            semanticColors.set(label, color);
+            color = semanticRangeColor(fallbackColor);
+            semanticColors.set(fallbackColor, color);
         }
         overlays.colors[overlayIndex++] = color;
     }

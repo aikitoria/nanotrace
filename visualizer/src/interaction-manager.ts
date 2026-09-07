@@ -223,7 +223,7 @@ export class InteractionManager {
     }
 
     /**
-     * Performs hierarchical hit detection to find zone under cursor (SoA version).
+     * Performs hierarchical hit detection to find zone under cursor.
      *
      * Search hierarchy with optimizations:
      * 1. Lane: Linear search (typically <150 lanes, sorted by Y)
@@ -315,7 +315,7 @@ export class InteractionManager {
     }
 
     /**
-     * Updates hover state and tooltip display based on cursor position (SoA version).
+     * Updates hover state and tooltip display based on cursor position.
      *
      * Performs hit detection, updates hover IDs (passed to shaders for highlighting),
      * and displays tooltip with formatted zone information:

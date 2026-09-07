@@ -1,16 +1,19 @@
 import type { TraceOverlays } from './types.js';
 
-// The two alternating banks have six distinct slot/stage colors. CPU expert
-// envelopes share the corresponding GPU Expert color. Dense MLP work uses
-// the same stage color; token-boundary ranges retain their recorded color.
-const BANK_STAGE_COLORS = [0x4A90D9, 0xE69F00, 0xB07CD8, 0x42B9B0, 0xE573A0, 0xB2BD48];
-
-export function semanticRangeColor(label: string, fallback: number): number {
-    const match = /^Slot (\d+) (Attention|Expert|MoE|MLP|Merge) Layer /.exec(label);
-    if (!match) return fallback;
-    const slot = Number(match[1]);
-    const stage = match[2] === 'Attention' ? 0 : match[2] === 'Merge' ? 2 : 1;
-    return BANK_STAGE_COLORS[(slot % 2) * 3 + stage];
+// Preserve the recorded hue while lifting dark colors for the viewer's dark
+// surfaces. Labels are opaque application data and never select a palette.
+export function semanticRangeColor(source: number): number {
+    const linear = [16, 8, 0].map(shift => {
+        const channel = ((source >> shift) & 255) / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    const luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    const lift = luminance < 0.4 ? (0.4 - luminance) / (1 - luminance) : 0;
+    return linear.reduce((color, channel) => {
+        const lifted = channel + (1 - channel) * lift;
+        const srgb = lifted <= 0.0031308 ? lifted * 12.92 : 1.055 * lifted ** (1 / 2.4) - 0.055;
+        return (color << 8) | Math.round(srgb * 255);
+    }, 0);
 }
 
 /** Identify where to add space above a group, never inside a row. */

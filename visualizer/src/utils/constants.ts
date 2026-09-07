@@ -1,16 +1,9 @@
-/**
- * Centralized constants for the Nanotrace visualizer.
- *
- * This file contains all magic values extracted from the codebase, organized into
- * logical sections with JSDoc comments for maintainability and clarity.
- */
+// Viewer dimensions, colors, and buffer layouts.
 
-// =============================================================================
-// UI DIMENSIONS & SPACING
-// =============================================================================
+// UI dimensions and spacing
 
-/** Width of top-level track labels in pixels (left edge of viewport). */
-export const TRACK_LABEL_WIDTH = 120;
+/** Track-label width at the reference font size; scales with vertical zoom. */
+export const TRACK_LABEL_WIDTH = 80;
 
 /** Height of timeline bar in pixels (fixed at top of viewport). */
 export const TIMELINE_HEIGHT = 30;
@@ -34,22 +27,10 @@ export const TOOLTIP_OFFSET_X = 10;
 export const TOOLTIP_OFFSET_Y = 10;
 
 /**
- * Horizontal offset in pixels for cursor timestamp label from cursor line.
- * Timestamp appears this many pixels to the right of cursor line.
- */
-export const CURSOR_TIMESTAMP_OFFSET = 4;
-
-/**
  * Horizontal offset in pixels for selection label from selection start.
  * Selection label appears this many pixels to the right of selection start line.
  */
 export const SELECTION_LABEL_OFFSET = 4;
-
-/**
- * Threshold in pixels for displaying selection UI.
- * If selection width is less than this, only a single line is shown.
- */
-export const MIN_SELECTION_WIDTH = 1;
 
 /**
  * Threshold in pixels for committed selection.
@@ -58,22 +39,10 @@ export const MIN_SELECTION_WIDTH = 1;
 export const MIN_SELECTION_DISTANCE = 3;
 
 /**
- * Viewport culling margin in pixels.
- * Elements within this margin of viewport edges are still rendered.
- */
-export const VIEWPORT_MARGIN = 20;
-
-/**
  * Minimum width in pixels for rendering block labels.
  * Blocks narrower than this will not have their labels rendered.
  */
 export const MIN_BLOCK_LABEL_WIDTH = 25;
-
-/**
- * Minimum height in pixels for block padding area.
- * Labels are only rendered if padding height exceeds this threshold.
- */
-export const MIN_BLOCK_LABEL_PADDING_HEIGHT = 12;
 
 /**
  * Minimum width in pixels for rendering zone labels.
@@ -94,22 +63,10 @@ export const MIN_ZONE_LABEL_HEIGHT = 15;
 export const BLOCK_LABEL_PADDING_X = 3;
 
 /**
- * Vertical padding in pixels for block labels from top edge.
- * Labels are offset this many pixels from the block's top edge.
- */
-export const BLOCK_LABEL_PADDING_Y = 2;
-
-/**
  * Horizontal padding in pixels for zone labels from left edge.
  * Labels are indented this many pixels from the zone's left edge.
  */
 export const ZONE_LABEL_PADDING_X = 3;
-
-/**
- * Vertical padding in pixels for zone labels from top edge.
- * Labels are offset this many pixels from the zone's top edge.
- */
-export const ZONE_LABEL_PADDING_Y = 8;
 
 /**
  * Maximum width reduction in pixels for label text clipping.
@@ -117,9 +74,7 @@ export const ZONE_LABEL_PADDING_Y = 8;
  */
 export const LABEL_CLIP_MARGIN = 6;
 
-// =============================================================================
-// LAYOUT CONSTANTS (WORLD SPACE)
-// =============================================================================
+// Layout constants (world space)
 
 /**
  * Layout constants for hierarchical trace visualization (all in world space units).
@@ -151,24 +106,16 @@ export const LANE_EDGE_PADDING = 0.0015;
 /** Vertical spacing between block lanes within an SM lane. */
 export const BLOCK_LANE_PADDING = 0.0015;
 
-/** Horizontal gap between adjacent blocks (currently unused in layout). */
-export const BLOCK_PADDING = 0.00005;
-
 /** Vertical padding above blocks (reserved for block labels). */
 export const BLOCK_EDGE_PADDING = 0;
-
-/** Horizontal gap between adjacent zones (currently unused in layout). */
-export const ZONE_GAP = 0.00001;
 
 /** Default time range in milliseconds (1ms) when no trace is loaded. */
 export const BASE_TIME_RANGE = 1.0;
 
 /** Label color for all text labels (timeline, SM, blocks, zones). */
-export const LABEL_COLOR = '#dedede';
+export const LABEL_COLOR = '#f2f3f5';
 
-// =============================================================================
-// INTERACTION & NAVIGATION
-// =============================================================================
+// Interaction & navigation
 
 /**
  * Zoom factor applied per 100 pixels of normalized wheel movement.
@@ -223,9 +170,7 @@ export const INITIAL_BASE_ZOOM = 1.75;
  */
 export const INITIAL_CAMERA_Y_OFFSET = 0.5;
 
-// =============================================================================
-// TIMELINE RENDERING
-// =============================================================================
+// Timeline rendering
 
 /**
  * Target spacing in pixels between tick marks.
@@ -308,9 +253,7 @@ export const TIME_UNIT_MILLISECONDS_THRESHOLD = 1.0;
  */
 export const TIME_UNIT_MICROSECONDS_THRESHOLD = 0.001;
 
-// =============================================================================
-// COLORS & VISUAL STYLING
-// =============================================================================
+// Colors & visual styling
 
 /**
  * Base zone fill color brightness multiplier.
@@ -321,7 +264,7 @@ export const ZONE_FILL_BRIGHTNESS = 1.0;
 /** Amount of the source event hue retained after neutral desaturation. */
 export const ZONE_COLOR_SATURATION = 0.95;
 
-/** White mixed into source event colors to produce Unreal-style pastel fills. */
+/** White mixed into source event colors to produce pastel fills. */
 export const ZONE_PASTEL_MIX = 0.18;
 
 /** Text color drawn over the light pastel zone fills. */
@@ -383,17 +326,17 @@ export const OUTLINE_THICKNESS_MULTIPLIER = 1.0;
  * Block border base color RGB values.
  * Default border color when not hovered. [R, G, B] in 0-1 range.
  */
-export const BLOCK_BORDER_COLOR_R = 0.39;
-export const BLOCK_BORDER_COLOR_G = 0.39;
-export const BLOCK_BORDER_COLOR_B = 0.39;
+export const BLOCK_BORDER_COLOR_R = 0.25;
+export const BLOCK_BORDER_COLOR_G = 0.26;
+export const BLOCK_BORDER_COLOR_B = 0.28;
 
 /**
  * Block border hover color RGB values (scaled by brightness).
  * Used for block borders when hovering. [R, G, B] in 0-1 range.
  */
-export const BLOCK_BORDER_HOVER_COLOR_R = 0.48;
-export const BLOCK_BORDER_HOVER_COLOR_G = 0.72;
-export const BLOCK_BORDER_HOVER_COLOR_B = 0.84;
+export const BLOCK_BORDER_HOVER_COLOR_R = 0.20;
+export const BLOCK_BORDER_HOVER_COLOR_G = 0.53;
+export const BLOCK_BORDER_HOVER_COLOR_B = 0.96;
 
 /**
  * Block border hover brightness multiplier.
@@ -417,45 +360,35 @@ export const BLOCK_BORDER_OPACITY = 0.65;
  * Lane background color RGB values.
  * SM lane backgrounds. [R, G, B] in 0-1 range.
  */
-export const LANE_BG_COLOR_R = 0.227;
-export const LANE_BG_COLOR_G = 0.231;
-export const LANE_BG_COLOR_B = 0.235;
+export const LANE_BG_COLOR_R = 0.101961;
+export const LANE_BG_COLOR_G = 0.105882;
+export const LANE_BG_COLOR_B = 0.113725;
 
 /**
  * Block lane background color RGB values.
  * Block lane backgrounds (lighter than lanes). [R, G, B] in 0-1 range.
  */
-export const BLOCK_LANE_BG_COLOR_R = 0.243;
-export const BLOCK_LANE_BG_COLOR_G = 0.247;
-export const BLOCK_LANE_BG_COLOR_B = 0.251;
+export const BLOCK_LANE_BG_COLOR_R = 0.133333;
+export const BLOCK_LANE_BG_COLOR_G = 0.137255;
+export const BLOCK_LANE_BG_COLOR_B = 0.14902;
 
 /**
  * Block background color RGB values.
  * Individual block backgrounds (darker than block lanes). [R, G, B] in 0-1 range.
  */
-export const BLOCK_BG_COLOR_R = 0.216;
-export const BLOCK_BG_COLOR_G = 0.220;
-export const BLOCK_BG_COLOR_B = 0.224;
+export const BLOCK_BG_COLOR_R = 0.086275;
+export const BLOCK_BG_COLOR_G = 0.090196;
+export const BLOCK_BG_COLOR_B = 0.098039;
 
 /**
  * Full-screen background color RGB values.
  * Canvas background behind all trace elements. [R, G, B] in 0-1 range.
  */
-export const CANVAS_BG_COLOR_R = 0.157;
-export const CANVAS_BG_COLOR_G = 0.161;
-export const CANVAS_BG_COLOR_B = 0.165;
+export const CANVAS_BG_COLOR_R = 0.066667;
+export const CANVAS_BG_COLOR_G = 0.066667;
+export const CANVAS_BG_COLOR_B = 0.07451;
 
-/**
- * Render pass clear color RGB values.
- * Used to clear the framebuffer at the start of each frame. [R, G, B] in 0-1 range.
- */
-export const CLEAR_COLOR_R = 0.157;
-export const CLEAR_COLOR_G = 0.161;
-export const CLEAR_COLOR_B = 0.165;
-
-// =============================================================================
-// TEXT RENDERING
-// =============================================================================
+// Text rendering
 
 /** Font size in pixels for all text labels (blocks, zones, timeline). */
 export const LABEL_FONT_SIZE = 10;
@@ -470,11 +403,9 @@ export const MIN_LABEL_ZOOM_Y = 0.5;
  * Font family for all text labels.
  * UI sans-serif stack for compact, readable trace labels.
  */
-export const LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+export const LABEL_FONT_FAMILY = '"IBM Plex Sans", system-ui, "Segoe UI", sans-serif';
 
-// =============================================================================
-// TIMING & PERFORMANCE
-// =============================================================================
+// Timing & performance
 
 /**
  * Delay in milliseconds before showing loading overlay.
@@ -482,16 +413,6 @@ export const LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI",
  */
 export const LOADING_OVERLAY_DELAY = 50;
 
-/**
- * Delay in milliseconds for yielding to browser during initialization.
- * Allows UI updates to render between long-running operations.
- */
-export const BROWSER_YIELD_DELAY = 0;
-
-/**
- * Maximum kernel name length for stats display.
- * Longer names are truncated with ellipsis.
- */
 /**
  * Number of spaces for FPS padding in stats display.
  * Ensures consistent alignment in monospace stats text.
@@ -510,9 +431,7 @@ export const TIME_DECIMAL_THRESHOLD = 10;
  */
 export const TIME_DECIMAL_PLACES = 2;
 
-// =============================================================================
-// GPU & MEMORY
-// =============================================================================
+// GPU and memory
 
 /**
  * Minimum buffer size in bytes for GPU storage buffers.
@@ -561,15 +480,7 @@ export const LANE_BUFFER_FLOATS = 8;
  */
 export const BLOCK_LANE_BUFFER_FLOATS = 8;
 
-/**
- * Number of vertices per quad (two triangles).
- * All geometry is rendered as instanced quads.
- */
-export const VERTICES_PER_QUAD = 6;
-
-// =============================================================================
-// CONVERSION FACTORS
-// =============================================================================
+// Conversion factors
 
 /**
  * Conversion factor from nanoseconds to milliseconds.
@@ -582,31 +493,3 @@ export const NS_TO_MS = 1 / 1_000_000;
  * Multiply milliseconds by this to get nanoseconds (display units).
  */
 export const MS_TO_NS = 1_000_000;
-
-/**
- * Conversion factor from milliseconds to seconds.
- * Used for time label formatting.
- */
-export const MS_TO_SECONDS = 1 / 1000;
-
-/**
- * Conversion factor from milliseconds to microseconds.
- * Used for time label formatting.
- */
-export const MS_TO_MICROSECONDS = 1000;
-
-// =============================================================================
-// FILE FORMAT
-// =============================================================================
-
-/** Length in bytes of magic number in .nanotrace format ("nanotrace\0"). */
-export const MAGIC_NUMBER_LENGTH = 10;
-
-/** Expected format version number for .nanotrace files. */
-export const EXPECTED_FORMAT_VERSION = 1;
-
-/** Compression mode value for uncompressed data. */
-export const COMPRESSION_MODE_NONE = 0;
-
-/** Compression mode value for deflate-compressed data. */
-export const COMPRESSION_MODE_DEFLATE = 1;

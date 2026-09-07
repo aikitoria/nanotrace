@@ -25,7 +25,7 @@ import { TraceOverlays, type HierarchyData } from '../src/utils/types.js';
 import { LABEL_FONT_SIZE, SUBLANE_HEIGHT, MIN_ZONE_LABEL_HEIGHT, SEMANTIC_GROUP_GAP, LANE_PADDING, BLOCK_LANE_PADDING, LANE_EDGE_PADDING } from '../src/utils/constants.js';
 
 function validateOverlayRendering(): void {
-    const draws: Array<{text: string; font: number; y: number}> = [];
+    const draws: Array<{text: string; font: number; x: number; y: number; color: string; alpha: number}> = [];
     const lines: number[] = [];
     const fills: Array<{x: number; y: number; width: number; height: number; color: string; alpha: number}> = [];
     let font = '';
@@ -39,14 +39,21 @@ function validateOverlayRendering(): void {
             if (height === 2) lines.push(y);
             fills.push({x, y, width, height, color: ctx.fillStyle as string, alpha: ctx.globalAlpha});
         },
-        measureText(text: string) { return {width: text.length * parseFloat(font) / 2}; },
-        fillText(text: string, _x: number, y: number) { draws.push({text, font: parseFloat(font), y}); }
+        measureText(text: string) {
+            const size = Number(/([\d.]+)px/.exec(font)?.[1]);
+            return {width: text.length * size / 2, fontBoundingBoxAscent: size * 0.8,
+                fontBoundingBoxDescent: size * 0.2};
+        },
+        fillText(text: string, x: number, y: number) {
+            draws.push({text, font: Number(/([\d.]+)px/.exec(font)?.[1]), x, y,
+                color: ctx.fillStyle as string, alpha: ctx.globalAlpha});
+        }
     } as unknown as CanvasRenderingContext2D;
     const overlays = new TraceOverlays(2, [[0]]);
     overlays.startsX.set([100000, 400000]);
     overlays.endsX.set([400000, 800000]);
-    overlays.labels[0] = 'Slot 0 Attention Layer 12';
-    overlays.labels[1] = 'Slot 1 MoE Layer 12';
+    overlays.labels[0] = 'mina::kernels::Read input';
+    overlays.labels[1] = 'mina::components::Process data';
     overlays.colors.set([0x4080c0, 0xc08040]);
     const empty = {count: 0, startsX: new Float64Array(), endsX: new Float64Array()};
     const hierarchy = {
@@ -64,18 +71,66 @@ function validateOverlayRendering(): void {
     const visible = new Uint8Array([1]);
     const render = () => renderer.render(rows, visible, new Uint32Array());
     render();
-    const zoneSize = LABEL_FONT_SIZE * SUBLANE_HEIGHT * camera.zoomY * 300 / MIN_ZONE_LABEL_HEIGHT;
-    if (draws.length !== 2 || draws.some(draw => Math.abs(draw.font - zoneSize * 2 / 3) > 1e-8))
-        throw new Error('Non-hover semantic labels must use two-thirds zone font size');
-    if (draws.some(draw => draw.y + draw.font / 2 >= 270))
+    if (draws[0]?.text !== 'Read input' || draws[1]?.text !== 'Process data'
+        || overlays.labels[0] !== 'mina::kernels::Read input'
+        || overlays.labels[1] !== 'mina::components::Process data')
+        throw new Error('Drawn labels must shorten both namespaces without changing trace metadata');
+    const zoneSize = Math.round(LABEL_FONT_SIZE * SUBLANE_HEIGHT * camera.zoomY * 300 / MIN_ZONE_LABEL_HEIGHT);
+    if (draws.length !== 2 || draws.some((draw, index) => Math.abs(draw.font - zoneSize) > 1e-8
+        || draw.color !== `#${overlays.colors[index].toString(16).padStart(6, '0')}` || draw.alpha !== 1))
+        throw new Error('Region captions must use zone font size, their region color and full opacity');
+    if (draws.some(draw => draw.y + draw.font * 0.2 >= 270))
         throw new Error('Semantic labels must stay above the tracks');
     if (lines.length !== 2 || lines.some(y => Math.abs(y - 270) > 0.001))
         throw new Error('Semantic highlight lines must align with the outer group frame');
-    const expectedLabelY = 270 - (SEMANTIC_GROUP_GAP - LANE_EDGE_PADDING) * camera.zoomY * 300 + draws[0].font / 2 + 4;
+    const expectedLabelY = Math.round(270 - (SEMANTIC_GROUP_GAP - LANE_EDGE_PADDING) * camera.zoomY * 300 / 2
+        + zoneSize * 0.3);
     if (draws.some(draw => Math.abs(draw.y - expectedLabelY) > 0.001))
-        throw new Error('Region labels must be lowered by four screen pixels');
+        throw new Error('Region labels must be centered in the existing group gap');
     if (fills.length !== 2 || fills.some(fill => fill.height !== 2 || fill.alpha !== 1))
         throw new Error('Non-hover regions must draw only opaque horizontal lines');
+    camera.zoom = 0.49;
+    camera.xZoomMultiplier = 1 / camera.zoom;
+    render();
+    if (Number(draws.length) !== 0 || lines.length !== 2)
+        throw new Error('Region captions must hide with zone captions while keeping their lines');
+    camera.zoom = 0.5;
+    camera.xZoomMultiplier = 1 / camera.zoom;
+    render();
+    if (Number(draws.length) !== 2)
+        throw new Error('Region captions must appear at the same zoom threshold as zone captions');
+    camera.zoom = 5;
+    camera.xZoomMultiplier = 0.2;
+    render();
+    renderer.setTrackLabelWidth(500);
+    render();
+    if (fills.some(fill => fill.x < 500)
+        || renderer.findSemanticRangeAtPosition(490, expectedLabelY, visible).index !== -1)
+        throw new Error('Scaled track-label width must update both rendering and hit-test clipping');
+    renderer.setTrackLabelWidth(0);
+    render();
+    if (!fills.some(fill => fill.x < 500))
+        throw new Error('Shrinking track labels must restore the available timeline space');
+    for (const ratio of [1, 1.25, 1.5, 2]) {
+        Object.defineProperty(globalThis, 'devicePixelRatio', {value: ratio, configurable: true});
+        ctx.canvas.width = 800 * ratio;
+        ctx.canvas.height = 600 * ratio;
+        camera.x = 0.1234;
+        camera.y = 0.0012;
+        camera.zoom = 5.37;
+        render();
+        if (draws.length !== 2 || draws.some(draw => [draw.x, draw.y, draw.font]
+            .some(value => Math.abs(value * ratio - Math.round(value * ratio)) > 1e-8)))
+            throw new Error('Label positions, baselines and font sizes must align to device pixels');
+        if (!lines.some(y => Math.abs(y * ratio - Math.round(y * ratio)) > 1e-4))
+            throw new Error('Text alignment must not round the underlying trace geometry');
+    }
+    Object.defineProperty(globalThis, 'devicePixelRatio', {value: 1, configurable: true});
+    ctx.canvas.width = 800;
+    ctx.canvas.height = 600;
+    camera.x = camera.y = 0;
+    camera.zoom = 5;
+    render();
     const first = renderer.findSemanticRangeAtPosition(500, draws[0].y, visible);
     const second = renderer.findSemanticRangeAtPosition(520, 290, visible);
     if (first.index !== 0 || !first.header || second.index !== 1 || second.header)
@@ -106,14 +161,18 @@ function validateOverlayRendering(): void {
         || String(semanticGroupTopRows(4, groups, new Uint8Array([0, 1, 1, 0]))) !== '0,1,1,0'
         || String(semanticGroupTopRows(4, groups, new Uint8Array(4))) !== '0,0,0,0')
         throw new Error('Group spacing must follow the first visible row and disappear for hidden groups');
-    const colors = new Set<number>();
-    for (const slot of [0, 1]) for (const stage of ['Attention', 'Expert', 'Merge']) {
-        const color = semanticRangeColor(`Slot ${slot} ${stage} Layer 3`, 0);
-        colors.add(color);
-        if (color !== semanticRangeColor(`Slot ${slot} ${stage} Layer 77`, 1))
-            throw new Error('Semantic colors must be stable across model layers');
+    for (const source of [0, 0x102030, 0x4080c0, 0xc08040, 0xffffff]) {
+        const color = semanticRangeColor(source);
+        const channels = [16, 8, 0].map(shift => {
+            const channel = ((color >> shift) & 255) / 255;
+            return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+        const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+        if (luminance < 0.395 || color !== semanticRangeColor(source))
+            throw new Error('Region colors must be readable and deterministic for recorded RGB values');
     }
-    if (colors.size !== 6) throw new Error('The two banks must use six distinct slot/stage colors');
+    if (semanticRangeColor(0xffffff) !== 0xffffff)
+        throw new Error('Bright recorded region colors must remain unchanged');
 }
 
 function validateSharedTooltip(hierarchy: HierarchyData): void {
@@ -442,12 +501,6 @@ function validateOverlays(full: ParsedTraceData, projected: ParsedTraceData): vo
         throw new Error('An annotation allocated a visible track');
     if (annotations && !projected.overlays?.count)
         throw new Error('Annotations were lost during projection');
-    if (full.kernelName === 'CPU semantic metadata') {
-        if (projected.overlays?.count !== 1 || projected.overlays.groupRows[0].length !== 2)
-            throw new Error('One CUDA-thread envelope must span both rank and worker rows');
-        if (!projected.formatDescriptors.some(format => format.labelString === 'SyntheticCompute'))
-            throw new Error('Component namespace was not hidden in display labels');
-    }
     const ranges = projected.overlays;
     let sourceCount = 0;
     for (let zone = 0; zone < full.zones.count; ++zone)

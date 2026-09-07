@@ -1,22 +1,7 @@
 /**
- * Type definitions for trace data structures and visualization hierarchy (SoA version).
- *
- * Data flow:
- * 1. Binary .nanotrace file is parsed directly into SoA structures (TracksSoA, ZonesSoA, BlocksSoA)
- * 2. buildHierarchy() builds hierarchical acceleration structures (BlockLanesSoA, LanesSoA)
- * 3. HierarchyData is uploaded to GPU for rendering
- *
- * Memory layout:
- * - All data stored in TypedArrays (Structure of Arrays)
- * - Times stored as Uint32Array in nanoseconds (not float milliseconds)
- * - Colors packed as Uint8Array (3 bytes per zone)
- * - Variable-length params stored in pooled arrays with offset/count
- * - Zero intermediate JavaScript objects during parsing
- *
- * Coordinate system:
- * - X axis: Time in nanoseconds (SoA storage), converted to milliseconds for rendering
- * - Y axis: World space coordinates, origin at bottom, stacks upward
- * - All spatial constants are in world space units
+ * Trace geometry uses typed arrays: Float64 nanosecond timestamps, packed RGB
+ * bytes, and pooled parameters addressed by offset and count. Rendering converts
+ * time to milliseconds; Y positions use world units and increase upward.
  */
 
 /**
@@ -37,7 +22,7 @@ export interface WorldPosition {
     y: number;                       // Vertical position in world space
 }
 
-/** Result from hierarchical hit detection (findZoneAtPosition). SoA version returns indices. */
+/** Result from hierarchical hit detection (findZoneAtPosition). Returns array indices. */
 export interface FindZoneResult {
     zoneIdx: number;                 // Zone index in ZonesSoA (-1 if not found)
     blockIdx: number;                // Block index in BlocksSoA (-1 if not found)
@@ -248,10 +233,6 @@ export class SMAccelerator {
     }
 }
 
-/**
- * HierarchyData - Complete visualization hierarchy using SoA structures.
- * Replaces the old object-based hierarchy for massive memory reduction.
- */
 /** Flat overlays never participate in row layout or zone hit testing. */
 export class TraceOverlays {
     readonly groupIndices: Uint32Array;

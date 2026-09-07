@@ -42,7 +42,13 @@ jobs:
 
       - name: Build
         working-directory: ./visualizer
+        env:
+          NANOTRACE_GIT_HASH: ${{ github.sha }}
         run: npm run build
+
+      - name: Validate PWA deployment
+        working-directory: ./visualizer
+        run: npm run validate:pwa
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

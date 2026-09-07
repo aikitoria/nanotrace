@@ -11,10 +11,12 @@ GPU `%globaltimer` through the CUPTI clock into the CPU reference clock.
 
 ## Requirements
 
-- CUDA 13.3 or newer;
+- CUDA and CUPTI 13.3 or newer;
 - a Blackwell GPU with HES support;
 - CMake 3.18 or newer;
-- a C++20 compiler.
+- a C++20 compiler;
+- libiberty development headers (`libiberty/demangle.h`) and library;
+- Ninja for the build commands below.
 
 The standalone build targets architecture-specific `sm_120a`.
 
@@ -24,6 +26,11 @@ The standalone build targets architecture-specific `sm_120a`.
 cmake -S . -B build -GNinja -DBUILD_EXAMPLES=ON
 cmake --build build
 ~~~
+
+CMake uses the toolkit's `CUDA::cupti` library by default. To select another
+installed CUPTI library, configure with
+`-DNANOTRACE_CUPTI_LIBRARY=/path/to/libcupti.so`. The collector checks the
+CUPTI runtime version and requires HES support.
 
 ## Unified tracing
 
@@ -110,6 +117,33 @@ selector is only required when otherwise matching kernels from more than one
 CUDA context. For repeated launches, blocks in the trace buffer are ordered by
 invocation; Nanotrace builds the hardware-event parent intervals and restores
 the block ID within each launch.
+
+## Graph regions
+
+`GpuProcessTrace::RegisterGraphNode()` associates CUDA graph and node tools IDs
+with a name and `GpuGraphRange` entries. A range describes an envelope of
+existing hardware events; registration adds no marker kernels. Assign a distinct
+`instance` to each disjoint scope, even when labels match.
+
+For ranges with `dynamic_track = true`, call `RecordGraphLaunch()` with the
+track name for that launch and register a launch-anchor node. For device loops,
+`MarkGraphIterationEnd()` identifies an existing node that bounds iterations.
+A fixed-count loop can reuse a node for different named ranges. Set each
+range's `repetition` and `repeat_count` to select its occurrence within the loop;
+occurrences count independently per node and reset at each graph launch.
+The collector uses these explicit IDs and boundaries, not kernel-name patterns.
+It refreshes conditional-body clone IDs at `GRAPHEXEC_CREATED` and retains the
+mapping for deferred processing after graph destruction. Ambiguous launch
+attribution fails capture.
+
+CPU slices can carry a string `semantic_range` argument to annotate the parent
+thread's worker group. Record it on the dispatching thread; workers need no
+copies of the same annotation. The viewer derives groups from serialized track
+parents and preserves event names and timing.
+
+The optional `kernel_name_prefix_to_strip` constructor argument shortens hardware
+kernel names in the producer. The public viewer does not rewrite application
+names.
 
 ## Device instrumentation
 

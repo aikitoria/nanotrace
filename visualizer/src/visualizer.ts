@@ -27,6 +27,7 @@ import {
     HierarchyData
 } from './utils/types.js';
 import { formatDuration } from './utils/soa-helpers.js';
+import { snapTextPixel } from './utils/text-layout.js';
 import {
     AggregateSelectionStatistics,
     type ZoneStatistics
@@ -40,13 +41,13 @@ import {
     MAX_ZOOM_Y,
     PAN_SPEED,
     SELECTION_EPSILON,
-    TRACK_LABEL_WIDTH,
     TIMELINE_HEIGHT,
     INITIAL_ZOOM_PADDING,
     INITIAL_BASE_ZOOM,
     MIN_SELECTION_DISTANCE,
     MIN_ZONE_LABEL_HEIGHT,
     LABEL_FONT_SIZE,
+    TRACK_LABEL_WIDTH,
     MIN_LABEL_FONT_SIZE,
     MIN_LABEL_ZOOM_Y,
     SUBLANE_HEIGHT,
@@ -170,6 +171,7 @@ export class ZoneVisualizer {
     private expandedKernelGroups: ExpandedKernelGroup[] = [];
     private kernelFrames: HTMLElement[] = [];
     private laneLabels: HTMLElement[] = [];
+    private trackLabelWidth = 0;
 
     // Trace metadata
     private TIME_RANGE: number = BASE_TIME_RANGE;
@@ -518,6 +520,7 @@ export class ZoneVisualizer {
         // Clean up lane labels
         this.laneLabelsContainer.innerHTML = '';
         this.laneLabels = [];
+        this.trackLabelWidth = 0;
 
         // Hide UI elements
         this.tooltip.classList.remove('visible');
@@ -669,7 +672,7 @@ export class ZoneVisualizer {
     }
 
     /**
-     * Parses binary trace file and builds visualization hierarchy (SoA version).
+     * Parses binary trace file and builds visualization hierarchy.
      *
      * This method:
      * 1. Parses the binary .nanotrace format directly into SoA structures
@@ -709,6 +712,7 @@ export class ZoneVisualizer {
         // Create labels for generic CPU, GPU stream, and intra-kernel tracks.
         this.laneLabelsContainer.innerHTML = '';
         this.laneLabels = [];
+        this.trackLabelWidth = 0;
         this.treeDisclosures.clear();
         this.treeParentRows = new Int32Array(parsedData.trackNames.length);
         this.treeParentRows.fill(-1);
@@ -1851,23 +1855,24 @@ export class ZoneVisualizer {
 
         const rect = this.canvas.getBoundingClientRect();
         const aspect = rect.width / rect.height;
+        this.camera.zoom = INITIAL_BASE_ZOOM;
+        const topPadding = TIMELINE_HEIGHT + 14;
+        const topNdc = 1 - 2 * topPadding / rect.height;
+        this.camera.y = topNdc / this.camera.zoom - this.worldHeight;
+        this.updateLaneLabels();
         const leftPadding = Math.min(
-            TRACK_LABEL_WIDTH + 16, rect.width * 0.4);
+            this.trackLabelWidth + 16, rect.width * 0.4);
         const rightPadding = INITIAL_ZOOM_PADDING / 2;
         const ndcLeft = 2 * leftPadding / rect.width - 1;
         const ndcRight = 1 - 2 * rightPadding / rect.width;
         const desiredZoomX = (ndcRight - ndcLeft) * aspect / this.TIME_RANGE;
 
-        this.camera.zoom = INITIAL_BASE_ZOOM;
         this.camera.xZoomMultiplier = desiredZoomX / this.camera.zoom;
         this.camera.x = ndcLeft * aspect / desiredZoomX;
-        const topPadding = TIMELINE_HEIGHT + 14;
-        const topNdc = 1 - 2 * topPadding / rect.height;
-        this.camera.y = topNdc / this.camera.zoom - this.worldHeight;
     }
 
     /**
-     * Delegates zone label rendering to LabelRenderer (SoA version).
+     * Delegates zone label rendering to LabelRenderer.
      * Convenience wrapper that passes instance data to the renderer.
      */
     renderZoneLabels(): void {
@@ -1892,18 +1897,20 @@ export class ZoneVisualizer {
             for (const label of this.laneLabels) {
                 label.style.display = 'none';
             }
+            this.setTrackLabelWidth(0);
             return;
         }
 
         const rect = this.canvas.getBoundingClientRect();
-        const labelWidth = TRACK_LABEL_WIDTH;
+        let gutterWidth = 0;
 
         const timelineHeight = TIMELINE_HEIGHT;
         const screenZoneHeight = SUBLANE_HEIGHT * this.camera.zoomY
             * (rect.height / 2);
-        const labelFontSize = LABEL_FONT_SIZE * screenZoneHeight
-            / MIN_ZONE_LABEL_HEIGHT;
+        const labelFontSize = snapTextPixel(LABEL_FONT_SIZE * screenZoneHeight
+            / MIN_ZONE_LABEL_HEIGHT, devicePixelRatio);
         const labelScale = labelFontSize / LABEL_FONT_SIZE;
+        const labelWidth = Math.ceil(TRACK_LABEL_WIDTH * labelScale);
 
         const lanes = this.hierarchy.lanes;
         for (let i = 0; i < lanes.count; i++) {
@@ -1949,6 +1956,7 @@ export class ZoneVisualizer {
                     continue;
                 }
 
+                gutterWidth = Math.max(gutterWidth, labelWidth);
                 this.laneLabels[i].style.display = 'flex';
                 this.laneLabels[i].style.fontSize = `${labelFontSize}px`;
                 this.laneLabels[i].style.gap = `${5 * labelScale}px`;
@@ -1960,6 +1968,14 @@ export class ZoneVisualizer {
                 this.laneLabels[i].style.display = 'none';
             }
         }
+        this.setTrackLabelWidth(gutterWidth);
+    }
+
+    private setTrackLabelWidth(width: number): void {
+        if (this.trackLabelWidth === width) return;
+        this.trackLabelWidth = width;
+        this.laneLabelsContainer.style.width = `${width}px`;
+        this.labelRenderer?.setTrackLabelWidth(width);
     }
 
     /** Positions separate frames around the visible GPU and CPU track groups. */
@@ -2236,7 +2252,7 @@ export class ZoneVisualizer {
 
         const labelGutterWidth = Math.min(
             this.canvas.width - 1,
-            Math.round(TRACK_LABEL_WIDTH * devicePixelRatio));
+            Math.round(this.trackLabelWidth * devicePixelRatio));
         const traceLeftNdc = this.camera.x * scale_x;
         const traceRightNdc = (this.TIME_RANGE + this.camera.x) * scale_x;
         const laneBackgroundLeft = Math.max(

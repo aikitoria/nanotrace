@@ -7,6 +7,7 @@
  */
 
 import { Camera } from '../utils/camera.js';
+import { displayLabel, snapTextPixel } from '../utils/text-layout.js';
 import { HierarchyData } from '../utils/types.js';
 import { formatDuration, NS_TO_MS } from '../utils/soa-helpers.js';
 import {
@@ -14,7 +15,6 @@ import {
     SEMANTIC_GROUP_GAP,
     SUBLANE_HEIGHT,
     LABEL_COLOR,
-    TRACK_LABEL_WIDTH,
     MIN_BLOCK_LABEL_WIDTH,
     MIN_ZONE_LABEL_WIDTH,
     MIN_ZONE_LABEL_HEIGHT,
@@ -163,6 +163,9 @@ export class LabelRenderer {
     private blockIndex: TemporalWidthIndex;
     private overlayIndex: TemporalWidthIndex;
 
+    private trackLabelWidth = 0;
+    private textPixelRatio = 1;
+    private textBaselineOffset = 0;
     private hoveredSemanticRange = -1;
     private dirty = true;
     private lastCameraX = Number.NaN;
@@ -194,6 +197,12 @@ export class LabelRenderer {
             hierarchy.blocks.endsX,
             hierarchy.blocks.count,
             hierarchy.totalDurationNs);
+    }
+
+    setTrackLabelWidth(width: number): void {
+        if (this.trackLabelWidth === width) return;
+        this.trackLabelWidth = width;
+        this.invalidate();
     }
 
     updateCamera(camera: Camera): void {
@@ -229,7 +238,7 @@ export class LabelRenderer {
     findSemanticRangeAtPosition(x: number, y: number, rowVisible: Uint8Array): {index: number; header: boolean} {
         const width = this.labelCtx.canvas.width / devicePixelRatio;
         const height = this.labelCtx.canvas.height / devicePixelRatio;
-        if (x < TRACK_LABEL_WIDTH || x >= width || y < 0 || y >= height)
+        if (x < this.trackLabelWidth || x >= width || y < 0 || y >= height)
             return {index: -1, header: false};
         const nsToPixels = NS_TO_MS * this.camera.zoomX * height / 2;
         const xOffset = this.camera.x * this.camera.zoomX * height / 2 + width / 2;
@@ -300,24 +309,30 @@ export class LabelRenderer {
         const yScale = zoomY * height / 2;
         const yOffset = height / 2 - this.camera.y * yScale;
         const visibleStartNs = Math.max(
-            0, (TRACK_LABEL_WIDTH - xOffset) / nanosecondsToPixels);
+            0, (this.trackLabelWidth - xOffset) / nanosecondsToPixels);
         const visibleEndNs = Math.min(
             this.hierarchy.totalDurationNs,
             (width - xOffset) / nanosecondsToPixels);
         if (visibleEndNs < visibleStartNs) return;
 
         const zoneScreenHeight = SUBLANE_HEIGHT * yScale;
-        const fontSize = LABEL_FONT_SIZE * zoneScreenHeight
-            / MIN_ZONE_LABEL_HEIGHT;
+        const fontSize = snapTextPixel(LABEL_FONT_SIZE * zoneScreenHeight
+            / MIN_ZONE_LABEL_HEIGHT, dpr);
 
         this.labelCtx.save();
         this.labelCtx.scale(dpr, dpr);
         this.labelCtx.font = `${fontSize}px ${LABEL_FONT_FAMILY}`;
         this.labelCtx.textAlign = 'left';
-        this.labelCtx.textBaseline = 'middle';
+        this.labelCtx.textBaseline = 'alphabetic';
+        this.textPixelRatio = dpr;
+        const metrics = this.labelCtx.measureText('Mg');
+        const ascent = metrics.fontBoundingBoxAscent ?? fontSize * 0.8;
+        const descent = metrics.fontBoundingBoxDescent ?? fontSize * 0.2;
+        this.textBaselineOffset = (ascent - descent) / 2;
         const fontScale = fontSize / LABEL_FONT_SIZE;
 
-        if (zoomY >= MIN_LABEL_ZOOM_Y && fontSize >= MIN_LABEL_FONT_SIZE) {
+        const drawLabels = zoomY >= MIN_LABEL_ZOOM_Y && fontSize >= MIN_LABEL_FONT_SIZE;
+        if (drawLabels) {
             this.renderBlockLabels(
                 rowOffsets, rowVisible, zoneVisibility,
                 nanosecondsToPixels, xOffset, yScale, yOffset,
@@ -330,30 +345,30 @@ export class LabelRenderer {
                 zoneScreenHeight, fontSize, fontScale);
         }
         this.renderSemanticRanges(rowVisible,
-            nanosecondsToPixels, xOffset, yScale, yOffset, width, height, fontSize);
+            nanosecondsToPixels, xOffset, yScale, yOffset, width, height, fontScale, drawLabels);
         this.labelCtx.restore();
     }
 
     private renderSemanticRanges(
         rowVisible: Uint8Array,
         nanosecondsToPixels: number, xOffset: number,
-        yScale: number, yOffset: number, width: number, height: number, zoneFontSize: number
+        yScale: number, yOffset: number, width: number, height: number, fontScale: number, drawLabels: boolean
     ): void {
         // Labels occupy the reserved gap between groups. The range line sits
         // on the group's outer frame; row and zone heights stay unchanged.
         const ctx = this.labelCtx;
         const ranges = this.hierarchy.overlays;
         const {tops: groupTops, bottoms: groupBottoms} = this.semanticGroupBounds(rowVisible, yScale, yOffset);
-        const compactFontSize = zoneFontSize * 2 / 3;
-        ctx.font = `${compactFontSize}px ${LABEL_FONT_FAMILY}`;
-        const visibleStart = Math.max(0, (TRACK_LABEL_WIDTH - xOffset) / nanosecondsToPixels);
+        const gapHeight = (SEMANTIC_GROUP_GAP - LANE_EDGE_PADDING) * yScale;
+        const horizontalPadding = ZONE_LABEL_PADDING_X * fontScale;
+        const visibleStart = Math.max(0, (this.trackLabelWidth - xOffset) / nanosecondsToPixels);
         const visibleEnd = Math.min(this.hierarchy.totalDurationNs, (width - xOffset) / nanosecondsToPixels);
         this.overlayIndex.visitCandidates(1 / nanosecondsToPixels, visibleStart, visibleEnd, index => {
             const group = ranges.groupIndices[index];
             const trackTop = groupTops[group];
             if (groupBottoms[group] < 0 || trackTop > height) return;
-            const top = trackTop - (SEMANTIC_GROUP_GAP - LANE_EDGE_PADDING) * yScale;
-            const left = Math.max(TRACK_LABEL_WIDTH, ranges.startsX[index] * nanosecondsToPixels + xOffset);
+            const top = trackTop - gapHeight;
+            const left = Math.max(this.trackLabelWidth, ranges.startsX[index] * nanosecondsToPixels + xOffset);
             const right = Math.min(width, ranges.endsX[index] * nanosecondsToPixels + xOffset);
             if (right <= left) return;
             ctx.save();
@@ -363,11 +378,11 @@ export class LabelRenderer {
             ctx.fillStyle = `#${ranges.colors[index].toString(16).padStart(6, '0')}`;
             ctx.globalAlpha = 1;
             ctx.fillRect(left, trackTop, right - left, 2);
-            const label = compactFontSize >= MIN_LABEL_FONT_SIZE
-                ? this.fitLabel(ranges.labels[index], right - left - 6) : null;
+            const label = drawLabels && right - left >= MIN_ZONE_LABEL_WIDTH
+                ? this.fitLabel(displayLabel(ranges.labels[index]), right - left - horizontalPadding
+                    - LABEL_CLIP_MARGIN * fontScale) : null;
             if (label !== null) {
-                ctx.globalAlpha = 0.85;
-                ctx.fillText(label, left + 3, top + compactFontSize / 2 + 4);
+                this.drawText(label, left + horizontalPadding, top + gapHeight / 2);
             }
             ctx.restore();
         });
@@ -377,7 +392,7 @@ export class LabelRenderer {
             const top = Math.max(0, groupTops[group]);
             const rowHeight = Math.min(height, groupBottoms[group]) - top;
             if (rowHeight <= 0) return;
-            const left = Math.max(TRACK_LABEL_WIDTH, ranges.startsX[index] * nanosecondsToPixels + xOffset);
+            const left = Math.max(this.trackLabelWidth, ranges.startsX[index] * nanosecondsToPixels + xOffset);
             const right = Math.min(width, ranges.endsX[index] * nanosecondsToPixels + xOffset);
             if (right <= left) return;
             ctx.save();
@@ -438,7 +453,7 @@ export class LabelRenderer {
                 const screenRight = blocks.endsX[blockIndex]
                     * nanosecondsToPixels + xOffset;
                 const visibleLeft = Math.max(
-                    screenLeft, TRACK_LABEL_WIDTH);
+                    screenLeft, this.trackLabelWidth);
                 const visibleWidth = screenRight - visibleLeft;
                 if (visibleWidth < MIN_BLOCK_LABEL_WIDTH) return;
 
@@ -450,7 +465,7 @@ export class LabelRenderer {
                     visibleWidth - horizontalPadding
                         - LABEL_CLIP_MARGIN * fontScale);
                 if (label !== null) {
-                    this.labelCtx.fillText(
+                    this.drawText(
                         label,
                         visibleLeft + horizontalPadding,
                         screenTop + headerHeight / 2);
@@ -498,7 +513,7 @@ export class LabelRenderer {
                 const screenRight = zones.endsX[zoneIndex]
                     * nanosecondsToPixels + xOffset;
                 const visibleLeft = Math.max(
-                    screenLeft, TRACK_LABEL_WIDTH);
+                    screenLeft, this.trackLabelWidth);
                 const visibleWidth = screenRight - visibleLeft;
                 const fullLabel = visibleWidth >= MIN_ZONE_LABEL_WIDTH;
 
@@ -506,7 +521,7 @@ export class LabelRenderer {
                     if (zones.hasChildren[zoneIndex] !== 0
                         && visibleWidth >= fontSize
                         && zoneScreenHeight >= fontSize) {
-                        this.labelCtx.fillText(
+                        this.drawText(
                             zones.expanded[zoneIndex] !== 0
                                 ? '\u25be' : '\u25b8',
                             visibleLeft + horizontalPadding,
@@ -527,11 +542,17 @@ export class LabelRenderer {
                     visibleWidth - horizontalPadding
                         - LABEL_CLIP_MARGIN * fontScale);
                 if (label !== null) {
-                    this.labelCtx.fillText(
+                    this.drawText(
                         label, visibleLeft + horizontalPadding,
                         screenCenterY);
                 }
             });
+    }
+
+    private drawText(text: string, x: number, centerY: number): void {
+        this.labelCtx.fillText(text,
+            snapTextPixel(x, this.textPixelRatio),
+            snapTextPixel(centerY + this.textBaselineOffset, this.textPixelRatio));
     }
 
     private formatZoneName(zoneIndex: number): string {
@@ -547,7 +568,7 @@ export class LabelRenderer {
                 zones.paramsPool[
                     parameterOffset + parameterIndex].toString());
         }
-        return result;
+        return displayLabel(result);
     }
 
     private formatBlockName(blockIndex: number): string {
@@ -558,7 +579,7 @@ export class LabelRenderer {
             '{blockLinear}', blocks.gridIds[blockIndex].toString());
         result = result.replace(
             '{clusterLinear}', blocks.clusterIds[blockIndex].toString());
-        return result;
+        return displayLabel(result);
     }
 
     /** Returns the longest exact prefix that fits without scaling the text. */
