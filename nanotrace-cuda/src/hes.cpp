@@ -817,6 +817,7 @@ namespace nanotrace
                 executions.push_back(index);
             };
 
+            const size_t first_kernel = _kernel_events.size();
             for (HesKernelEvent& kernel : _raw_kernel_events)
             {
                 if (kernel.start_ns == 0 || kernel.end_ns < kernel.start_ns
@@ -828,10 +829,30 @@ namespace nanotrace
 
                 kernel.track_id = get_stream_track(kernel.device_id,
                     kernel.context_id, kernel.stream_id, false);
-                record_graph_execution(kernel.device_id, kernel.context_id,
-                    kernel.graph_id, kernel.correlation_id,
-                    kernel.start_ns, kernel.end_ns);
                 _kernel_events.push_back(std::move(kernel));
+            }
+
+            // CUPTI buffers arrive out of timestamp order. Grouping in arrival
+            // order can split one launch, then leave separate envelopes after
+            // later records bridge the apparent idle gap. Sort graph inputs by
+            // start time, preserving raw event order for compact serialization.
+            std::vector<const HesKernelEvent*> graph_kernels;
+            graph_kernels.reserve(_kernel_events.size() - first_kernel);
+            for (size_t index = first_kernel; index < _kernel_events.size(); ++index)
+            {
+                if (_kernel_events[index].graph_id != 0)
+                    graph_kernels.push_back(&_kernel_events[index]);
+            }
+            std::sort(graph_kernels.begin(), graph_kernels.end(),
+                [](const HesKernelEvent* left, const HesKernelEvent* right)
+                {
+                    return left->start_ns < right->start_ns;
+                });
+            for (const HesKernelEvent* kernel : graph_kernels)
+            {
+                record_graph_execution(kernel->device_id, kernel->context_id,
+                    kernel->graph_id, kernel->correlation_id,
+                    kernel->start_ns, kernel->end_ns);
             }
 
             _raw_kernel_events.clear();
